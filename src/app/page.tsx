@@ -903,7 +903,7 @@ function RentAccountsView() {
 
       <div className="mt-6">
         <h3 className="text-sm font-semibold text-slate-900">Marketplace — rent in one click</h3>
-        <p className="text-xs text-slate-500 mt-1">Payment is mock for now (instant success). Replace <code className="bg-slate-50 px-1 rounded">/api/rentals/pay</code> with Razorpay/Stripe later — rented account is auto-added to your Accounts & sender dropdown.</p>
+        <p className="text-xs text-slate-500 mt-1">Rented account is auto-added to your Accounts & sender dropdown.</p>
         {loading ? <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">Loading marketplace…</div> : (
           <div className="mt-3 grid sm:grid-cols-2 gap-3">
             {pool.map((p: any) => {
@@ -936,12 +936,11 @@ function RentAccountsView() {
       <div className="mt-6 bg-amber-50 border border-amber-200 rounded-2xl p-4">
         <div className="text-xs font-bold tracking-widest text-amber-800">HOW IT WORKS</div>
         <ol className="mt-2 text-xs text-amber-900/80 leading-6 list-decimal list-inside">
-          <li>Click <b>Pay & Rent</b> — payment succeeds instantly (mock).</li>
+          <li>Click <b>Pay & Rent</b> — rented account is added instantly.</li>
           <li>Account is <b>auto-added</b> to your Accounts & appears in <b>Create Campaign → Sender</b> dropdown.</li>
           <li>Choose it for any campaign — sending uses the rented account&apos;s session, not your personal one.</li>
           <li>After 24 hours it&apos;s <b>auto-removed</b> and returns to the pool. No manual cleanup.</li>
         </ol>
-        <div className="text-[11px] text-amber-700/70 mt-2">To use real payments: wire Razorpay/Stripe in <code className="bg-white px-1 rounded border">src/app/api/rentals/pay/route.ts</code> and verify signature before creating the rental.</div>
       </div>
     </div>
   );
