@@ -624,7 +624,7 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
       const body: any = mode === "signup" ? { name, email, password: pass, telegramUsername: tgUser } : { email, password: pass };
       const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
-      setUser(j.user); onNav("connect");
+      setUser(j.user); onNav("dashboard");
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   };
   return (
@@ -678,6 +678,10 @@ function Connect({ onNav }: { onNav: (v: string) => void }) {
   return (
     <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-6">
       <div className="bg-white border border-[#E2E8F0] rounded-[24px] p-8 w-full max-w-md shadow-2xl shadow-black/10">
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3 mb-5 flex gap-2.5">
+          <span className="w-7 h-7 rounded-full bg-amber-500 text-white flex items-center justify-center shrink-0 text-sm">⚠️</span>
+          <p className="text-xs leading-relaxed text-amber-900"><b>We don&apos;t recommend using your personal account.</b> Use a dedicated marketing account or rent one from <b>Rent Accounts</b> — safer for your main Telegram.</p>
+        </div>
         <div className="flex gap-2 mb-6">{[1,2,3].map(n=> <div key={n} className={`flex-1 h-1.5 rounded-full ${n<=step?'bg-[#229ED9]':'bg-[#E2E8F0]'}`} />)}</div>
         <h2 className="text-xl font-extrabold tracking-tight">{count ? "Add Telegram Account" : "Connect Your Telegram Account"}</h2>
         <p className="text-sm text-[#64748B] mb-2 leading-6">{count ? `You have ${count}/10 accounts. Add another number — all linked to this email.` : "We keep your session encrypted server-side (httpOnly cookie). Enter the code Telegram sends you."}</p>
