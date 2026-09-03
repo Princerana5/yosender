@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { verifyToken } from "./auth";
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "princeranarealme@gmail.com").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 
 export function getRequestEmail(req: NextRequest): string {
   const t = req.cookies.get("auth_token")?.value;
@@ -12,7 +12,6 @@ export function getRequestEmail(req: NextRequest): string {
 export function isAdminRequest(req: NextRequest): boolean {
   const email = getRequestEmail(req);
   if (!email) return false;
-  if (ADMIN_EMAILS.length === 0) return true;
   if (ADMIN_EMAILS.includes(email)) return true;
   // team members with any perm count as admin for the panel (scoped by perm)
   try {
@@ -31,7 +30,6 @@ export function getAdminId(req: NextRequest): string | null {
 export function isOwnerAdmin(req: NextRequest): boolean {
   const email = getRequestEmail(req);
   if (!email) return false;
-  if (ADMIN_EMAILS.length === 0) return true;
   return ADMIN_EMAILS.includes(email);
 }
 

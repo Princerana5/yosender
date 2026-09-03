@@ -1216,14 +1216,15 @@ function PlanBadge({ onClick }: { onClick?: () => void }) {
 }
 
 function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: string) => void }) {
-  const { tg, setTg, setView, view, tgAccounts } = useStore() as any;
+  const { tg, setTg, setView, view, tgAccounts, user } = useStore() as any;
   const [open, setOpen] = useState(false);
   const accCount = tgAccounts?.length || 0;
+  const isAdmin = user?.email?.toLowerCase() === "princeranarealme@gmail.com";
 
   const navGroups: Array<{ label: string; items: Array<[string, any, string]> }> = [
     { label: "Workspace", items: [["dashboard", LayoutDashboard, "Dashboard"], ["plans", Sparkles, "Plans"], ["destinations", Search, "Groups & Joiner"], ["accounts", Users, `Accounts${accCount ? ` · ${accCount}/10` : ""}`]] },
     { label: "Campaigns", items: [["create", Megaphone, "Create Campaign"], ["campaigns", History, "Campaigns"], ["templates", FileText, "Templates"], ["logs", BarChart3, "Delivery Logs"], ["rent", Star, "Rent Accounts"]] },
-    { label: "System", items: [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"], ["admin", ShieldCheck, "Admin"]] },
+    { label: "System", items: isAdmin ? [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"], ["admin", ShieldCheck, "Admin"]] : [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"]] },
   ];
 
   const Nav = ({ onItemClick }: { onItemClick?: () => void }) => (
@@ -2441,6 +2442,11 @@ function AppInner() {
   if (view === "signup") return <Auth mode="signup" onNav={setView} />;
   if (view === "connect") return <Connect onNav={setView} />;
   if (!user) return <Auth mode="login" onNav={setView} />;
+  // Admin only for princeranarealme@gmail.com — redirect others
+  if (view === "admin" && user?.email?.toLowerCase() !== "princeranarealme@gmail.com") {
+    setTimeout(() => setView("dashboard"), 0);
+    return <Shell onNav={setView}><div className="max-w-2xl mx-auto"><div className="bg-white border border-red-200 rounded-2xl p-8 text-center"><h2 className="text-lg font-bold">Admin access required</h2><p className="text-sm text-slate-500 mt-2">Only princeranarealme@gmail.com can access admin.</p></div></div></Shell>;
+  }
   let content: React.ReactNode = null;
   if (view === "dashboard") content = <DashboardView onNav={setView} />;
   else if (view === "destinations") content = <DestinationsView />;
