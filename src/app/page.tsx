@@ -305,14 +305,21 @@ function PricingSection({ onNav }: { onNav: (v: string) => void }) {
     const planId = gatewayPlan.id;
     const b = gatewayPlan.billing;
     const k = `${planId}:${b}`;
+    // Open blank window synchronously inside user gesture — otherwise popup blocker kills it after await
+    const win = window.open("about:blank", "_blank");
+    if (win) win.document.write('<p style="font-family:sans-serif;text-align:center;margin-top:40px">Creating invoice… please wait</p>');
     setCryptoPaying(k);
     try {
       const r = await fetch("/api/payments/crypto/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ planId, billing: b }) });
       const j = await r.json();
       if (!r.ok) throw new Error(j.error);
       setGatewayPlan(null);
-      window.open(j.invoiceUrl, "_blank");
-    } catch (e: any) { alert(e.message); } finally { setCryptoPaying(null); }
+      if (win && !win.closed) win.location.href = j.invoiceUrl;
+      else window.location.href = j.invoiceUrl;
+    } catch (e: any) {
+      if (win && !win.closed) win.close();
+      alert(e.message);
+    } finally { setCryptoPaying(null); }
   };
   const plans = [
     { id: "elite", name: "Elite", daily: "$2", monthly: "$55", per: isMonthly ? "/mo" : "/day", price: isMonthly ? "$55" : "$2", feats: ["10 groups / campaign", isMonthly ? "300 campaigns / month" : "10 campaigns / day", "Repeat min 15 min", "No free rented accounts"], cta: "Buy Now", icon: Gem, iconBg: "bg-slate-50", iconColor: "text-slate-600" },
@@ -1022,6 +1029,8 @@ function PlansView() {
   const payWithCrypto = async () => {
     if (!gatewayPlan) return;
     const k = `${gatewayPlan.id}:${gatewayPlan.billing}`;
+    const win = window.open("about:blank", "_blank");
+    if (win) win.document.write('<p style="font-family:sans-serif;text-align:center;margin-top:40px">Creating invoice… please wait</p>');
     setCryptoPaying(k); setErr(""); setMsg("");
     try {
       const r = await fetch("/api/payments/crypto/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ planId: gatewayPlan.id, billing: gatewayPlan.billing }) });
@@ -1030,9 +1039,13 @@ function PlansView() {
       setCryptoPolling(j.orderId);
       try { const rr = await fetch("/api/payments/crypto/status"); const jj = await rr.json(); if (jj.payments) setCryptoOrders(jj.payments); } catch {}
       setGatewayPlan(null);
-      window.open(j.invoiceUrl, "_blank");
+      if (win && !win.closed) win.location.href = j.invoiceUrl;
+      else window.location.href = j.invoiceUrl;
       setMsg(`Crypto invoice created for ${gatewayPlan.name} ${gatewayPlan.billing} — $${j.amountUsd}. Complete payment in the new tab. Your API key & plan will auto-activate after confirmation.`);
-    } catch (e: any) { setErr(e.message); } finally { setCryptoPaying(null); }
+    } catch (e: any) {
+      if (win && !win.closed) win.close();
+      setErr(e.message);
+    } finally { setCryptoPaying(null); }
   };
   const redeem = async () => {
     if (!key.trim()) { setErr("Enter license key"); return; }
