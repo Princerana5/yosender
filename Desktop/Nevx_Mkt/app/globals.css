@@ -1,0 +1,205 @@
+@import "tailwindcss";
+
+@theme {
+  --color-navy-950: #04120b;
+  --color-navy-900: #061b12;
+  --color-navy-800: #0a251b;
+  --color-navy-700: #0e3325;
+  --color-brand-teal: #00e676;
+  --color-brand-teal-dark: #00c464;
+  --color-brand-yellow: #00e676;
+  --color-brand-yellow-dark: #00c464;
+  --color-chat-bg: #061b12;
+  --color-panel: #0a251b;
+  --color-panel2: #0d2f22;
+  --color-neon: #00e676;
+  --color-mint: #a7f3c7;
+  --color-line: #134e32;
+  --color-telegram: #229ed9;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: #04120b;
+  background-image:
+    radial-gradient(ellipse 60% 40% at 50% -5%, rgba(0, 230, 118, 0.12), transparent),
+    radial-gradient(ellipse 40% 30% at 85% 110%, rgba(0, 230, 118, 0.07), transparent);
+  color: #eafff2;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(0, 230, 118, 0.4);
+  color: #04120b;
+}
+
+/* slim scrollbars for messenger panes */
+.slim-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.slim-scroll::-webkit-scrollbar-thumb {
+  background: #134e32;
+  border-radius: 999px;
+}
+.slim-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes nevx-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes nevx-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes nevx-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes nevx-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 22px rgba(0, 230, 118, 0.28);
+  }
+  50% {
+    box-shadow: 0 0 46px rgba(0, 230, 118, 0.5);
+  }
+}
+
+@keyframes nevx-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 16px rgba(0, 230, 118, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(0, 230, 118, 0);
+  }
+}
+
+.anim-fade-up {
+  animation: nevx-fade-up 0.28s ease both;
+}
+.anim-pop {
+  animation: nevx-pop 0.22s ease both;
+}
+.anim-slide-in {
+  animation: nevx-slide-in 0.25s ease both;
+}
+.anim-glow {
+  animation: nevx-glow 3s ease-in-out infinite;
+}
+.anim-pulse-ring {
+  animation: nevx-pulse-ring 2.4s ease-out infinite;
+}
+
+.feed-transition {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+/* ---------- 8xtel-style dark-green remap ----------
+   The app was first built light; these overrides pull every
+   legacy light utility into the dark-green + neon theme. */
+.bg-white {
+  background-color: #0a251b !important;
+  border-color: rgba(0, 230, 118, 0.14) !important;
+}
+.bg-chat-bg {
+  background-color: #061b12 !important;
+}
+.bg-slate-100 {
+  background-color: #0d2f22 !important;
+}
+.bg-slate-50 {
+  background-color: #0d2f22 !important;
+}
+.bg-cyan-50 {
+  background-color: rgba(0, 230, 118, 0.12) !important;
+}
+.bg-amber-50 {
+  background-color: rgba(0, 230, 118, 0.07) !important;
+}
+.text-navy-950 {
+  color: #eafff2 !important;
+}
+.text-slate-700,
+.text-slate-600 {
+  color: #b9e6c9 !important;
+}
+.text-slate-500,
+.text-slate-400 {
+  color: #7fbd97 !important;
+}
+.border-slate-100,
+.border-slate-200 {
+  border-color: #134e32 !important;
+}
+.text-brand-teal,
+.text-brand-teal-dark {
+  color: #00e676 !important;
+}
+.placeholder\:text-slate-400::placeholder {
+  color: #4d7a5f !important;
+}
+/* neon-on-dark buttons must keep DARK text for contrast */
+.bg-brand-yellow.text-navy-950,
+.bg-brand-yellow .text-navy-950 {
+  color: #04120b !important;
+}
+.shadow-sm {
+  box-shadow: 0 1px 0 rgba(0, 230, 118, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35) !important;
+}
+/* hover states that would otherwise flash light */
+.hover\:bg-slate-100:hover,
+.hover\:bg-slate-200:hover,
+.hover\:bg-slate-50\/60:hover {
+  background-color: #134e32 !important;
+}
+.hover\:bg-cyan-100:hover {
+  background-color: rgba(0, 230, 118, 0.22) !important;
+}
+.hover\:bg-red-100:hover {
+  background-color: rgba(248, 113, 113, 0.25) !important;
+}
+/* native controls on dark */
+select option {
+  background-color: #0a251b;
+  color: #eafff2;
+}
+input[type="number"]::-webkit-inner-spin-button {
+  opacity: 0.4;
+}
