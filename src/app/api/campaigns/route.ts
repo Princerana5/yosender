@@ -58,6 +58,19 @@ export async function PATCH(req: NextRequest) {
   }
   const prev = all[idx];
   const next: any = { ...prev, ...patch };
+  // Server-authored progress always wins: when the sender loop writes logs +
+  // counts to the row, a stale overwriting PATCH from the browser (e.g. an
+  // old logs array, or 0/0 counts without logs) must not erase them.
+  if ((prev.logs?.length || 0) > ((patch.logs as any[])?.length || 0) && patch.logs !== undefined) {
+    next.logs = prev.logs;
+    next.successful = prev.successful;
+    next.failed = prev.failed;
+  }
+  if ((prev.logs?.length || 0) > 0 && ((patch.logs as any[])?.length || 0) === 0 && patch.successful === 0 && patch.failed === 0 && !patch.status) {
+    next.logs = prev.logs;
+    next.successful = prev.successful;
+    next.failed = prev.failed;
+  }
   if (patch.status === "Repeating" && prev.status !== "Repeating") {
     const mins = next.repeatEveryMins || next.delayMins || 15;
     next.nextRunAt = new Date(Date.now() + Number(mins) * 60 * 1000).toISOString();

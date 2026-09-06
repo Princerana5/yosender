@@ -50,19 +50,21 @@ export function StoreProvider({children}:{children:React.ReactNode}){
       const logs=c.logs||[];
       if(logs.length){
         const ok=logs.filter((l:any)=>l.status==="Sent").length;
-        if(c.status==="Running" && logs.length===c.destinations.length){
+        if(c.status==="Running" && logs.length>=c.destinations.length){
           status = ok>0 || c.destinations.length===0 ? "Completed" : "Failed";
           successful=ok; failed=logs.length-ok;
           fetch("/api/campaigns",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({patchId:c.id,patch:{status,successful,failed}})}).catch(()=>{});
         } else if(logs.length) { successful=ok; failed=logs.length-ok; }
       } else if(c.status==="Running"){
+        // Give long campaigns room: 65 destinations need ~2-3 min server-side.
+        // Only mark stale after 15 min, and only when NO server progress exists.
         const ageMs = Date.now() - new Date(c.createdAt).getTime();
-        if(ageMs > 5*60*1000){
+        if(ageMs > 15*60*1000){
           status="Failed"; failed=c.destinations.length; successful=0;
           fetch("/api/campaigns",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({patchId:c.id,patch:{status,failed,successful,logs:[...c.destinations.map((d:string)=>({dest:d,status:"Failed",time:new Date(c.createdAt).toLocaleString(),error:"Send did not complete"}) )]}})}).catch(()=>{});
         }
       }
-      return {id:c.id,name:c.name,destinations:c.destinations,message:c.message,status,successful,failed,createdAt:new Date(c.createdAt).toLocaleString(),logs,repeatIntervalId:c.repeatIntervalId,repeatEveryMins:c.repeatEveryMins,delayMins:c.delayMins,scheduledAt:c.scheduledAt,imagePreview:c.imagePreview};
+      return {id:c.id,name:c.name,destinations:c.destinations,message:c.message,status,successful,failed,createdAt:new Date(c.createdAt).toLocaleString(),logs,repeatIntervalId:c.repeatIntervalId,repeatEveryMins:c.repeatEveryMins,delayMins:c.delayMins,scheduledAt:c.scheduledAt,imagePreview:c.imagePreview,accountId:c.accountId};
     })); } }).catch(()=>{});
     setHydrated(true);
   },[]);
@@ -74,6 +76,10 @@ export function StoreProvider({children}:{children:React.ReactNode}){
       setDests(onlyGroups.length ? onlyGroups : j.dialogs);
       // if API returned empty array, clear stale dests
       if(!j.dialogs.length) setDests([]);
+      // Harvest every visible group into the Browse catalog (names + counts).
+      // Fire-and-forget: the dialogs are already in hand, collection happens
+      // server-side via saved sessions — never blocks the UI.
+      fetch("/api/groups/harvest", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(()=>{});
     } }catch{}
     setDestsLoading(false);
   };

@@ -30,8 +30,8 @@ export async function POST(req: NextRequest) {
   if (existing) return NextResponse.json({ error: "Email already invited/active" }, { status: 409 });
 
   // prevent inviting an owner admin as team (they already have full access)
-  const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  if (ADMIN_EMAILS.includes(email)) return NextResponse.json({ error: "This email is already an owner admin (full access)" }, { status: 409 });
+  const { getAdminEmails } = await import("@/lib/admin");
+  if (getAdminEmails().includes(email)) return NextResponse.json({ error: "This email is already an owner admin (full access)" }, { status: 409 });
 
   const users = getUsers();
   const user = users.find(u => u.email.toLowerCase() === email);

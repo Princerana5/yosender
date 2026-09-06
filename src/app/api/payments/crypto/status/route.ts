@@ -14,8 +14,18 @@ function getUserId(req: NextRequest): string | null {
 async function verifyAndAutoActivate(orderId: string) {
   const local = findCryptoPayment(orderId);
   if (!local) return null;
-  // Already activated — nothing to do
-  if (local.licenseKey) return local;
+  // Rental orders: fulfill rental when paid (idempotent via orderId)
+  const isRental = String((local as any).planId || "").startsWith("rental:") || (local as any).raw?.kind === "rental";
+  if (isRental) {
+    try {
+      const { getRentals } = await import("@/lib/db");
+      const existing = (getRentals() as any[]).find((r: any) => r.orderId === orderId && r.status === "active");
+      if (existing) return local;
+    } catch {}
+  } else if (local.licenseKey) {
+    // Already activated — nothing to do
+    return local;
+  }
 
   let fetched: Awaited<ReturnType<typeof fetchNowPaymentsStatus>> = null;
   try {
@@ -43,6 +53,21 @@ async function verifyAndAutoActivate(orderId: string) {
 
   const updated = findCryptoPayment(orderId);
   if (!updated) return local;
+
+  // Rental orders: fulfill the rental instead of generating a plan key
+  if (isPaidStatus(newStatus)) {
+    const upd: any = updated;
+    if (String(upd.planId || "").startsWith("rental:") || upd.raw?.kind === "rental") {
+      try {
+        const { poolAccountIdFromOrder, fulfillRentalOrder } = await import("@/lib/rental-fulfill");
+        const poolAccountId = poolAccountIdFromOrder(upd);
+        if (poolAccountId) fulfillRentalOrder({ orderId, userId: upd.userId, poolAccountId, price: upd.amountUsd, payCurrency: upd.payCurrency || fetched.payCurrency });
+      } catch (e: any) {
+        console.warn("[crypto status] rental fulfill failed", orderId, e.message);
+      }
+      return findCryptoPayment(orderId) || updated;
+    }
+  }
 
   // Auto-generate API key + subscription if paid and not yet generated
   if (isPaidStatus(newStatus) && !updated.licenseKey) {

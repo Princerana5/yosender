@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Subplus",
-  description: "Subplus — Professional Telegram communication management",
+  title: "Yosender",
+  description: "Yosender — Professional Telegram communication management",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

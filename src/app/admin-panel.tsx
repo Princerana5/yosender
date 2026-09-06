@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
-import { ShieldCheck, Users, BarChart, Key, Server, CreditCard, Megaphone, Search, Mail, AlertTriangle, Copy, Plus, UserPlus, Shield, Check, X as XIcon, Settings2, Trash2 } from "lucide-react";
+import { ShieldCheck, Users, BarChart, Key, Server, CreditCard, Megaphone, Search, Mail, AlertTriangle, Copy, Plus, UserPlus, Shield, Check, X as XIcon, Settings2, Trash2, Link2 } from "lucide-react";
+import { GroupsTab } from "./admin-groups";
 
 const PERM_LABELS: Record<string, { label: string; desc: string }> = {
   overview: { label: "Overview", desc: "View dashboard stats & counts" },
@@ -11,10 +12,11 @@ const PERM_LABELS: Record<string, { label: string; desc: string }> = {
   campaigns: { label: "Campaigns", desc: "View all campaigns" },
   team: { label: "Team", desc: "Invite & manage team members" },
   payments: { label: "Payments", desc: "View crypto payments, verify & confirm" },
+  groups: { label: "Groups", desc: "Manage collected group links, categories, import/export" },
 };
 
 export function AdminPanel() {
-  const [tab, setTab] = useState<"overview" | "users" | "rentals" | "keys" | "subs" | "campaigns" | "team" | "payments">("overview");
+  const [tab, setTab] = useState<"overview" | "users" | "rentals" | "keys" | "subs" | "campaigns" | "team" | "payments" | "groups">("overview");
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [myPerms, setMyPerms] = useState<string[] | null>(null);
   const [isOwner, setIsOwner] = useState(false);
@@ -45,6 +47,7 @@ export function AdminPanel() {
   const [tgCode, setTgCode] = useState("");
   const [tgPwd, setTgPwd] = useState("");
   const [tgHash, setTgHash] = useState("");
+  const [tgDcId, setTgDcId] = useState<number | undefined>(undefined);
   const [tgStep, setTgStep] = useState<1|2|3>(1);
   const [tgLoading, setTgLoading] = useState(false);
   const [genPlan, setGenPlan] = useState("pro");
@@ -213,20 +216,20 @@ export function AdminPanel() {
     try {
       const r = await fetch("/api/telegram/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: tgPhone.trim() }) });
       const j = await r.json().catch(()=>({})); if (!r.ok) throw new Error(j.error || "Failed to send code");
-      setTgHash(j.phoneCodeHash || ""); setTgCode(""); setTgPwd(""); setTgStep(2); setMsg("Code sent — check Telegram app for the login code");
+      setTgHash(j.phoneCodeHash || ""); setTgDcId(typeof j.dcId === "number" ? j.dcId : undefined); setTgCode(""); setTgPwd(""); setTgStep(2); setMsg("Code sent — check Telegram app for the login code");
       setTimeout(()=>setMsg(""), 4000);
     } catch (e:any){ setErr(e.message); } finally { setTgLoading(false); }
   };
   const verifyTgAndList = async () => {
     setErr(""); setMsg(""); setTgLoading(true);
     try {
-      const r = await fetch("/api/admin/rental-pool/telegram", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: tgPhone.trim(), code: tgCode.trim(), password: tgPwd, phoneCodeHash: tgHash }) });
+      const r = await fetch("/api/admin/rental-pool/telegram", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: tgPhone.trim(), code: tgCode.trim(), password: tgPwd, phoneCodeHash: tgHash, dcId: tgDcId }) });
       const j = await r.json().catch(()=>({}));
       // needPassword can come as 200 (not an error) — handle before r.ok check
       if (j.needPassword) { setTgStep(3); setMsg(j.message || "2FA password required — enter your Telegram cloud password"); return; }
       if (!r.ok) throw new Error(j.error || "Verification failed");
       setMsg(j.message || "Account auto-listed for $1 / 24h");
-      setTgStep(1); setTgCode(""); setTgPwd(""); setTgHash("");
+      setTgStep(1); setTgCode(""); setTgPwd(""); setTgHash(""); setTgDcId(undefined);
       loadPool();
     } catch (e:any){ setErr(e.message); } finally { setTgLoading(false); }
   };
@@ -247,7 +250,7 @@ export function AdminPanel() {
       <div className="bg-white border border-red-200 rounded-2xl p-8 text-center">
         <div className="w-14 h-14 rounded-2xl bg-red-50 border border-red-200 flex items-center justify-center mx-auto"><ShieldCheck size={22} className="text-red-600" /></div>
         <h2 className="text-lg font-bold mt-4">Admin access required</h2>
-        <p className="text-sm text-slate-500 mt-2 leading-relaxed">Your email is not authorized as admin. Set <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs">ADMIN_EMAILS</code> in <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs">.env.local</code> to your admin email(s), comma-separated, then restart the server.</p>
+        <p className="text-sm text-slate-500 mt-2 leading-relaxed">Your email is not authorized as admin. The owner account (princeranarealme@gmail.com) always has access — other admins are added via <code className="bg-slate-100 px-1.5 py-0.5 rounded text-xs">ADMIN_EMAILS</code> in the server env, comma-separated, then restart.</p>
         <p className="text-xs text-slate-400 mt-3">Current: {err || "403 Forbidden"}</p>
       </div>
     </div>
@@ -263,6 +266,7 @@ export function AdminPanel() {
     ["campaigns", Megaphone, "Campaigns"],
     ["team", UserPlus, "Team"],
     ["payments", CreditCard, "Payments"],
+    ["groups", Link2, "Groups"],
   ].filter(([k]) => hasPerm(k as string)) as any;
 
   return (
@@ -686,6 +690,10 @@ export function AdminPanel() {
             </ul>
           </div>
         </div>
+      )}
+
+      {tab === "groups" && (
+        <GroupsTab notify={(m, isErr) => { if (isErr) { setErr(m); } else { setMsg(m); setTimeout(() => setMsg(""), 4000); } }} />
       )}
     </div>
   );

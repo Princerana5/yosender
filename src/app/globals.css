@@ -311,6 +311,8 @@ input:focus, textarea:focus, select:focus { outline: none; }
 @keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes scaleIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes floatSlow { 0%, 100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(-4px) rotate(-8deg); } }
+@keyframes shineSweep { 0% { transform: translateX(-160%) skewX(-20deg); } 60%, 100% { transform: translateX(320%) skewX(-20deg); } }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes shimmer {
   0% { background-position: -200% 0; }
@@ -322,6 +324,8 @@ input:focus, textarea:focus, select:focus { outline: none; }
 .animate-slide-down { animation: slideDown var(--duration-normal) var(--ease-out); }
 .animate-scale-in { animation: scaleIn var(--duration-fast) var(--ease-spring); }
 .animate-pulse { animation: pulse 2s ease-in-out infinite; }
+.animate-float-slow { animation: floatSlow 3s ease-in-out infinite; }
+.animate-shine { animation: shineSweep 4.5s ease-in-out infinite; }
 .animate-spin { animation: spin 1s linear infinite; }
 
 /* Staggered entrance */

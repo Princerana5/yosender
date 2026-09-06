@@ -55,6 +55,20 @@ export async function POST(req: NextRequest) {
   const isPaid = paymentStatus === "finished" || paymentStatus === "confirmed";
   if (isPaid) {
     const updated = findCryptoPayment(orderId);
+    // Rental orders: fulfill the rental (sender for 24h), no license key
+    if (updated && (String((updated as any).planId || "").startsWith("rental:") || (updated as any).raw?.kind === "rental")) {
+      try {
+        const { poolAccountIdFromOrder, fulfillRentalOrder } = await import("@/lib/rental-fulfill");
+        const poolAccountId = poolAccountIdFromOrder(updated);
+        if (poolAccountId) {
+          fulfillRentalOrder({ orderId, userId: (updated as any).userId, poolAccountId, price: (updated as any).amountUsd, payCurrency: (body.pay_currency ? String(body.pay_currency) : (updated as any).payCurrency) });
+          console.log(`[crypto webhook] ✅ Rental fulfilled for order ${orderId} → pool ${poolAccountId}`);
+        }
+      } catch (e: any) {
+        console.warn("[crypto webhook] rental fulfill failed", orderId, e.message);
+      }
+      return NextResponse.json({ ok: true });
+    }
     if (updated && !updated.licenseKey) {
       const plan = (PLANS as any)[updated.planId];
       if (plan) {

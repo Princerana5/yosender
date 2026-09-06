@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   if (!priceAmount) return NextResponse.json({ error: "Invalid price for this plan/billing" }, { status: 400 });
 
   const plan = (PLANS as any)[planId];
-  const orderId = `subplus_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const orderId = `yosender_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const origin = req.headers.get("origin") || process.env.NEXT_PUBLIC_APP_URL || `https://${req.headers.get("host") || "localhost:3000"}`;
   const successUrl = `${origin}/?crypto=success&order=${orderId}`;
   const cancelUrl = `${origin}/?crypto=cancel&order=${orderId}`;
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
       priceCurrency: "usd",
       payCurrency,
       orderId,
-      orderDescription: `${plan.name} — ${billing === "daily" ? "Daily (24h)" : "Monthly (30 days)"} — Subplus`,
+      orderDescription: `${plan.name} — ${billing === "daily" ? "Daily (24h)" : "Monthly (30 days)"} — Yosender`,
       successUrl,
       cancelUrl,
       ipnCallbackUrl,

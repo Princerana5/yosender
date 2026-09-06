@@ -1,7 +1,16 @@
 import { NextRequest } from "next/server";
 import { verifyToken } from "./auth";
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "princeranarealme@gmail.com").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const OWNER_ADMIN = "princeranarealme@gmail.com";
+
+// Owner is always admin, even if ADMIN_EMAILS is set to something else.
+export function getAdminEmails(): string[] {
+  const fromEnv = (process.env.ADMIN_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (!fromEnv.includes(OWNER_ADMIN)) fromEnv.push(OWNER_ADMIN);
+  return fromEnv;
+}
+
+const ADMIN_EMAILS = getAdminEmails();
 
 export function getRequestEmail(req: NextRequest): string {
   const t = req.cookies.get("auth_token")?.value;

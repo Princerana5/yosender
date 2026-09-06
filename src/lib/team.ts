@@ -4,7 +4,7 @@ import path from "path";
 const DB_DIR = process.env.VERCEL ? path.join("/tmp", ".data") : path.join(process.cwd(), ".data");
 const TEAM_FILE = path.join(DB_DIR, "team.json");
 
-export const ALL_PERMS = ["overview", "users", "rentals", "keys", "subs", "campaigns", "team"] as const;
+export const ALL_PERMS = ["overview", "users", "rentals", "keys", "subs", "campaigns", "team", "groups"] as const;
 export type Perm = typeof ALL_PERMS[number];
 
 export const PERM_LABELS: Record<Perm, { label: string; desc: string }> = {
@@ -15,6 +15,7 @@ export const PERM_LABELS: Record<Perm, { label: string; desc: string }> = {
   subs: { label: "Subscriptions", desc: "View, revoke & extend subscriptions" },
   campaigns: { label: "Campaigns", desc: "View all campaigns" },
   team: { label: "Team", desc: "Invite & manage team members" },
+  groups: { label: "Groups", desc: "Manage collected group links, categories, import/export" },
 };
 
 export type TeamMember = {

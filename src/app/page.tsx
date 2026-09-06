@@ -1,8 +1,32 @@
 "use client";
 import { StoreProvider, useStore } from "@/lib/store";
-import { Send, Shield, ShieldCheck, Zap, Users, BarChart3, Check, Menu, X, ArrowRight, Sparkles, Clock, Lock, Search, Pause, LogOut, Settings, LayoutDashboard, Megaphone, FileText, History, HelpCircle, Star, TrendingUp, Layers, Globe, ChevronRight, Play, Download, Mail, Trash2, KeyRound, Save, AtSign, Gem, Crown, Zap as ZapIcon, Diamond, BookOpen, Video, ExternalLink, GraduationCap, ListChecks, MessageCircle } from "lucide-react";
+import { Send, Shield, ShieldCheck, Zap, Users, BarChart3, Check, Menu, X, ArrowRight, Sparkles, Clock, Lock, Search, Pause, LogOut, Settings, LayoutDashboard, Megaphone, FileText, History, HelpCircle, Star, TrendingUp, Layers, Globe, ChevronRight, Play, Download, Mail, Trash2, KeyRound, Save, AtSign, Gem, Crown, Zap as ZapIcon, Diamond, BookOpen, Video, ExternalLink, GraduationCap, ListChecks, MessageCircle, Compass } from "lucide-react";
 import { useState, useEffect } from "react";
 import { AdminPanel } from "./admin-panel";
+
+function JoinProgressCard({ joining, results, total, onDismiss }: { joining: boolean; results: any[] | null; total: number; onDismiss: () => void }) {
+  const ok = (results || []).filter((r: any) => r.status === "Joined" || r.status === "Already member").length;
+  const limited = (results || []).filter((r: any) => r.status === "RateLimited").length;
+  const failed = (results || []).filter((r: any) => r.status !== "Joined" && r.status !== "Already member" && r.status !== "RateLimited").length;
+  const pct = total ? Math.min(100, Math.round(((results?.length || 0) / total) * 100)) : 0;
+  return (
+    <div className="card card-elevated mt-3 p-4 animate-slide-down" role="status" aria-live="polite">
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className={`badge ${joining ? "badge-primary" : "badge-success"}`}>{joining ? <span className="animate-spin inline-block" aria-hidden="true">◌</span> : "✓"} {joining ? `Joining ${results?.length || 0} of ${total}…` : `Done — ${ok} of ${total} joined`}</span>
+        {!joining && results && (
+          <>
+            {limited > 0 && <span className="badge badge-warning">{limited} rate-limited</span>}
+            {failed > 0 && <span className="badge badge-danger">{failed} failed</span>}
+            <button onClick={onDismiss} className="btn btn-ghost ml-auto !px-2 !py-1 text-xs">Dismiss</button>
+          </>
+        )}
+      </div>
+      <div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Join progress">
+        <div className="h-full bg-emerald-500 rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
 
 function HoverTip({ tip, children, side = "top" }: { tip: string; children: React.ReactNode; side?: "top" | "bottom" }) {
   return (
@@ -66,10 +90,11 @@ function rowTip(feature: string, value: string): string {
     if (value.toLowerCase().includes("no limit")) return "Your message will be sent automatically to all selected groups with no waiting time";
   }
   if (f.includes("free rented")) {
-    if (value === "0" || value === "—") return "No free rented accounts on this plan";
-    if (value.includes("10")) return "10 rented sender accounts free every day";
-    if (value.includes("3")) return "3 rented sender accounts free every day";
-    if (value.includes("1")) return "1 rented sender account free every day";
+    if (value === "None" || value === "0" || value === "—") return "No free rented accounts on this plan";
+    if (value.includes("Monthly only")) return "Monthly only — no daily free accounts";
+    if (value.includes("10 / day")) return "10 rented sender accounts free every day";
+    if (value.includes("3 / day")) return "3 rented sender accounts free every day — 90 per month";
+    if (value.includes("1 / day")) return "1 rented sender account free every day — 30 per month";
   }
   if (f.includes("support")) {
     if (value.includes("VIP")) return "VIP 24/7 dedicated support — priority help anytime";
@@ -77,13 +102,15 @@ function rowTip(feature: string, value: string): string {
     if (value.includes("Standard")) return "Standard support — help within 24 hours";
   }
   if (f.includes("price")) {
-    if (value.includes("$2")) return "$2 per day — billed daily, 24h access";
-    if (value.includes("$5")) return "$5 per day — billed daily, 24h access";
-    if (value.includes("$12")) return "$12 per day — billed daily, 24h access";
-    if (value.includes("$55")) return "$55 per month — 30 days access, save vs daily";
-    if (value.includes("$150")) return "$150 per month — 30 days access, save vs daily";
-    if (value.includes("$299")) return "$299 per month — 30 days access, save vs daily";
+    // Order matters: check three/four-digit prices BEFORE their substrings
+    // ("$1300" contains "$130", "$150" contains "$15", etc.)
     if (value.includes("$1300")) return "$1300 per month — premium unlimited plan, monthly only";
+    if (value.includes("$299")) return "$299 per month — 30 days access, save vs daily";
+    if (value.includes("$150")) return "$150 per month — 30 days access, save vs daily";
+    if (value.includes("$55")) return "$55 per month — 30 days access, save vs daily";
+    if (value.includes("$12")) return "$12 per day — billed daily, 24h access";
+    if (value.includes("$5")) return "$5 per day — billed daily, 24h access";
+    if (value.includes("$2")) return "$2 per day — billed daily, 24h access";
     if (value === "—") return "Not available as daily — monthly only";
   }
   return `${feature}: ${value}`;
@@ -239,7 +266,6 @@ function TelegramAccountsCard({ onConnect }: { onConnect: () => void }) {
 }
 
 function LiveHeroCard() {
-  const { campaigns } = useStore();
   const [stats, setStats] = useState<any>(null);
   useEffect(() => {
     let alive = true;
@@ -249,12 +275,15 @@ function LiveHeroCard() {
     load();
     const t = setInterval(load, 8000);
     return () => { alive = false; clearInterval(t); };
-  }, [campaigns.length]);
-  const totalCampaigns = stats ? stats.totalCampaigns : campaigns.length;
-  const totalSent = stats ? stats.totalSent : campaigns.reduce((a: number, c: any) => a + (c.successful || 0), 0);
-  const totalDests = stats ? stats.totalDestinations : campaigns.reduce((a: number, c: any) => a + (c.destinations?.length || 0), 0);
-  const uniqueGroups = stats ? (stats.uniqueGroups ?? totalDests) : new Set(campaigns.flatMap((c: any) => c.destinations || [])).size;
-  const running = stats ? stats.running : campaigns.filter((c: any) => c.status === "Running" || c.status === "Repeating").length;
+  }, []);
+  // Platform totals from real usage (never fake). Before any activity the
+  // card shows a product snapshot so the hero never reads as empty/broken.
+  const totalCampaigns = stats?.totalCampaigns ?? 0;
+  const totalSent = stats?.totalSent ?? 0;
+  const totalDests = stats?.totalDestinations ?? 0;
+  const uniqueGroups = stats?.uniqueGroups ?? 0;
+  const running = stats?.running ?? 0;
+  const hasActivity = totalCampaigns > 0 || totalSent > 0;
   const pct = totalDests ? Math.round((totalSent / totalDests) * 100) : 0;
   const isLive = running > 0;
   return (
@@ -262,29 +291,47 @@ function LiveHeroCard() {
       <div className="flex items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-xs font-semibold text-slate-600">Platform stats — live</span>
+          <span className="text-xs font-semibold text-slate-600">How it works — at a glance</span>
         </div>
-        <span className={`text-[10px] font-bold tracking-widest px-2.5 py-1 rounded-full border ${isLive ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{isLive ? "● LIVE" : "LIVE STATS"}</span>
+        {isLive && <span className="text-[10px] font-bold tracking-widest px-2.5 py-1 rounded-full border bg-emerald-50 text-emerald-700 border-emerald-200">● LIVE</span>}
       </div>
-      <div className="grid grid-cols-3 gap-2 sm:gap-3">
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
-          <div className="text-[10px] font-bold tracking-widest text-slate-500">CAMPAIGNS</div>
-          <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{totalCampaigns.toLocaleString()}</div>
-          <div className="text-[11px] text-slate-400 mt-1">Total pushed</div>
-        </div>
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
-          <div className="text-[10px] font-bold tracking-widest text-slate-500">MESSAGES</div>
-          <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{totalSent.toLocaleString()}</div>
-          <div className="text-[11px] text-slate-400 mt-1">Total sent</div>
-        </div>
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
-          <div className="text-[10px] font-bold tracking-widest text-slate-500">GROUPS</div>
-          <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{Number(uniqueGroups).toLocaleString()}</div>
-          <div className="text-[11px] text-slate-400 mt-1">Targeted</div>
-        </div>
-      </div>
-      <div className="mt-4 h-1.5 bg-slate-50 rounded-full overflow-hidden"><div className="h-1.5 bg-[#229ED9] rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%` }} /></div>
-      <div className="flex justify-between text-[11px] text-slate-400 mt-2"><span>{pct}% delivered</span><span>{running ? `${running} running` : totalCampaigns ? "all time" : "be the first to send"}</span></div>
+      {hasActivity ? (
+        <>
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
+              <div className="text-[10px] font-bold tracking-widest text-slate-500">CAMPAIGNS</div>
+              <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{totalCampaigns.toLocaleString()}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Total pushed</div>
+            </div>
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
+              <div className="text-[10px] font-bold tracking-widest text-slate-500">MESSAGES</div>
+              <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{totalSent.toLocaleString()}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Total sent</div>
+            </div>
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 sm:p-4 text-center">
+              <div className="text-[10px] font-bold tracking-widest text-slate-500">GROUPS</div>
+              <div className="text-xl sm:text-2xl font-bold mt-1 tracking-tight text-slate-900">{Number(uniqueGroups).toLocaleString()}</div>
+              <div className="text-[11px] text-slate-400 mt-1">Targeted</div>
+            </div>
+          </div>
+          <div className="mt-4 h-1.5 bg-slate-50 rounded-full overflow-hidden"><div className="h-1.5 bg-[#229ED9] rounded-full transition-all" style={{ width: `${Math.min(100, pct)}%` }} /></div>
+          <div className="flex justify-between text-[11px] text-slate-400 mt-2"><span>{pct}% delivered</span><span>{running ? `${running} running` : "all time"}</span></div>
+        </>
+      ) : (
+        <ol className="space-y-3">
+          {[
+            ["Connect Telegram", "Phone → OTP → optional 2FA, encrypted"],
+            ["Pick destinations", "Only groups where you can post"],
+            ["Write once", "Text + image, live preview"],
+            ["Send & track", "Per-group logs, pause anytime"],
+          ].map(([t, d], i) => (
+            <li key={t} className="flex gap-3 items-start">
+              <span className="w-6 h-6 rounded-full bg-[#EFF6FF] border border-[#BFDBFE] text-[#229ED9] text-[11px] font-extrabold flex items-center justify-center shrink-0">{i + 1}</span>
+              <span><span className="block text-sm font-semibold text-slate-900">{t}</span><span className="block text-xs text-slate-500">{d}</span></span>
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
   );
 }
@@ -353,7 +400,7 @@ function PricingSection({ onNav }: { onNav: (v: string) => void }) {
           </div>
         );})}
       </div>
-      <p className="text-center text-xs text-slate-400 mt-4">Click <b>Buy Now</b> → choose gateway → <b>Pay with Crypto</b> → auto-generates <b>API key</b> & auto-activates plan. 300+ coins via NOWPayments.</p>
+      <p className="text-center text-xs text-slate-400 mt-4">Click <b>Buy Now</b> → <b>Pay with Crypto</b> → your <b>license key</b> is auto-generated & your plan auto-activates. 300+ coins via NOWPayments.</p>
       <GatewayModal open={!!gatewayPlan} plan={gatewayPlan} billing={gatewayPlan?.billing || billing} price={gatewayPlan ? (gatewayPlan.id==="luxe" ? gatewayPlan.monthly : gatewayPlan.billing==="monthly" ? gatewayPlan.monthly : gatewayPlan.daily) : ""} paying={!!cryptoPaying} onClose={() => setGatewayPlan(null)} onCrypto={handleCrypto} />
     </>
   );
@@ -361,12 +408,12 @@ function PricingSection({ onNav }: { onNav: (v: string) => void }) {
 
 function ComparisonTable() {
   const rows: Array<[string, string, string, string, string]> = [
-    ["Price (daily)", "$2 / day", "$5 / day", "$12 / day", "$1300 / mo only"],
+    ["Price (daily)", "$2 / day", "$5 / day", "$12 / day", "Monthly only"],
     ["Price (monthly)", "$55 / mo", "$150 / mo", "$299 / mo", "$1300 / mo"],
     ["Groups per campaign", "10", "100", "1,000", "10,000+"],
     ["Campaigns per day", "10", "30", "Unlimited", "Unlimited"],
     ["Repeat min interval", "15 min", "1 min", "No limit", "No limit"],
-    ["Free rented / day", "0", "1", "3", "10"],
+    ["Free rented accounts", "None", "1 / day · 30 / mo", "3 / day · 90 / mo", "10 / day"],
     ["Support", "Standard", "Priority", "Priority", "VIP 24/7 dedicated"],
   ];
   return (
@@ -392,7 +439,7 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
         <div className="max-w-7xl mx-auto px-4 md:px-6 h-[64px] flex items-center justify-between gap-4">
           <div className="flex items-center gap-3 font-bold text-[17px] tracking-tight shrink-0">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#229ED9] to-[#1B8AC4] flex items-center justify-center text-white shadow-md shadow-[#229ED9]/20"><Send size={15} /></div>
-            Subplus
+            Yosender
             <span className="hidden sm:inline-flex text-[10px] font-bold tracking-widest bg-[#EFF6FF] text-[#229ED9] border border-[#BFDBFE] px-2 py-0.5 rounded-full">PRO</span>
           </div>
           <nav className="hidden md:flex items-center gap-1 text-[13px] font-medium text-slate-500">
@@ -444,7 +491,7 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
           <div className="min-w-0 animate-slide-up">
             <div className="inline-flex items-center gap-2 text-xs font-semibold bg-white border border-slate-200 rounded-full px-3.5 py-1.5 text-slate-600 shadow-sm">
               <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-              Trusted by 12,000+ community managers
+              Permission-safe Telegram outreach
               <span className="hidden sm:inline-flex items-center gap-1 ml-1 text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full">● LIVE</span>
             </div>
             <h1 className="text-[30px] sm:text-[38px] lg:text-[48px] font-extrabold leading-[1.02] tracking-tight mt-6">
@@ -464,7 +511,7 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
             <div className="flex flex-wrap items-center gap-4 md:gap-6 mt-6">
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600"><span className="w-6 h-6 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center"><Shield size={11} className="text-emerald-600" /></span> Rate-limit safe</span>
               <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600"><span className="w-6 h-6 rounded-full bg-blue-50 border border-blue-200 flex items-center justify-center"><Lock size={11} className="text-blue-600" /></span> Encrypted</span>
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600"><span className="w-6 h-6 rounded-full bg-amber-50 border border-amber-200 flex items-center justify-center"><Star size={11} className="text-amber-500" /></span> 4.9/5 · 2k reviews</span>
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600"><span className="w-6 h-6 rounded-full bg-amber-50 border border-amber-200 flex items-center justify-center"><Check size={11} className="text-emerald-600" /></span> Crypto checkout · key activation</span>
             </div>
           </div>
           <div className="animate-slide-up stagger-2">
@@ -473,17 +520,18 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
         </div>
       </section>
 
-      {/* Social proof */}
+      {/* Trust strip — honest capabilities, no fake logos */}
       <div className="border-y border-slate-200 bg-slate-50/50">
         <div className="max-w-7xl mx-auto px-4 md:px-6 py-5">
-          <p className="text-center text-[11px] font-bold tracking-widest text-slate-400 mb-3">TRUSTED BY TEAMS AT</p>
-          <div className="flex flex-wrap justify-center items-center gap-6 md:gap-10 text-xs font-bold tracking-widest text-slate-300">
-            <span className="hover:text-slate-500 transition-colors cursor-default">LINEAR</span>
-            <span className="hover:text-slate-500 transition-colors cursor-default">VERCEL</span>
-            <span className="hover:text-slate-500 transition-colors cursor-default">STRIPE</span>
-            <span className="hover:text-slate-500 transition-colors cursor-default">NOTION</span>
-            <span className="hover:text-slate-500 transition-colors cursor-default">INTERCOM</span>
-            <span className="hover:text-slate-500 transition-colors cursor-default">FIGMA</span>
+          <p className="text-center text-[11px] font-bold tracking-widest text-slate-400 mb-3">BUILT FOR SAFE OUTREACH</p>
+          <div className="flex flex-wrap justify-center items-center gap-x-8 gap-y-2 text-xs font-semibold text-slate-500">
+            <span>Permission-aware sending</span>
+            <span className="text-slate-200">·</span>
+            <span>Flood-wait protection</span>
+            <span className="text-slate-200">·</span>
+            <span>Per-destination logs</span>
+            <span className="text-slate-200">·</span>
+            <span>Encrypted sessions</span>
           </div>
         </div>
       </div>
@@ -561,7 +609,7 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
         <div className="text-center max-w-2xl mx-auto">
           <span className="inline-flex text-[11px] font-bold tracking-widest bg-[#EFF6FF] text-[#229ED9] border border-[#BFDBFE] px-3 py-1 rounded-full">PRICING</span>
           <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900 mt-3">Choose your plan — key activated</h2>
-          <p className="text-sm text-slate-500 mt-2">Pay → get a license key → redeem in Plans. Daily or monthly. No hidden fees.</p>
+          <p className="text-sm text-slate-500 mt-2">Pay with crypto → your license key is auto-generated and your plan auto-activates. Daily or monthly.</p>
         </div>
         <PricingSection onNav={onNav} />
         <ComparisonTable />
@@ -596,7 +644,7 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-lg bg-[#229ED9] flex items-center justify-center text-white"><Send size={14} /></div>
-              <span className="font-bold text-sm">Subplus</span>
+              <span className="font-bold text-sm">Yosender</span>
               <span className="text-xs text-slate-400 hidden sm:inline">— Professional Telegram communication management</span>
             </div>
             <div className="flex items-center gap-6 text-xs font-medium text-slate-500">
@@ -631,7 +679,7 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
     <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-6 relative overflow-hidden">
       <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-[#229ED9]/10 to-transparent rounded-full blur-3xl" />
       <div className="bg-white border border-[#E2E8F0] rounded-[24px] p-8 w-full max-w-md shadow-2xl shadow-black/10 relative">
-        <div className="flex items-center gap-2.5 font-bold text-lg"><div className="w-9 h-9 rounded-xl bg-[#229ED9] flex items-center justify-center text-white shadow"><Send size={16} /></div>Subplus</div>
+        <div className="flex items-center gap-2.5 font-bold text-lg"><div className="w-9 h-9 rounded-xl bg-[#229ED9] flex items-center justify-center text-white shadow"><Send size={16} /></div>Yosender</div>
         <h2 className="text-2xl font-extrabold tracking-tight mt-5">{mode === "signup" ? "Create account" : "Welcome back"}</h2>
         <p className="text-sm text-[#64748B] mb-6">{mode === "signup" ? "Start managing Telegram messaging" : "Sign in to continue"}</p>
         {mode === "signup" && <input value={name} onChange={e => setName(e.target.value)} placeholder="Name" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 mb-3 text-sm focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none transition" />}
@@ -640,7 +688,7 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
         <input value={pass} onChange={e => setPass(e.target.value)} placeholder="Password" type="password" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 mb-2 text-sm focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none transition" />
         {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-2.5 mb-3">{err}</div>}
         <button onClick={submit} disabled={loading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{loading ? "..." : mode === "signup" ? "Create Account" : "Sign In"}</button>
-        <button className="w-full mt-3 border border-[#E2E8F0] py-3 rounded-full text-sm font-semibold flex items-center justify-center gap-2 hover:bg-[#F8FAFC] transition"><img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="" className="w-4 h-4" />Continue with Google</button>
+        <button onClick={() => window.location.href = "/api/auth/google"} className="w-full mt-3 border border-[#E2E8F0] py-3 rounded-full text-sm font-semibold flex items-center justify-center gap-2 hover:bg-[#F8FAFC] transition"><img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="" className="w-4 h-4" />Continue with Google</button>
         <p className="text-sm text-center mt-5 text-[#64748B]">{mode === "signup" ? "Already have an account? " : "No account? "}<button onClick={() => onNav(mode === "signup" ? "login" : "signup")} className="text-[#229ED9] font-semibold">{mode === "signup" ? "Login" : "Create one"}</button></p>
         <button onClick={() => onNav("landing")} className="text-xs font-medium text-[#64748B] mx-auto block mt-4 hover:text-slate-900">← Back to home</button>
       </div>
@@ -652,20 +700,20 @@ function Connect({ onNav }: { onNav: (v: string) => void }) {
   const { setTg, tgAccounts, refreshTgAccounts, setActiveTgId } = useStore() as any;
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [phone, setPhone] = useState("+91 "), [code, setCode] = useState(""), [pwd, setPwd] = useState("");
-  const [hash, setHash] = useState(""), [loading, setLoading] = useState(false), [err, setErr] = useState("");
+  const [hash, setHash] = useState(""), [dcId, setDcId] = useState<number | undefined>(undefined), [loading, setLoading] = useState(false), [err, setErr] = useState("");
   const count = tgAccounts?.length || 0;
   const sendCode = async () => {
     setErr(""); setLoading(true);
     try {
       const r = await fetch("/api/telegram/send-code", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: phone.trim() }) });
       const txt = await r.text(); let j: any = {}; try { j = txt ? JSON.parse(txt) : {}; } catch { throw new Error(txt?.slice(0,300) || `Server returned ${r.status} with empty body — check terminal for [send-code] error. Did you set TELEGRAM_API_ID/HASH and restart?`); }
-      if (!r.ok) throw new Error(j.error || txt.slice(0,300) || `HTTP ${r.status}`); setHash(j.phoneCodeHash); setStep(2);
+      if (!r.ok) throw new Error(j.error || txt.slice(0,300) || `HTTP ${r.status}`); setHash(j.phoneCodeHash); setDcId(typeof j.dcId === "number" ? j.dcId : undefined); setStep(2);
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   };
   const verify = async (needPwd = false) => {
     setErr(""); setLoading(true);
     try {
-      const r = await fetch("/api/telegram/sign-in", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: phone.trim(), code: code.trim(), password: pwd, phoneCodeHash: hash }) });
+      const r = await fetch("/api/telegram/sign-in", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ phone: phone.trim(), code: code.trim(), password: pwd, phoneCodeHash: hash, dcId }) });
       const txt = await r.text(); let j: any = {}; try { j = txt ? JSON.parse(txt) : {}; } catch { throw new Error(txt?.slice(0,300) || `Server returned ${r.status} with empty body`); }
       if (!r.ok) throw new Error(j.error || txt.slice(0,300) || `HTTP ${r.status}`);
       if (j.needPassword) { setStep(3); return; }
@@ -842,15 +890,67 @@ function RentAccountsView() {
     } catch {}
   };
   useEffect(() => { loadSub(); }, []);
-  const payAndRent = async (poolId: string, useFree = false) => {
+  const claimFree = async (poolId: string) => {
     setPayingId(poolId); setErr(""); setOkMsg("");
     try {
-      const r = await fetch("/api/rentals/pay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poolAccountId: poolId, useFree }) });
+      const r = await fetch("/api/rentals/pay", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poolAccountId: poolId, useFree: true }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
-      setOkMsg(j.isFree ? `✓ Free rented account added — 24h (free ${subRent?.freeRentPerDay ? `1/${subRent.freeRentPerDay} today` : ""}). Expires ${new Date(j.expiresAt).toLocaleString()}` : `✓ Rented for 24 hours — account added to your senders. Expires ${new Date(j.expiresAt).toLocaleString()}`);
+      setOkMsg(`✓ Free rented account added — 24h (free ${subRent?.freeRentPerDay ? `1/${subRent.freeRentPerDay} today` : ""}). Expires ${new Date(j.expiresAt).toLocaleString()}`);
       await load(); await refreshTgAccounts(); await loadSub();
       if (j.tgAccountId) { setActiveTgId(j.tgAccountId); const acc = (tgAccounts || []).find((a: any) => a.id === j.tgAccountId); if (acc) setTg({ username: acc.username, phone: acc.phone, connected: true, displayName: acc.displayName, firstName: acc.firstName }); }
       setTimeout(() => setOkMsg(""), 5000);
+    } catch (e: any) { setErr(e.message); } finally { setPayingId(null); }
+  };
+  // Paid rent via crypto gateway — choose gateway → Pay with Crypto → auto-added on confirm
+  const [gatewayPool, setGatewayPool] = useState<any>(null);
+  const [rentPaying, setRentPaying] = useState(false);
+  const [rentOrderId, setRentOrderId] = useState<string | null>(null);
+  const payWithCrypto = async () => {
+    if (!gatewayPool) return;
+    // Open blank window synchronously inside user gesture — otherwise popup blocker kills it after await
+    const win = window.open("about:blank", "_blank");
+    if (win) win.document.write('<p style="font-family:sans-serif;text-align:center;margin-top:40px">Creating invoice… please wait</p>');
+    setRentPaying(true); setErr(""); setOkMsg("");
+    try {
+      const r = await fetch("/api/rentals/checkout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poolAccountId: gatewayPool.id }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error);
+      setRentOrderId(j.orderId);
+      setGatewayPool(null);
+      if (win && !win.closed) win.location.href = j.invoiceUrl;
+      else window.location.href = j.invoiceUrl;
+      setOkMsg(`Crypto invoice created for ${gatewayPool.displayName} — $${j.amountUsd} / 24h. Complete payment in the new tab, then click Verify below — sender auto-adds on confirmation.`);
+      setTimeout(() => setOkMsg(""), 12000);
+    } catch (e: any) {
+      if (win && !win.closed) win.close();
+      setErr(e.message);
+    } finally { setRentPaying(false); }
+  };
+  const verifyRentOrder = async (orderId: string) => {
+    setPayingId(orderId); setErr(""); setOkMsg("");
+    try {
+      const r = await fetch("/api/payments/crypto/confirm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderId }) });
+      const j = await r.json();
+      if (!r.ok && !j.payment) throw new Error(j.error || j.message || "Verify failed");
+      if (j.rental || j.kind === "rental") {
+        setOkMsg(`✓ Payment confirmed — sender rented for 24h & added to your senders! Expires ${j.rental ? new Date(j.rental.expiresAt).toLocaleString() : ""}`);
+        setRentOrderId(null);
+        await load(); await refreshTgAccounts(); await loadSub();
+        if (j.tgAccountId) {
+          setActiveTgId(j.tgAccountId);
+          try {
+            const rr = await fetch("/api/telegram/accounts"); const jj = await rr.json();
+            const acc = (jj.accounts || []).find((a: any) => a.id === j.tgAccountId);
+            if (acc) setTg({ username: acc.username, phone: acc.phone, connected: true, displayName: acc.displayName, firstName: acc.firstName });
+          } catch {}
+        }
+        setTimeout(() => setOkMsg(""), 8000);
+      } else if (j.message) {
+        setOkMsg(j.message);
+        setTimeout(() => setOkMsg(""), 8000);
+      } else {
+        setErr(j.error || "Not yet confirmed — try again in a minute.");
+      }
     } catch (e: any) { setErr(e.message); } finally { setPayingId(null); }
   };
   const available = pool.filter((p: any) => p.status === "available").length;
@@ -904,7 +1004,12 @@ function RentAccountsView() {
       <div className="mt-6">
         <h3 className="text-sm font-semibold text-slate-900">Marketplace — rent in one click</h3>
         <p className="text-xs text-slate-500 mt-1">Rented account is auto-added to your Accounts & sender dropdown.</p>
-        {loading ? <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">Loading marketplace…</div> : (
+        {loading ? <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">Loading marketplace…</div> : !pool.length ? (
+          <div className="mt-3 bg-white border border-dashed border-slate-300 rounded-2xl p-8 text-center">
+            <div className="text-sm font-semibold text-slate-700">No senders available right now</div>
+            <div className="text-xs text-slate-400 mt-1">New rental accounts are added by the admin — check back soon.</div>
+          </div>
+        ) : (
           <div className="mt-3 grid sm:grid-cols-2 gap-3">
             {pool.map((p: any) => {
               const isMine = p.isMine;
@@ -922,8 +1027,8 @@ function RentAccountsView() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-xs font-bold bg-[#229ED9] text-white px-3 py-1.5 rounded-full">${p.pricePerDay} / 24h</span>
                     {isMine ? <span className="text-xs text-emerald-700 font-medium">Already in your senders ✓</span> : avail ? <>
-                      {subRent && subRent.freeRentPerDay > 0 && freeLeft > 0 && <button onClick={() => payAndRent(p.id, true)} disabled={!!payingId} className="bg-emerald-600 text-white px-4 py-2 rounded-full text-xs font-bold shadow disabled:opacity-50">{payingId === p.id ? "…" : "Claim Free →"}</button>}
-                      <button onClick={() => payAndRent(p.id, false)} disabled={!!payingId} className="bg-gradient-to-r from-amber-500 to-orange-600 text-white px-4 py-2 rounded-full text-xs font-bold shadow disabled:opacity-50">{payingId === p.id ? "Processing…" : "Pay & Rent →"}</button>
+                      {subRent && subRent.freeRentPerDay > 0 && freeLeft > 0 && <button onClick={() => claimFree(p.id)} disabled={!!payingId} className="bg-emerald-600 text-white px-4 py-2 rounded-full text-xs font-bold shadow disabled:opacity-50">{payingId === p.id ? "…" : "Claim Free →"}</button>}
+                      <button onClick={() => setGatewayPool(p)} disabled={!!payingId} className="bg-gradient-to-r from-amber-500 to-orange-600 text-white px-4 py-2 rounded-full text-xs font-bold shadow disabled:opacity-50">Pay & Rent →</button>
                     </> : <span className="ml-auto text-xs text-slate-400">Unavailable</span>}
                   </div>
                 </div>
@@ -936,12 +1041,25 @@ function RentAccountsView() {
       <div className="mt-6 bg-amber-50 border border-amber-200 rounded-2xl p-4">
         <div className="text-xs font-bold tracking-widest text-amber-800">HOW IT WORKS</div>
         <ol className="mt-2 text-xs text-amber-900/80 leading-6 list-decimal list-inside">
-          <li>Click <b>Pay & Rent</b> — rented account is added instantly.</li>
-          <li>Account is <b>auto-added</b> to your Accounts & appears in <b>Create Campaign → Sender</b> dropdown.</li>
+          <li>Click <b>Pay & Rent</b> → choose gateway → <b>Pay with Crypto</b> (BTC · ETH · USDT · 300+ coins).</li>
+          <li>After payment confirms, the sender is <b>auto-added</b> to your Accounts & <b>Create Campaign → Sender</b> dropdown.</li>
           <li>Choose it for any campaign — sending uses the rented account&apos;s session, not your personal one.</li>
           <li>After 24 hours it&apos;s <b>auto-removed</b> and returns to the pool. No manual cleanup.</li>
         </ol>
       </div>
+
+      {rentOrderId && (
+        <div className="mt-4 bg-[#EFF6FF] border border-[#BFDBFE] rounded-2xl p-4 flex flex-wrap gap-2 items-center">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-slate-900">Waiting for crypto confirmation…</div>
+            <div className="text-xs text-slate-500 mt-0.5 font-mono truncate">Order {rentOrderId} — complete payment in the invoice tab, then verify.</div>
+          </div>
+          <button onClick={() => verifyRentOrder(rentOrderId)} disabled={!!payingId} className="bg-[#229ED9] text-white px-5 py-2.5 rounded-full text-xs font-bold hover:bg-[#1B8AC4] disabled:opacity-50">{payingId === rentOrderId ? "Verifying…" : "Verify Payment →"}</button>
+          <button onClick={() => setRentOrderId(null)} className="text-xs font-bold text-slate-400 px-2">Dismiss</button>
+        </div>
+      )}
+
+      <GatewayModal open={!!gatewayPool} plan={gatewayPool ? { name: `Rent ${gatewayPool.displayName}` } : null} billing="daily" price={gatewayPool ? `$${gatewayPool.pricePerDay} / 24h` : ""} paying={rentPaying} onClose={() => setGatewayPool(null)} onCrypto={payWithCrypto} />
     </div>
   );
 }
@@ -1221,7 +1339,7 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
   const isAdmin = user?.email?.toLowerCase() === "princeranarealme@gmail.com";
 
   const navGroups: Array<{ label: string; items: Array<[string, any, string]> }> = [
-    { label: "Workspace", items: [["dashboard", LayoutDashboard, "Dashboard"], ["plans", Sparkles, "Plans"], ["destinations", Search, "Groups & Joiner"], ["accounts", Users, `Accounts${accCount ? ` · ${accCount}/10` : ""}`]] },
+    { label: "Workspace", items: [["dashboard", LayoutDashboard, "Dashboard"], ["plans", Sparkles, "Plans"], ["destinations", Search, "Groups & Joiner"], ["browse", Compass, "Browse Groups"], ["accounts", Users, `Accounts${accCount ? ` · ${accCount}/10` : ""}`]] },
     { label: "Campaigns", items: [["create", Megaphone, "Create Campaign"], ["campaigns", History, "Campaigns"], ["templates", FileText, "Templates"], ["logs", BarChart3, "Delivery Logs"], ["rent", Star, "Rent Accounts"]] },
     { label: "System", items: isAdmin ? [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"], ["admin", ShieldCheck, "Admin"]] : [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"]] },
   ];
@@ -1234,24 +1352,28 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
           <div className="space-y-1">
             {group.items.map(([k, Icon, label]) => {
               const active = (k as string) === view;
-              const isHighlighted = k === "accounts" || k === "rent";
+              const isHighlighted = k === "accounts" || k === "rent" || k === "browse";
               return (
                 <button
                   key={k as string}
                   onClick={() => { setView(k as string); onItemClick?.(); setOpen(false); }}
                   className={`group flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-[13px] font-medium w-full text-left transition-all duration-200 border ${
                     active
-                      ? isHighlighted
-                        ? "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-transparent shadow-md shadow-amber-500/20"
-                        : "bg-[#229ED9] text-white border-transparent shadow-md shadow-[#229ED9]/20"
-                      : isHighlighted
-                        ? "bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100 hover:border-amber-300 hover:text-amber-900 shadow-sm"
-                        : "bg-white border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-900 hover:translate-x-0.5"
+                      ? k === "browse"
+                        ? "bg-gradient-to-r from-emerald-500 to-teal-600 text-white border-transparent shadow-md shadow-emerald-500/20"
+                        : isHighlighted
+                          ? "bg-gradient-to-r from-amber-500 to-orange-500 text-white border-transparent shadow-md shadow-amber-500/20"
+                          : "bg-[#229ED9] text-white border-transparent shadow-md shadow-[#229ED9]/20"
+                      : k === "browse"
+                        ? "bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100 hover:border-emerald-300 hover:text-emerald-900 shadow-sm"
+                        : isHighlighted
+                          ? "bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100 hover:border-amber-300 hover:text-amber-900 shadow-sm"
+                          : "bg-white border-transparent text-slate-500 hover:bg-slate-50 hover:text-slate-900 hover:translate-x-0.5"
                   }`}
                 >
-                  <Icon size={16} className={`transition-colors shrink-0 ${active ? "text-white" : isHighlighted ? "text-amber-600 group-hover:text-amber-700" : "text-slate-400 group-hover:text-slate-600"}`} />
+                  <Icon size={16} className={`transition-colors shrink-0 ${active ? "text-white" : k === "browse" ? "text-emerald-600 group-hover:text-emerald-700" : isHighlighted ? "text-amber-600 group-hover:text-amber-700" : "text-slate-400 group-hover:text-slate-600"}`} />
                   <span className="truncate">{label as string}</span>
-                  {isHighlighted && !active && <span className="ml-auto w-2 h-2 bg-amber-500 rounded-full animate-pulse shrink-0" />}
+                  {(k === "browse" || isHighlighted) && !active && <span className={`ml-auto w-2 h-2 rounded-full animate-pulse shrink-0 ${k === "browse" ? "bg-emerald-500" : "bg-amber-500"}`} />}
                   {active && <ChevronRight size={12} className="ml-auto opacity-60 shrink-0" />}
                 </button>
               );
@@ -1268,7 +1390,7 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
       <aside className="hidden md:flex w-[264px] bg-white border-r border-slate-200 flex-col sticky top-0 h-screen shrink-0">
         <div className="h-[64px] flex items-center gap-2.5 px-5 font-bold border-b border-slate-200 tracking-tight shrink-0">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-[#229ED9] to-[#1B8AC4] flex items-center justify-center text-white shadow-md shadow-[#229ED9]/20"><Send size={15} /></div>
-          <span className="text-[15px] tracking-tight">Subplus</span>
+          <span className="text-[15px] tracking-tight">Yosender</span>
           <span className="ml-auto text-[10px] font-bold tracking-widest bg-[#EFF6FF] text-[#229ED9] border border-[#BFDBFE] px-2.5 py-1 rounded-full">PRO</span>
         </div>
         <nav className="p-4 flex-1 overflow-auto"><Nav /></nav>
@@ -1288,7 +1410,7 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
           <div className="absolute left-0 top-0 bottom-0 w-[300px] max-w-[85vw] bg-white shadow-2xl flex flex-col overflow-hidden">
             <div className="h-[64px] flex items-center gap-2.5 px-5 font-bold border-b border-slate-200 shrink-0">
               <div className="w-8 h-8 rounded-lg bg-[#229ED9] flex items-center justify-center text-white"><Send size={14} /></div>
-              Subplus
+              Yosender
               <button onClick={() => setOpen(false)} className="ml-auto w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center hover:bg-slate-200"><X size={14} /></button>
             </div>
             <div className="flex-1 overflow-auto p-4"><Nav onItemClick={() => setOpen(false)} /></div>
@@ -1303,7 +1425,7 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
         <div className="h-14 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 flex items-center justify-between px-4 md:px-6 sticky top-0 z-10 gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <button className="md:hidden w-9 h-9 rounded-xl bg-[#229ED9] text-white flex items-center justify-center shrink-0 hover:bg-[#1B8AC4] active:scale-95 transition-all" onClick={() => setOpen(true)} aria-label="Open menu"><Menu size={16} /></button>
-            <div className="md:hidden font-bold flex items-center gap-2 text-sm"><Send size={14} className="text-[#229ED9]" />Subplus</div>
+            <div className="md:hidden font-bold flex items-center gap-2 text-sm"><Send size={14} className="text-[#229ED9]" />Yosender</div>
             <span className="hidden md:inline-flex items-center gap-2 text-xs font-semibold text-slate-400 tracking-widest"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> WORKSPACE</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -1343,6 +1465,39 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
         </div>
         <span className="inline-flex items-center gap-1.5 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-1.5 rounded-full w-fit"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> System operational</span>
       </div>
+
+      {/* Join Telegram community */}
+      <a
+        href="https://t.me/yosendercom"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group relative flex flex-col sm:flex-row sm:items-center gap-4 overflow-hidden rounded-2xl bg-gradient-to-r from-[#229ED9] via-[#1B8AC4] to-[#0F6FA8] p-5 text-white shadow-lg shadow-[#229ED9]/20 hover:shadow-xl hover:shadow-[#229ED9]/30 hover:-translate-y-0.5 transition-all duration-300 animate-slide-up"
+      >
+        {/* soft glow blobs */}
+        <div className="absolute -top-12 -left-12 w-44 h-44 bg-white/15 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute -bottom-16 right-1/4 w-52 h-52 bg-white/10 rounded-full blur-3xl pointer-events-none" />
+        {/* shine sweep */}
+        <span className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shine pointer-events-none" />
+        <div className="relative flex items-center gap-3.5 min-w-0 flex-1">
+          <span className="relative w-11 h-11 rounded-2xl bg-white flex items-center justify-center shrink-0 shadow-md">
+            <Send size={18} className="text-[#229ED9] animate-float-slow" />
+            <span className="absolute -top-1 -right-1 flex w-3 h-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 border-2 border-white" />
+            </span>
+          </span>
+          <span className="min-w-0">
+            <span className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold text-[15px] tracking-tight">Join Telegram of Yosender</span>
+              <span className="text-[10px] font-bold tracking-widest bg-white/20 border border-white/25 px-2 py-0.5 rounded-full">OFFICIAL COMMUNITY</span>
+            </span>
+            <span className="block text-[13px] text-white/70 mt-0.5 truncate">@yosendercom · updates, tips & support</span>
+          </span>
+        </div>
+        <span className="relative inline-flex items-center justify-center gap-1.5 bg-white text-slate-900 text-sm font-semibold px-5 py-2.5 rounded-full group-hover:gap-2.5 transition-all shrink-0">
+          Join @yosendercom <ExternalLink size={14} className="text-[#229ED9]" />
+        </span>
+      </a>
 
       {/* Hero stats — 3 cards with depth */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
@@ -1441,6 +1596,349 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
   );
 }
 
+function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
+  const { tgAccounts, activeTgId, setActiveTgId } = useStore() as any;
+  const [groups, setGroups] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [totalMembers, setTotalMembers] = useState(0);
+  const [sortBy, setSortBy] = useState<"name" | "members">("members");
+  const [planName, setPlanName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [locked, setLocked] = useState(false);
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("");
+  const [typeF, setTypeF] = useState<"All" | "public" | "private">("All");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [joinAccountId, setJoinAccountId] = useState<string | null>(null);
+  const [pendingLinks, setPendingLinks] = useState<string[]>([]);
+  const [joining, setJoining] = useState(false);
+  const [joinResults, setJoinResults] = useState<any[] | null>(null);
+  const [joinDone, setJoinDone] = useState<{ total: number; account: string } | null>(null);
+
+  const load = async (opts?: { categoryId?: string; search?: string; groupType?: string }) => {
+    setLoading(true); setErr(""); setLocked(false);
+    try {
+      const params = new URLSearchParams();
+      const c = opts?.categoryId ?? cat;
+      const s = opts?.search ?? q;
+      const t = opts?.groupType ?? typeF;
+      if (c) params.set("categoryId", c);
+      if (s.trim()) params.set("search", s.trim());
+      if (t !== "All") params.set("groupType", t);
+      const r = await fetch(`/api/groups/browse?${params.toString()}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Failed to load groups");
+      setGroups(j.groups || []);
+      setCategories(j.categories || []);
+      setTotal(j.total ?? (j.groups || []).length);
+      setTotalMembers(typeof j.totalMembers === "number" ? j.totalMembers : 0);
+      setPlanName(j.plan || "");
+      setLocked(!!j.locked);
+      setSelected(new Set());
+    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+  };
+  useEffect(() => { load({ categoryId: "", search: "", groupType: "All" }); }, []);
+
+  useEffect(() => {
+    if (!joinAccountId && activeTgId) setJoinAccountId(activeTgId);
+    else if (!joinAccountId && tgAccounts?.length) setJoinAccountId(tgAccounts[0].id);
+  }, [tgAccounts, activeTgId]);
+
+  const toggle = (id: string) => setSelected(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const toggleCat = (catId: string, ids: string[]) => setSelected(prev => {
+    const n = new Set(prev);
+    if (ids.every(id => n.has(id))) ids.forEach(id => n.delete(id));
+    else ids.forEach(id => n.add(id));
+    return n;
+  });
+  const selectedLinks = (ids?: string[]) => {
+    const set = ids ? new Set(ids) : selected;
+    return groups.filter(g => set.has(g.id)).map(g => g.normalized_link || g.group_link);
+  };
+
+  // Runs joins in the background: fires immediately (no modal wait), shows a
+  // live sticky progress bar, keeps working while browsing. confirmJoin is
+  // kept below for the single-Join button that picks the account first.
+  const validJoinLinks = (links: string[]) =>
+    [...new Set((links || []).map((l) => String(l || "").trim()).filter((l) => /t\.me\//i.test(l)))];
+
+  const doJoinNow = async (links: string[], accountId: string | null) => {
+    const valid = validJoinLinks(links);
+    if (!valid.length) {
+      setErr("No joinable links — activate a plan to unlock joining, then refresh the catalog.");
+      return;
+    }
+    if (!accountId) { setErr("Pick an account to join from"); return; }
+    const account = (tgAccounts || []).find((a: any) => a.id === accountId) || { displayName: "your account" };
+    setPendingLinks(valid);
+    setJoinResults([]); setErr("");
+    setJoining(true);
+    try {
+      const CHUNK = 10;
+      const all: any[] = [];
+      for (let i = 0; i < valid.length; i += CHUNK) {
+        const chunk = valid.slice(i, i + CHUNK);
+        const r = await fetch("/api/telegram/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: chunk, accountId }) });
+        const j = await r.json();
+        if (r.status === 403 && j.premiumRequired) { onNav("plans"); throw new Error(j.error); }
+        if (!r.ok) throw new Error(j.error || "Join failed");
+        all.push(...(j.results || []));
+        setJoinResults([...all]);
+      }
+      setActiveTgId(accountId);
+      setJoinDone({ total: valid.length, account: account.displayName || account.username || account.phone || "your account" });
+    } catch (e: any) { setErr(e.message); } finally { setJoining(false); }
+  };
+
+  const startJoin = (links: string[]) => {
+    if (locked) { onNav("plans"); return; }
+    const valid = validJoinLinks(links);
+    if (!valid.length) {
+      setErr("No joinable links — activate a plan to unlock joining, then refresh the catalog.");
+      return;
+    }
+    if (!tgAccounts?.length) { onNav("connect"); return; }
+    const accountId = joinAccountId && tgAccounts.some((a: any) => a.id === joinAccountId)
+      ? joinAccountId
+      : (activeTgId && tgAccounts.some((a: any) => a.id === activeTgId) ? activeTgId : tgAccounts[0].id);
+    setJoinAccountId(accountId);
+    // Fire-and-forget: no modal, the confirmation banner below shows live progress.
+    void doJoinNow(valid, accountId);
+  };
+
+  const fmtMembers = (n: any) => {
+    if (typeof n !== "number") return null;
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1).replace(/\.0$/, "")}M members`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K members`;
+    return `${n.toLocaleString()} member${n === 1 ? "" : "s"}`;
+  };
+
+  const byCat = groups.reduce((acc: Record<string, any[]>, g: any) => { (acc[g.category_name] = acc[g.category_name] || []).push(g); return acc; }, {});
+  const sortList = (list: any[]) => [...list].sort((a: any, b: any) => {
+    if (sortBy === "members") {
+      const am = typeof a.member_count === "number" ? a.member_count : -1;
+      const bm = typeof b.member_count === "number" ? b.member_count : -1;
+      if (am !== bm) return bm - am;
+    }
+    return String(a.group_name || a.group_username || "").localeCompare(String(b.group_name || b.group_username || ""));
+  });
+  const catNames = Object.keys(byCat).sort((a, b) => {
+    // categories with the biggest groups first when sorting by members
+    if (sortBy === "members") {
+      const top = (name: string) => Math.max(0, ...byCat[name].map((g: any) => (typeof g.member_count === "number" ? g.member_count : 0)));
+      const d = top(b) - top(a);
+      if (d) return d;
+    }
+    return a.localeCompare(b);
+  });
+  const joinStats = (joinResults || []).reduce(
+    (acc: any, r: any) => {
+      if (r.status === "Joined" || r.status === "Already member") acc.ok++;
+      else if (r.status === "RateLimited") acc.limited++;
+      else acc.failed++;
+      return acc;
+    },
+    { ok: 0, limited: 0, failed: 0 }
+  );
+  const joinPct = pendingLinks.length ? Math.min(100, Math.round(((joinResults?.length || 0) / pendingLinks.length) * 100)) : 0;
+
+  const groupInitial = (g: any) => String(g.group_name || g.group_username || "?").trim().charAt(0).toUpperCase() || "?";
+  const memberLabel = (g: any) => fmtMembers(g.member_count);
+
+  return (
+    <div className="max-w-5xl mx-auto">
+      {/* ── Header ── */}
+      <div className="flex flex-wrap gap-3 justify-between items-center">
+        <div>
+          <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">Browse Groups</h1>
+          <p className="text-sm text-slate-500 mt-1">
+            {locked
+              ? "Explore the full catalog — activate a plan to join."
+              : <>Explore the catalog{planName ? <> · <span className="font-semibold text-emerald-700">{planName}</span></> : null} — select groups and join in one click.</>}
+          </p>
+        </div>
+        <button onClick={() => load()} disabled={loading} className="inline-flex items-center gap-2 bg-slate-900 text-white px-5 py-2.5 rounded-full text-sm font-semibold hover:bg-slate-700 disabled:opacity-50 shrink-0"><Search size={14} />{loading ? "Loading…" : "Refresh"}</button>
+      </div>
+
+      {/* ── Stats ── */}
+      <div className="mt-4 grid grid-cols-3 gap-3">
+        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3.5">
+          <div className="text-[11px] font-bold tracking-widest text-slate-400">GROUPS</div>
+          <div className="text-2xl font-extrabold text-slate-900 mt-0.5">{loading ? "…" : total.toLocaleString()}</div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3.5">
+          <div className="text-[11px] font-bold tracking-widest text-slate-400">TOTAL MEMBERS</div>
+          <div className="text-2xl font-extrabold text-slate-900 mt-0.5">{loading ? "…" : totalMembers > 0 ? totalMembers.toLocaleString() : "—"}</div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-2xl px-4 py-3.5">
+          <div className="text-[11px] font-bold tracking-widest text-slate-400">CATEGORIES</div>
+          <div className="text-2xl font-extrabold text-slate-900 mt-0.5">{loading ? "…" : catNames.length}</div>
+        </div>
+      </div>
+
+      {err && !locked && <div className="bg-red-50 border-red-200 text-red-700 border text-sm rounded-xl p-3 mt-3">{err}</div>}
+
+      {/* ── Premium banner (locked only) ── */}
+      {locked && (
+        <div className="bg-slate-900 rounded-2xl px-5 py-4 mt-4 flex flex-wrap gap-3 items-center">
+          <div className="flex-1 min-w-[220px]">
+            <div className="text-white font-bold text-sm">Joining is a premium feature</div>
+            <div className="text-slate-400 text-xs mt-0.5">Browse everything free — activate Elite, Pro, Max+ or Luxe to unlock one-click joining.</div>
+          </div>
+          <button onClick={() => onNav("plans")} className="bg-emerald-500 text-white px-6 py-2.5 rounded-full text-sm font-bold hover:bg-emerald-400 shrink-0">View Plans</button>
+        </div>
+      )}
+
+      {/* ── Join-from account + selection (premium only) ── */}
+      {!locked && (tgAccounts?.length > 0 || selected.size > 0) && (
+        <div className="card mt-4 px-4 py-3 flex flex-wrap gap-2 items-center">
+          {tgAccounts?.length > 0 ? (
+            <>
+              <label htmlFor="browse-join-from" className="text-micro text-slate-500">Join from</label>
+              <select id="browse-join-from" value={joinAccountId || ""} onChange={e => setJoinAccountId(e.target.value)} className="input !w-auto flex-1 min-w-[200px] !rounded-full !py-2">
+                {(tgAccounts || []).map((a: any) => <option key={a.id} value={a.id}>{a.displayName || a.username || a.phone} {a.username ? `(@${a.username})` : ""} · {a.phone}</option>)}
+              </select>
+            </>
+          ) : (
+            <button onClick={() => onNav("connect")} className="btn btn-primary !py-2">Connect Telegram to join</button>
+          )}
+          {selected.size > 0 && (
+            <>
+              <span className="badge badge-neutral">{selected.size} selected</span>
+              <button onClick={() => startJoin(selectedLinks())} disabled={joining} className="btn btn-primary !py-2">{joining ? `Joining ${joinResults?.length || 0} of ${pendingLinks.length}…` : `Join selected (${selected.size})`}</button>
+              <button onClick={() => setSelected(new Set())} className="btn btn-ghost !px-2 !py-2 text-xs">Clear</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Search & filters ── */}
+      <div className="card mt-3 p-3 flex flex-wrap gap-2 items-center">
+        <div className="relative flex-1 min-w-[200px]">
+          <Search size={14} className="absolute left-3 top-3 text-slate-400" />
+          <input value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => e.key === "Enter" && load()} placeholder="Search groups…" aria-label="Search groups" className="input !rounded-full !pl-9" />
+        </div>
+        <select value={cat} onChange={e => { setCat(e.target.value); load({ categoryId: e.target.value }); }} aria-label="Filter by category" className="input !w-auto !rounded-full max-w-[180px]">
+          <option value="">All categories</option>
+          {categories.map(c => <option key={c.id} value={c.id}>{c.name} ({c.count})</option>)}
+        </select>
+        <select value={typeF} onChange={e => { const v = e.target.value as any; setTypeF(v); load({ groupType: v }); }} aria-label="Filter by type" className="input !w-auto !rounded-full">
+          <option value="All">All types</option>
+          <option value="public">Public</option>
+          <option value="private">Private</option>
+        </select>
+        <select value={sortBy} onChange={e => setSortBy(e.target.value as any)} className="input !w-auto !rounded-full" title="Sort groups" aria-label="Sort groups">
+          <option value="members">Most members</option>
+          <option value="name">Name A–Z</option>
+        </select>
+        <button onClick={() => load()} className="btn btn-primary">Search</button>
+      </div>
+      {(joining || (joinResults && joinResults.length > 0)) && !locked && (
+        <div className="card card-elevated mt-3 p-4 sticky top-3 animate-slide-down" role="status" aria-live="polite">
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className={`badge ${joining ? "badge-primary" : "badge-success"}`}>
+              {joining ? <span className="animate-spin inline-block">◌</span> : "✓"}
+              {joining ? `Joining ${joinResults?.length || 0} of ${pendingLinks.length}…` : `Done — ${joinStats.ok} of ${pendingLinks.length} joined`}
+            </span>
+            {!joining && joinResults && (
+              <>
+                {joinStats.limited > 0 && <span className="badge badge-warning">{joinStats.limited} rate-limited</span>}
+                {joinStats.failed > 0 && <span className="badge badge-danger">{joinStats.failed} failed</span>}
+                <button onClick={() => { setJoinResults(null); setPendingLinks([]); setJoinDone(null); }} className="btn btn-ghost ml-auto !px-2 !py-1 text-xs">Dismiss</button>
+              </>
+            )}
+          </div>
+          <div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden" role="progressbar" aria-valuenow={joinPct} aria-valuemin={0} aria-valuemax={100}>
+            <div className="h-full bg-emerald-500 rounded-full transition-all duration-300" style={{ width: `${joinPct}%` }} />
+          </div>
+        </div>
+      )}
+      {joinResults && !joining && !locked && (
+        <div className="card mt-3 overflow-hidden">
+          <div className="max-h-72 overflow-auto divide-y divide-slate-100">
+            {joinResults.map((r: any, i: number) => (
+              <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm">
+                <span className="font-medium truncate text-slate-700">{r.link}</span>
+                <span className={`badge shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "badge-success" : r.status === "RateLimited" ? "badge-warning" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Group list ── */}
+      {loading ? (
+        <div className="card mt-4 p-6 space-y-3" aria-busy="true" aria-label="Loading groups">
+          {[0, 1, 2].map(i => <div key={i} className="flex items-center gap-3"><div className="skeleton !rounded-full" style={{ width: 40, height: 40 }} /><div className="flex-1 space-y-2"><div className="skeleton skeleton-text !w-2/3" /><div className="skeleton skeleton-text !w-1/3" /></div><div className="skeleton" style={{ width: 72, height: 32, borderRadius: 9999 }} /></div>)}
+        </div>
+      ) : !groups.length ? (
+        <div className="card mt-4">
+          <div className="empty-state">
+            <div className="empty-state-icon"><Users size={24} /></div>
+            <div className="empty-state-title">No groups found</div>
+            <div className="empty-state-desc">Try a different search — or check back later.</div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 space-y-4">
+          {catNames.map(cn => {
+            const list = sortList(byCat[cn]);
+            const ids = list.map((g: any) => g.id);
+            const allSel = ids.every(id => selected.has(id));
+            const catColor = categories.find(c => c.name === cn)?.color || "#10B981";
+            return (
+              <section key={cn} aria-label={`${cn} groups`} className="card overflow-hidden">
+                <header className="flex flex-wrap gap-2 items-center px-5 py-3.5 border-b border-slate-100">
+                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: catColor }} />
+                  <span className="font-bold text-sm text-slate-900">{cn}</span>
+                  <span className="text-caption">{list.length} {list.length === 1 ? "group" : "groups"}</span>
+                  <div className="ml-auto flex gap-2">
+                    {!locked && <button onClick={() => toggleCat(cn, ids)} className="btn btn-ghost !py-1.5 text-xs">{allSel ? "Deselect" : "Select all"}</button>}
+                    <button onClick={() => locked ? onNav("plans") : startJoin(selectedLinks(ids))} disabled={joining} className={`btn !py-1.5 text-xs ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock to Join" : `Join all ${list.length}`}</button>
+                  </div>
+                </header>
+                <ul className="divide-y divide-slate-100">
+                  {list.map((g: any) => (
+                    <li key={g.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50/60 transition-colors">
+                      {!locked && <input type="checkbox" checked={selected.has(g.id)} onChange={() => toggle(g.id)} aria-label={`Select ${g.group_name || g.group_username || "group"}`} className="accent-emerald-600 w-4 h-4 shrink-0" />}
+                      <span className="w-10 h-10 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-sm font-bold text-slate-600 shrink-0" aria-hidden="true">{groupInitial(g)}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-slate-900 truncate">{g.group_name || (g.group_username ? `@${g.group_username}` : "Unnamed group")}</div>
+                        <div className="text-caption truncate mt-0.5 flex items-center gap-1.5">
+                          <Users size={11} className="shrink-0" />
+                          {memberLabel(g) || "Members unavailable"}
+                          <span aria-hidden="true">·</span>
+                          <span className="capitalize">{g.group_type}</span>
+                        </div>
+                      </div>
+                      <button onClick={() => locked ? onNav("plans") : startJoin([g.normalized_link || g.group_link])} disabled={joining} className={`btn !py-2 text-xs shrink-0 ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock" : "Join"}</button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+      )}
+      {joinDone && !joining && !locked && (
+        <div className="fixed inset-0 z-[var(--z-modal)] flex items-center justify-center p-4 animate-fade-in" role="dialog" aria-modal="true" aria-label="Join complete">
+          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => setJoinDone(null)} />
+          <div className="relative bg-white rounded-[var(--radius-2xl)] shadow-[var(--shadow-xl)] w-full max-w-md p-6 text-center animate-scale-in">
+            <div className="mx-auto w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-2xl text-emerald-600">✓</div>
+            <h3 className="text-h3 text-slate-900 mt-4">You're in!</h3>
+            <p className="text-body-sm text-slate-500 mt-1">Successfully joined <b className="text-slate-800">{joinStats.ok} of {joinDone.total} groups</b> as {joinDone.account}.{joinStats.limited > 0 ? ` ${joinStats.limited} hit Telegram's rate limit — retry them in a few minutes.` : ""}{joinStats.failed > 0 ? ` ${joinStats.failed} failed — see details below.` : ""}</p>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setJoinDone(null)} className="btn btn-primary flex-1 !py-3">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DestinationsView() {
   const { dests, tg, activeTgId } = useStore() as any;
   const [real, setReal] = useState<any[] | null>(null);
@@ -1454,10 +1952,15 @@ function DestinationsView() {
   const [joinResults, setJoinResults] = useState<any[] | null>(null);
   const joinList = [...new Set(joinLinks.split("\n").map(s => s.trim()).filter(Boolean))];
 
+  const [permF, setPermF] = useState<"All" | "Allowed" | "Restricted">("All");
+  const [leavingAll, setLeavingAll] = useState(false);
+  const [leaveResults, setLeaveResults] = useState<any[] | null>(null);
   const groupsOnly = (arr: any[]) => arr.filter((d: any) => d.type === "Group");
   const list = groupsOnly(real ?? dests);
   let filtered = list.filter((d: any) => d.title.toLowerCase().includes(q.toLowerCase()));
   if (pf !== "All") filtered = filtered.filter((d: any) => (d.privacy || "Private") === pf);
+  if (permF === "Allowed") filtered = filtered.filter((d: any) => d.allowed);
+  else if (permF === "Restricted") filtered = filtered.filter((d: any) => !d.allowed);
   const [leavingId, setLeavingId] = useState<string | null>(null);
   const refresh = async () => {
     setLoading(true); setErr("");
@@ -1477,19 +1980,45 @@ function DestinationsView() {
   };
   const doJoin = async () => {
     if (!joinList.length) return alert("Paste at least one group link");
+    setTab("list");
     setJoining(true); setErr(""); setJoinResults([]);
+    setPendingJoinCount(joinList.length);
     try {
-      const CHUNK = 50;
+      // Small chunks paint progress fast instead of one long silent request.
+      const CHUNK = 10;
       const all: any[] = [];
       for (let i = 0; i < joinList.length; i += CHUNK) {
         const chunk = joinList.slice(i, i + CHUNK);
-        const r = await fetch("/api/telegram/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: chunk }) });
+        const r = await fetch("/api/telegram/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: chunk, accountId: activeTgId }) });
         const j = await r.json(); if (!r.ok) throw new Error(j.error);
         all.push(...(j.results || []));
         setJoinResults([...all]);
-        if (j.results?.some((x: any) => x.status === "RateLimited")) await new Promise(res => setTimeout(res, 2000));
       }
+      setJoinLinks("");
+      await refresh();
     } catch (e: any) { setErr(e.message); } finally { setJoining(false); }
+  };
+  // Total being joined — joinResults live on both tabs, so progress stays visible.
+  const [pendingJoinCount, setPendingJoinCount] = useState(0);
+  const doLeaveAll = async () => {
+    if (!filtered.length) return alert("Nothing to leave — the list is empty");
+    if (!confirm(`Leave all ${filtered.length} shown groups? You will need invite links to rejoin private ones.`)) return;
+    setLeavingAll(true); setErr(""); setLeaveResults([]);
+    const all: any[] = [];
+    try {
+      for (const d of filtered) {
+        try {
+          const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title }) });
+          const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to leave");
+          all.push({ title: d.title, status: "Left" });
+          setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String(d.id)) : prev);
+        } catch (e: any) {
+          all.push({ title: d.title, status: "Failed", error: e.message });
+        }
+        setLeaveResults([...all]);
+      }
+      await refresh();
+    } finally { setLeavingAll(false); }
   };
   return (
     <div>
@@ -1498,36 +2027,57 @@ function DestinationsView() {
           <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">Groups & Joiner</h1>
           <p className="text-sm text-slate-500 mt-1">{tab === "list" ? <>{real ? <span className="inline-flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-semibold"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> Live — {tg ? `@${tg.username}` : ""}</span> : <span className="inline-flex items-center gap-1.5 text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full text-xs font-semibold">↻ Hit Refresh to load groups</span>} <span className="text-xs text-slate-400 ml-1">— active account only</span></> : "Join public & private groups via invite links."}</p>
         </div>
-        {tab === "list" && <button onClick={refresh} disabled={loading} className="inline-flex items-center gap-2 bg-[#229ED9] text-white px-5 py-2.5 rounded-full text-sm font-semibold shadow-sm hover:bg-[#1B8AC4] disabled:opacity-50 shrink-0"><Search size={14} />{loading ? "Loading..." : "Refresh"}</button>}
+        {tab === "list" && (
+          <div className="flex gap-2 shrink-0">
+            <button onClick={doLeaveAll} disabled={loading || leavingAll || !filtered.length} className="btn btn-destructive !py-2.5">{leavingAll ? "Leaving…" : `Leave all (${filtered.length})`}</button>
+            <button onClick={refresh} disabled={loading} className="btn btn-primary !py-2.5"><Search size={14} />{loading ? "Loading…" : "Refresh"}</button>
+          </div>
+        )}
       </div>
       <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1 mt-4">
         <button onClick={() => setTab("list")} className={`px-5 py-2 rounded-full text-xs font-bold transition-all duration-200 ${tab === "list" ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>My Groups</button>
         <button onClick={() => setTab("join")} className={`px-5 py-2 rounded-full text-xs font-bold transition-all duration-200 ${tab === "join" ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>Join Groups</button>
       </div>
-      {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-3 mt-3">{err}</div>}
+      {err && <div className="badge badge-danger mt-3 !text-xs !py-2 !px-3.5 !whitespace-normal !leading-relaxed" role="alert">{err}</div>}
+      {(joining || (joinResults && joinResults.length > 0)) && (
+        <JoinProgressCard joining={joining} results={joinResults} total={pendingJoinCount || joinResults?.length || 0} onDismiss={() => { setJoinResults(null); setPendingJoinCount(0); }} />
+      )}
+      {leavingAll && leaveResults && <div className="text-caption text-red-600 mt-3 font-semibold">{leaveResults.length} of {filtered.length} left…</div>}
       {tab === "join" ? (
-        <div className="bg-white border border-[#E2E8F0] rounded-[20px] p-5 mt-4 shadow-sm space-y-3">
-          <div className="text-xs font-bold tracking-widest text-[#64748B]">GROUP LINKS — one per line (no limit — 1000+ supported)</div>
-          <p className="text-xs text-[#64748B]">Supports private (<code className="bg-[#F1F5F9] px-1 rounded">t.me/+AbCdEf…</code>, <code className="bg-[#F1F5F9] px-1 rounded">t.me/joinchat/…</code>) & public (<code className="bg-[#F1F5F9] px-1 rounded">t.me/username</code>, <code className="bg-[#F1F5F9] px-1 rounded">@username</code>, <code className="bg-[#F1F5F9] px-1 rounded">https://t.me/…</code>). Duplicates removed. Large batches run with progress — Telegram may rate-limit; failed ones can be retried.</p>
-          <textarea value={joinLinks} onChange={e => setJoinLinks(e.target.value)} placeholder={"https://t.me/+AbCdEfGhIjKlMnOp\nhttps://t.me/joinchat/AAAAAE...\nt.me/mypublicgroup\n@anothergroup"} rows={12} className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 text-sm font-mono focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none" />
-          <div className="flex gap-2 items-center text-xs"><span className={`font-bold px-2.5 py-1 rounded-full border ${joinList.length ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0]"}`}>{joinList.length.toLocaleString()} links</span><span className="text-[#94A3B8]">No limit</span><button onClick={() => { setJoinLinks(""); setJoinResults(null); }} className="ml-auto border border-[#E2E8F0] bg-white px-3 py-1.5 rounded-full font-semibold">Clear</button></div>
-          {joining && joinResults && <div className="text-xs font-semibold text-[#229ED9]">{joinResults.length} / {joinList.length} processed…</div>}
-          <button onClick={doJoin} disabled={joining || !joinList.length} className="bg-[#229ED9] text-white px-7 py-3 rounded-full text-sm font-bold shadow disabled:opacity-50">{joining ? `Joining ${joinResults ? `${joinResults.length}/${joinList.length}` : "..."}` : `Join ${joinList.length ? joinList.length.toLocaleString() : ""} Groups`}</button>
-          {joinResults && <div className="space-y-1.5 pt-2">{joinResults.map((r: any, i: number) => <div key={i} className={`flex justify-between items-center rounded-xl px-3.5 py-2.5 border text-sm ${r.status === "Joined" || r.status === "Already member" ? "bg-emerald-50 border-emerald-200" : r.status === "RateLimited" ? "bg-amber-50 border-amber-200" : "bg-red-50 border-red-200"}`}><span className="font-medium truncate mr-2">{r.link}</span><span className={`text-xs font-bold shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "text-emerald-700" : r.status === "RateLimited" ? "text-amber-700" : "text-red-600"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}<button onClick={refresh} className="mt-2 text-xs font-bold text-[#229ED9] border border-[#BFDBFE] bg-[#EFF6FF] px-4 py-2 rounded-full">Refresh My Groups →</button></div>}
+        <div className="card p-5 mt-4 space-y-3">
+          <div className="text-micro text-slate-500">Group links — one per line</div>
+          <p className="text-body-sm text-slate-500">Private (<code className="bg-slate-100 px-1 rounded">t.me/+AbCdEf…</code>, <code className="bg-slate-100 px-1 rounded">t.me/joinchat/…</code>) and public (<code className="bg-slate-100 px-1 rounded">t.me/username</code>, <code className="bg-slate-100 px-1 rounded">@username</code>) links. Duplicates are removed. Telegram may rate-limit large batches — failed ones can be retried.</p>
+          <textarea value={joinLinks} onChange={e => setJoinLinks(e.target.value)} placeholder={"https://t.me/+AbCdEfGhIjKlMnOp\nhttps://t.me/joinchat/AAAAAE...\nt.me/mypublicgroup\n@anothergroup"} rows={10} aria-label="Group links, one per line" className="input !font-mono" />
+          <div className="flex gap-2 items-center text-xs"><span className={`badge ${joinList.length ? "badge-success" : "badge-neutral"}`}>{joinList.length.toLocaleString()} links</span><button onClick={() => { setJoinLinks(""); setJoinResults(null); }} className="btn btn-ghost ml-auto !py-1.5 text-xs">Clear</button></div>
+          <button onClick={doJoin} disabled={joining || !joinList.length} className="btn btn-primary !px-7 !py-3">{joining && joinResults ? `Joining ${joinResults.length} of ${joinList.length}…` : `Join ${joinList.length ? joinList.length.toLocaleString() : ""} groups`}</button>
+          {joinResults && <div className="card overflow-hidden"><div className="max-h-64 overflow-auto divide-y divide-slate-100">{joinResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.link}</span><span className={`badge shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "badge-success" : r.status === "RateLimited" ? "badge-warning" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}</div><button onClick={() => { setTab("list"); refresh(); }} className="btn btn-ghost m-2 text-xs">Refresh My Groups →</button></div>}
         </div>
       ) : (
         <>
-          <div className="flex items-center gap-2 mt-4">
-            <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1">
-              {["All", "Private", "Public"].map(p => <button key={p} onClick={() => setPf(p)} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${pf === p ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{p}</button>)}
+          <div className="flex flex-wrap items-center gap-2 mt-4" role="group" aria-label="Group filters">
+            <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1" role="group" aria-label="Privacy filter">
+              {["All", "Private", "Public"].map(p => <button key={p} onClick={() => setPf(p)} aria-pressed={pf === p} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${pf === p ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{p}</button>)}
             </div>
-            <span className="text-xs font-medium text-slate-400 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full">{filtered.length} shown</span>
+            <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1" role="group" aria-label="Permission filter">
+              {[["All", "All groups"], ["Allowed", "✓ Allowed"], ["Restricted", "✕ Restricted"]].map(([v, label]) => <button key={v} onClick={() => setPermF(v as any)} aria-pressed={permF === v} title={v === "All" ? "Show every group" : v === "Allowed" ? "Only groups you can send to" : "Only groups blocking sends"} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${permF === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>)}
+            </div>
+            <span className="badge badge-neutral">{filtered.length} shown</span>
           </div>
-          <div className="relative mt-3"><Search size={16} className="absolute left-3.5 top-3.5 text-[#94A3B8]" /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search groups & channels" className="w-full border border-[#E2E8F0] rounded-xl pl-10 pr-3 py-3 text-sm bg-white focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none shadow-sm" /></div>
-          <div className="bg-white border border-[#E2E8F0] rounded-[20px] mt-4 overflow-hidden shadow-sm overflow-x-auto"><table className="w-full text-sm min-w-[720px]">
-            <thead className="bg-[#F8FAFC] text-xs font-semibold text-[#64748B]"><tr><th className="text-left px-4 py-3">Group / Channel</th><th className="px-4">Type</th><th className="px-4">Privacy</th><th className="px-4">Members</th><th className="px-4">Permission</th><th className="px-4">Last Used</th><th className="px-4 text-right">Action</th></tr></thead>
-            <tbody>{filtered.map((d: any) => <tr key={d.id} className="border-t border-[#F1F5F9] hover:bg-[#F8FAFC]/60"><td className="px-4 py-3"><div className="font-semibold">{d.title}</div>{d.username && <div className="text-xs text-[#94A3B8]">@{d.username}</div>}</td><td className="px-4"><span className="bg-[#F1F5F9] px-2 py-1 rounded-full text-xs font-medium">{d.type}</span></td><td className="px-4"><span className={`px-2 py-1 rounded-full text-xs font-semibold border ${d.privacy === "Public" ? "bg-[#EFF6FF] text-blue-700 border-[#BFDBFE]" : "bg-violet-50 text-violet-700 border-violet-200"}`}>{d.privacy || "Private"}</span></td><td className="px-4">{d.members?.toLocaleString?.() ?? d.members}</td><td className="px-4">{d.allowed ? <span className="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-xs font-semibold">✓ Allowed</span> : <span className="text-red-600 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-xs font-semibold">✕ Unavailable</span>}</td><td className="px-4 text-[#64748B]">{d.lastUsed}</td><td className="px-4 text-right"><button onClick={() => doLeave(d)} disabled={leavingId === d.id} className="text-xs font-bold bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-full hover:bg-red-50 disabled:opacity-50">{leavingId === d.id ? "Leaving…" : "Leave"}</button></td></tr>)}</tbody>
-          </table></div>
+          {leaveResults && !leavingAll && (
+            <div className="card mt-3 overflow-hidden">
+              <div className="max-h-64 overflow-auto divide-y divide-slate-100">
+                {leaveResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.title}</span><span className={`badge shrink-0 ${r.status === "Left" ? "badge-neutral" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}
+              </div>
+              <button onClick={() => setLeaveResults(null)} className="btn btn-ghost m-2 text-xs">Dismiss</button>
+            </div>
+          )}
+          <div className="relative mt-3"><Search size={16} className="absolute left-3.5 top-3.5 text-slate-400" /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search groups" aria-label="Search my groups" className="input !rounded-xl !pl-10 !py-3 shadow-sm" /></div>
+          <div className="table-container card mt-4">
+            <table className="table">
+              <thead><tr><th>Group</th><th>Privacy</th><th>Members</th><th>Permission</th><th className="!text-right">Action</th></tr></thead>
+              <tbody>{filtered.map((d: any) => <tr key={d.id}><td><div className="font-semibold">{d.title}</div>{d.username && <div className="text-caption">@{d.username}</div>}</td><td><span className={`badge ${d.privacy === "Public" ? "badge-info" : "badge-neutral"}`}>{d.privacy || "Private"}</span></td><td className="tabular-nums">{d.members?.toLocaleString?.() ?? d.members}</td><td>{d.allowed ? <span className="badge badge-success">✓ Allowed</span> : <span className="badge badge-danger" title="Sending is blocked in this group">✕ Restricted</span>}</td><td className="!text-right"><button onClick={() => doLeave(d)} disabled={leavingId === d.id} className="btn btn-destructive !py-1.5 !px-3 text-xs">{leavingId === d.id ? "Leaving…" : "Leave"}</button></td></tr>)}</tbody>
+            </table>
+          </div>
         </>
       )}
     </div>
@@ -1579,7 +2129,7 @@ function CreateCampaign() {
   };
 
   if (running) {
-    const total = running.total, done = running.done, pct = Math.round(done / total * 100);
+    const total = running.total, done = running.done, pct = total ? Math.round(done / total * 100) : 0;
     const completed = done >= total;
     return (
       <div>
@@ -1594,10 +2144,11 @@ function CreateCampaign() {
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3"><div className="text-[11px] font-bold tracking-widest text-amber-700">LIMITED</div><div className="font-extrabold text-amber-600 text-lg">{running.limited}</div><div className="text-[10px] text-amber-600">Flood wait</div></div>
           </div>
           <div className="mt-4 space-y-1.5 text-sm max-h-48 overflow-auto">{running.logs.map((l: any, i: number) => <div key={i} className="flex justify-between bg-[#F8FAFC] rounded-xl px-3.5 py-2.5 border border-[#E2E8F0]"><span className="font-medium">{l.text}</span><span className={l.ok ? "text-emerald-600 font-semibold" : l.status==="RateLimited" ? "text-amber-600 font-semibold" : "text-red-600 font-semibold"}>{l.status}</span></div>)}</div>
+          {running.connLost && !completed && <div className="mt-4 bg-amber-50 border border-amber-200 text-amber-800 text-xs rounded-xl px-4 py-2.5">Connection to the server dropped — sending continues safely in the background. This screen keeps syncing; please wait, do not start the same campaign again.</div>}
           <div className="flex flex-wrap gap-2 mt-5">
             {!completed ? <>
-              <button onClick={() => { if(running.campaignId) updateCampaign(running.campaignId,{status:"Paused"}); setRunning(null); }} className="border border-[#E2E8F0] bg-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-1.5"><Pause size={14} />Pause</button>
-              <button onClick={() => { if(running.campaignId) updateCampaign(running.campaignId,{status:"Failed"}); setRunning(null); }} className="bg-red-600 text-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-1.5"><X size={14} />Cancel</button>
+              <button onClick={() => { if(running.campaignId) { updateCampaign(running.campaignId,{status:"Paused"}); const t=(globalThis as any).__tgm_send_poll?.[running.campaignId]; if(t) clearInterval(t); } setRunning(null); }} className="border border-[#E2E8F0] bg-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-1.5"><Pause size={14} />Pause</button>
+              <button onClick={() => { if(running.campaignId) { updateCampaign(running.campaignId,{status:"Failed"}); const t=(globalThis as any).__tgm_send_poll?.[running.campaignId]; if(t) clearInterval(t); } setRunning(null); }} className="bg-red-600 text-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-1.5"><X size={14} />Cancel</button>
             </> : <>
               <button onClick={exportRunning} className="bg-[#229ED9] text-white px-5 py-2.5 rounded-full text-sm font-semibold flex items-center gap-1.5"><Download size={14}/>Download / Export CSV</button>
               <button onClick={()=>{setRunning(null); setView("logs");}} className="border border-[#E2E8F0] bg-white px-5 py-2.5 rounded-full text-sm font-semibold">View in History →</button>
@@ -1611,30 +2162,87 @@ function CreateCampaign() {
   }
 
   const doSend = async (finalDests: string[], campName: string, id: string) => {
+    // Save the campaign row FIRST so the server can attach progress to it —
+    // the send below only appends to this campaignId, never double-sends.
     const c = { id, name: campName, destinations: finalDests, message: msg, status: "Running" as const, successful: 0, failed: 0, createdAt: new Date().toLocaleString(), logs: [] as any[], accountId: activeTgId } as any;
-    addCampaign(c);
-    setRunning({ campaignId: id, campaignName: campName, total: finalDests.length, done: 0, success: 0, fail: 0, limited: 0, logs: [] });
-    const finalize = (logs:any[])=>{
-      const success = logs.filter((l:any)=>l.ok).length, fail = logs.length - success, limited = logs.filter((l:any)=>l.status==="RateLimited").length;
-      setRunning({ campaignId: id, campaignName: campName, total: finalDests.length, done: logs.length, success, fail, limited, logs });
-      updateCampaign(id,{ status: fail>0 && success===0 ? "Failed" : "Completed", successful: success, failed: fail, logs: logs.map((l:any,idx:number)=>({dest: finalDests[idx], status: l.status, time: new Date().toLocaleString(), error: l.error||""})) });
+    await addCampaign(c);
+    const total = finalDests.length;
+    const titleOf = (destId: string) => dests.find((d: any) => d.id === destId)?.title || destId;
+    const runningFromLogs = (srvLogs: any[]) => {
+      const logs = srvLogs.map((l: any) => ({ text: titleOf(String(l.dest)), status: l.status, ok: l.status === "Sent", error: l.error || "" }));
+      const success = logs.filter((l: any) => l.ok).length, fail = logs.length - success;
+      return { campaignId: id, campaignName: campName, total, done: logs.length, success, fail, limited: logs.filter((l: any) => l.status === "RateLimited").length, logs, connLost: false };
     };
+    setRunning({ campaignId: id, campaignName: campName, total, done: 0, success: 0, fail: 0, limited: 0, logs: [], connLost: false });
+    // Live progress: the server persists every destination to the campaign
+    // row, so poll it. The Running screen stays correct even if this request
+    // is slow, times out, or the tab is refreshed.
+    let stopped = false;
+    (globalThis as any).__tgm_send_poll = (globalThis as any).__tgm_send_poll || {};
+    const stopPoll = () => { stopped = true; const t = (globalThis as any).__tgm_send_poll[id]; if (t) clearInterval(t); delete (globalThis as any).__tgm_send_poll[id]; };
+    const syncFromServer = async () => {
+      try {
+        const rr = await fetch("/api/campaigns", { cache: "no-store" });
+        const jj = await rr.json();
+        const srv = (jj.campaigns || []).find((x: any) => String(x.id) === String(id));
+        if (!srv) return null;
+        const st = runningFromLogs(srv.logs || []);
+        if (!stopped) setRunning(st);
+        return { srv, st };
+      } catch { return null; }
+    };
+    const finishFromServer = async () => {
+      stopPoll();
+      const got = await syncFromServer();
+      if (got) {
+        // Sync the local store copy from the authoritative server row
+        // (PATCH echoes the same values back — no duplication, replace only).
+        const logs = (got.srv.logs || []).map((l: any) => ({ dest: String(l.dest), status: l.status, time: l.time, error: l.error || "" }));
+        updateCampaign(id, { status: got.srv.status, successful: got.srv.successful, failed: got.srv.failed, logs } as any);
+      }
+    };
+    (globalThis as any).__tgm_send_poll[id] = setInterval(async () => {
+      const got = await syncFromServer();
+      // Server finished everything while we poll (e.g. request already
+      // returned elsewhere) — finalize from the server row.
+      if (got && got.st.logs.length >= total) await finishFromServer();
+    }, 2500);
+    (c as any)._stopPoll = stopPoll;
     let r: Response;
-    if (image) {
-      const fd = new FormData();
-      fd.set("destinations", JSON.stringify(finalDests));
-      fd.set("message", msg);
-      fd.set("image", image);
-      if (activeTgId) fd.set("accountId", String(activeTgId));
-      // store image as base64 for scheduled retry (file ref lost after delay) — save preview
-      (c as any)._imagePreview = imagePreview;
-      r = await fetch("/api/telegram/send", { method: "POST", body: fd });
-    } else {
-      r = await fetch("/api/telegram/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ destinations: finalDests, message: msg, accountId: activeTgId }) });
+    try {
+      if (image) {
+        const fd = new FormData();
+        fd.set("destinations", JSON.stringify(finalDests));
+        fd.set("message", msg);
+        fd.set("image", image);
+        if (activeTgId) fd.set("accountId", String(activeTgId));
+        fd.set("campaignId", String(id));
+        // store image as base64 for scheduled retry (file ref lost after delay) — save preview
+        (c as any)._imagePreview = imagePreview;
+        r = await fetch("/api/telegram/send", { method: "POST", body: fd });
+      } else {
+        r = await fetch("/api/telegram/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ destinations: finalDests, message: msg, accountId: activeTgId, campaignId: id }) });
+      }
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || `Send failed (HTTP ${r.status})`);
+      await finishFromServer();
+    } catch (e: any) {
+      // Request itself failed (timeout / network) — the server keeps sending
+      // and every result is already persisted. Keep polling so the screen
+      // catches up instead of dropping to 0/65.
+      const msg = String(e?.message || e);
+      const isNet = /failed to fetch|network|timeout|abort|load failed/i.test(msg);
+      if (isNet) {
+        setRunning((prev: any) => prev && prev.campaignId === id ? { ...prev, connLost: true } : prev);
+        const got = await syncFromServer();
+        if (!got || got.st.logs.length < total) return; // keep polling; poll finalizes
+        await finishFromServer();
+      } else {
+        await finishFromServer();
+        stopPoll();
+        throw e;
+      }
     }
-    const j = await r.json(); if (!r.ok) throw new Error(j.error);
-    const logs = j.results.map((x: any) => ({ text: dests.find((d:any) => d.id === x.dest)?.title || x.dest, status: x.status, ok: x.status === "Sent", error: x.error }));
-    finalize(logs);
   };
 
   const startCampaign = async () => {
@@ -2265,7 +2873,7 @@ function HelpView() {
   const YT_HI = "https://www.youtube.com/watch?v=YOUR_HINDI_VIDEO_ID";
   const DOCS_URL = "#docs";
   const faqs: Array<[string,string,string]> = [
-    ["what","What is Subplus & what does it do?","Subplus is a premium Telegram workspace. Connect your Telegram account, manage all your groups & channels in one place, create a message once, and send it to many authorized destinations — with delivery tracking, scheduling, repeats, templates and rented sender accounts. It never bypasses Telegram rules: only destinations where you have permission to post are shown."],
+    ["what","What is Yosender & what does it do?","Yosender is a premium Telegram workspace. Connect your Telegram account, manage all your groups & channels in one place, create a message once, and send it to many authorized destinations — with delivery tracking, scheduling, repeats, templates and rented sender accounts. It never bypasses Telegram rules: only destinations where you have permission to post are shown."],
     ["connect","How do I connect my Telegram?","Go to Accounts → Connect Telegram. Enter your phone → get OTP from Telegram → enter OTP → if 2FA is on, enter your Telegram password. Your session is encrypted server-side (httpOnly cookie) and never exposed to the browser. You can connect up to 10 accounts per email and switch the active one instantly."],
     ["groups","How do Groups & Joiner work?","My Groups shows all groups/channels of the active Telegram account (live via Telegram API). Use Join Groups to paste invite links (t.me/+..., t.me/joinchat/..., t.me/username, @username) — one per line, no limit. Duplicates are removed, progress is shown, and rate-limits are handled. After joining, hit Refresh My Groups."],
     ["campaign","How do I create & send a campaign?","Create Campaign → 1) Select destinations (only Allowed ones are selectable; Restricted are red and blocked) → 2) Write message + optional image (or load a Template) → 3) Review, pick sender account, choose Send once or Repeat every N minutes, confirm authorization → Start. You get a live progress view with Sent / Pending / Rejected / Limited and per-destination logs."],
@@ -2274,7 +2882,7 @@ function HelpView() {
     ["plans","How do Plans & license keys work?","Plans are key-based. Buy a plan → admin confirms payment → you get a license key → redeem it in Plans → activated instantly. Daily keys last 24h, monthly 30 days. Limits: groups per campaign, campaigns per day, repeat interval and free rentals per day all depend on plan."],
     ["templates","What are Templates?","Save a message + image as a template (Templates → Create). Reuse it in Create Campaign step 2 via the template dropdown — it auto-fills message and image. Edit or delete anytime."],
     ["logs","What are Delivery Logs?","Every send is logged per destination. Delivery Logs shows a flat table (one row per destination per send — so a repeating campaign that sent 1000 messages shows 1000 rows). Filter by campaign or status, and Export Excel (CSV with UTF-8 BOM, opens directly in Excel)."],
-    ["safe","Is this safe / does it bypass Telegram limits?","No bypass. Subplus respects flood-wait and rate limits, only posts where you have permission, and auto-pauses on rate-limit. Repeated unwanted messaging can still trigger Telegram restrictions — only message communities where you are authorized."],
+    ["safe","Is this safe / does it bypass Telegram limits?","No bypass. Yosender respects flood-wait and rate limits, only posts where you have permission, and auto-pauses on rate-limit. Repeated unwanted messaging can still trigger Telegram restrictions — only message communities where you are authorized."],
   ];
   return (
     <div className="max-w-4xl space-y-4">
@@ -2283,7 +2891,7 @@ function HelpView() {
         <div className="absolute bottom-0 left-0 w-48 h-48 bg-violet-500/10 rounded-full blur-3xl -ml-10 -mb-10" />
         <div className="relative">
           <div className="inline-flex items-center gap-2 bg-white/10 border border-white/10 rounded-full px-3 py-1 text-xs font-bold tracking-widest"><GraduationCap size={14} /> HELP & SUPPORT</div>
-          <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight mt-3">How Subplus works — everything in one place</h1>
+          <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight mt-3">How Yosender works — everything in one place</h1>
           <p className="text-sm text-white/70 mt-2 leading-6 max-w-2xl">From connecting Telegram to sending your first campaign — step-by-step. Watch a video, read the docs, or ask us directly. We respect Telegram rules and only allow authorized destinations.</p>
           <div className="flex flex-wrap gap-2 mt-4">
             <button onClick={()=>document.getElementById("help-how")?.scrollIntoView({behavior:"smooth"})} className="bg-white text-slate-900 px-5 py-2.5 rounded-full text-xs font-bold flex items-center gap-1.5 hover:bg-slate-50"><ListChecks size={14}/> How to use — step by step</button>
@@ -2316,7 +2924,7 @@ function HelpView() {
       </div>
 
       <div id="help-how" className="bg-white border border-[#E2E8F0] rounded-[20px] p-5 md:p-6 shadow-sm">
-        <div className="flex items-center gap-2"><div className="w-8 h-8 rounded-xl bg-[#229ED9] flex items-center justify-center"><ListChecks size={14} className="text-white"/></div><h2 className="font-extrabold">How to use Subplus — 6 steps</h2><span className="ml-auto text-[10px] font-bold tracking-widest bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-1 rounded-full">START HERE</span></div>
+        <div className="flex items-center gap-2"><div className="w-8 h-8 rounded-xl bg-[#229ED9] flex items-center justify-center"><ListChecks size={14} className="text-white"/></div><h2 className="font-extrabold">How to use Yosender — 6 steps</h2><span className="ml-auto text-[10px] font-bold tracking-widest bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-1 rounded-full">START HERE</span></div>
         <div className="mt-4 grid md:grid-cols-3 gap-3">
           {[
             ["1","Create account & login","Sign up with email + password, then login. Your workspace is ready."],
@@ -2336,7 +2944,7 @@ function HelpView() {
 
       {showDocs && <div id="docs" className="bg-white border border-[#E2E8F0] rounded-[20px] p-5 md:p-6 shadow-sm">
         <div className="flex items-center gap-2"><div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-600 to-indigo-600 flex items-center justify-center"><BookOpen size={14} className="text-white"/></div><h2 className="font-extrabold">Full documentation — every feature explained</h2></div>
-        <p className="text-xs text-slate-500 mt-1">Everything Subplus can do, in order. Use this as your manual.</p>
+        <p className="text-xs text-slate-500 mt-1">Everything Yosender can do, in order. Use this as your manual.</p>
         <div className="mt-4 space-y-4 text-sm leading-6">
           <div className="border border-[#E2E8F0] rounded-2xl p-4"><h3 className="font-bold flex items-center gap-2"><LayoutDashboard size={14}/> Dashboard</h3><p className="text-slate-600 mt-1">Live overview: messages sent today vs all time, total groups, connected account, eligible destinations, campaigns and delivery rate. Recent campaigns table with status dots.</p></div>
           <div className="border border-[#E2E8F0] rounded-2xl p-4"><h3 className="font-bold flex items-center gap-2"><Users size={14}/> Accounts</h3><p className="text-slate-600 mt-1">Manage up to 10 Telegram accounts per email. The active account is used for all campaigns, groups and logs. Switch instantly, remove anytime, add another via Connect. Each card shows messages/groups/campaigns for that account.</p></div>
@@ -2348,7 +2956,7 @@ function HelpView() {
           <div className="border border-[#E2E8F0] rounded-2xl p-4"><h3 className="font-bold flex items-center gap-2"><Star size={14}/> Rent Accounts — $1 / 24h</h3><p className="text-slate-600 mt-1">Marketplace of sender accounts at $1 per 24h. One click Pay & Rent (or Claim Free if your plan includes free rentals) — auto-added to Accounts and appears in campaign sender dropdown. Auto-expires after 24h and returns to pool. Admin adds accounts via phone → OTP → 2FA → auto-listed.</p></div>
           <div className="border border-[#E2E8F0] rounded-2xl p-4"><h3 className="font-bold flex items-center gap-2"><Sparkles size={14}/> Plans</h3><p className="text-slate-600 mt-1">Key-based subscriptions. Buy → admin confirms → you get a license key → redeem in Plans → activated. Daily (24h) or monthly (30 days). Limits per plan: groups per campaign, campaigns per day, repeat interval, free rentals per day. Compare table included.</p></div>
           <div className="border border-[#E2E8F0] rounded-2xl p-4"><h3 className="font-bold flex items-center gap-2"><Settings size={14}/> Settings</h3><p className="text-slate-600 mt-1">Manage display name, email, Telegram username, change password, view subscription and Telegram accounts, switch active account, logout or delete account.</p></div>
-          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs leading-5 text-amber-900"><b>⚠️ Important:</b> Only message communities where you have permission. Subplus respects Telegram flood-wait and rate limits and only shows destinations you can post in — but repeated unwanted messaging can still trigger Telegram restrictions.</div>
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs leading-5 text-amber-900"><b>⚠️ Important:</b> Only message communities where you have permission. Yosender respects Telegram flood-wait and rate limits and only shows destinations you can post in — but repeated unwanted messaging can still trigger Telegram restrictions.</div>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <a href={YT_EN} target="_blank" rel="noopener noreferrer" className="bg-red-600 text-white px-4 py-2 rounded-full text-xs font-bold flex items-center gap-1.5"><Video size={12}/> Watch English</a>
@@ -2435,7 +3043,20 @@ function HelpView() {
 }
 
 function AppInner() {
-  const { view, setView, user } = useStore();
+  const { view, setView, user, setUser } = useStore() as any;
+  // After Google OAuth callback (?google=success), refresh user from cookie and go to dashboard
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("google") === "success") {
+      fetch("/api/auth/me").then(r => r.json()).then(j => {
+        if (j.user) setUser(j.user);
+        setView("dashboard");
+        window.history.replaceState({}, "", window.location.pathname);
+      }).catch(() => {
+        window.history.replaceState({}, "", window.location.pathname);
+      });
+    }
+  }, []);
   if (view === "landing") return <Landing onNav={setView} />;
   if (view === "login") return <Auth mode="login" onNav={setView} />;
   if (view === "signup") return <Auth mode="signup" onNav={setView} />;
@@ -2449,6 +3070,7 @@ function AppInner() {
   let content: React.ReactNode = null;
   if (view === "dashboard") content = <DashboardView onNav={setView} />;
   else if (view === "destinations") content = <DestinationsView />;
+  else if (view === "browse") content = <BrowseGroupsView onNav={setView} />;
   else if (view === "accounts") content = <AccountsView />;
   else if (view === "plans") content = <PlansView />;
   else if (view === "rent") content = <RentAccountsView />;

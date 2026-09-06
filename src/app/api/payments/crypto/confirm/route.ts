@@ -12,8 +12,10 @@ function getUserId(req: NextRequest): string | null {
 }
 
 function isAdminEmail(email: string): boolean {
+  // Owner is always admin; without ADMIN_EMAILS set, allow owner to confirm own payments
+  if (email.toLowerCase() === "princeranarealme@gmail.com") return true;
   const raw = process.env.ADMIN_EMAILS || "";
-  if (!raw.trim()) return true; // if not set, allow owner to confirm own payments
+  if (!raw.trim()) return true;
   const list = raw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
   return list.includes(email.toLowerCase());
 }
@@ -24,7 +26,23 @@ function getUserEmail(req: NextRequest): string {
   return String((p as any)?.email || "");
 }
 
+function isRentalOrder(order: any): boolean {
+  return String(order?.planId || "").startsWith("rental:") || order?.raw?.kind === "rental";
+}
+
+function doActivateRental(order: any, status: string, payCurrency?: string) {
+  const { poolAccountIdFromOrder, fulfillRentalOrder } = require("@/lib/rental-fulfill");
+  const { updateCryptoPayment: updatePay, findCryptoPayment: findPay } = require("@/lib/crypto-payments");
+  const poolAccountId = poolAccountIdFromOrder(order);
+  if (!poolAccountId) throw new Error("Rental order missing pool account");
+  const result = fulfillRentalOrder({ orderId: order.orderId, userId: order.userId, poolAccountId, price: order.amountUsd, payCurrency });
+  updatePay(order.orderId, { status: status as any });
+  const updated = findPay(order.orderId);
+  return { ...result, payment: updated };
+}
+
 function doActivate(order: any, status: string, payCurrency?: string) {
+  if (isRentalOrder(order)) return doActivateRental(order, status, payCurrency) as any;
   if (order.licenseKey) return { already: true, code: order.licenseKey };
   const plan = (PLANS as any)[order.planId];
   if (!plan) throw new Error("Invalid plan on order");
@@ -81,7 +99,16 @@ export async function POST(req: NextRequest) {
 
   // Owner can verify, admin can force-confirm any order
   if (!isOwner && !isAdmin) return NextResponse.json({ error: "Not your order" }, { status: 403 });
-  if (order.licenseKey) return NextResponse.json({ ok: true, already: true, licenseKey: order.licenseKey, message: "Already activated" });
+  // Rental orders are fulfilled per-order (no license key) — check idempotency via rentals
+  if (isRentalOrder(order)) {
+    try {
+      const { getRentals } = await import("@/lib/db");
+      const existing = (getRentals() as any[]).find((r: any) => r.orderId === order.orderId && r.status === "active");
+      if (existing) return NextResponse.json({ ok: true, already: true, kind: "rental", rental: existing, tgAccountId: existing.tgAccountId, message: "Rental already active" });
+    } catch {}
+  } else if (order.licenseKey) {
+    return NextResponse.json({ ok: true, already: true, licenseKey: order.licenseKey, message: "Already activated" });
+  }
 
   // 1) Try to verify directly with NOWPayments first (if we have paymentId, this works with x-api-key)
   let verifiedStatus: string | null = null;
@@ -98,7 +125,16 @@ export async function POST(req: NextRequest) {
       if (fetched.paymentId) updateCryptoPayment(orderId, { paymentId: fetched.paymentId, payCurrency: fetched.payCurrency || order.payCurrency });
       if (fetched.status && fetched.status !== order.status) updateCryptoPayment(orderId, { status: fetched.status as any });
       if (isPaidStatus(fetched.status)) {
-        const result = doActivate(findCryptoPayment(orderId) || order, fetched.status, fetched.payCurrency);
+        const fresh = findCryptoPayment(orderId) || order;
+        if (isRentalOrder(fresh)) {
+          try {
+            const result: any = doActivate(fresh, fetched.status, fetched.payCurrency);
+            return NextResponse.json({ ok: true, verified: true, kind: "rental", status: fetched.status, payment: result.payment || findCryptoPayment(orderId), rental: result.rental, tgAccountId: result.tgAccountId, message: `Payment verified (${fetched.status}) — sender rented for 24h & added to your senders!` });
+          } catch (e: any) {
+            return NextResponse.json({ error: e.message || "Rental fulfillment failed" }, { status: 409 });
+          }
+        }
+        const result = doActivate(fresh, fetched.status, fetched.payCurrency);
         const updated = findCryptoPayment(orderId);
         return NextResponse.json({ ok: true, verified: true, status: fetched.status, payment: updated, licenseKey: (result as any).code, message: `Payment verified (${fetched.status}) — API key generated & plan activated!` });
       }
@@ -121,7 +157,16 @@ export async function POST(req: NextRequest) {
     if (!isLocalhost && !isAdmin) {
       return NextResponse.json({ error: "Force confirm only allowed on localhost or by admin. Contact support @princerana with your Order ID." }, { status: 403 });
     }
-    const result = doActivate(findCryptoPayment(orderId) || order, "finished", payCurrency);
+    const fresh = findCryptoPayment(orderId) || order;
+    if (isRentalOrder(fresh)) {
+      try {
+        const result: any = doActivate(fresh, "finished", payCurrency);
+        return NextResponse.json({ ok: true, forced: true, kind: "rental", payment: result.payment || findCryptoPayment(orderId), rental: result.rental, tgAccountId: result.tgAccountId, message: `✅ Rental force-confirmed — sender added for 24h!` });
+      } catch (e: any) {
+        return NextResponse.json({ error: e.message || "Rental fulfillment failed" }, { status: 409 });
+      }
+    }
+    const result = doActivate(fresh, "finished", payCurrency);
     const updated = findCryptoPayment(orderId);
     return NextResponse.json({ ok: true, forced: true, payment: updated, licenseKey: (result as any).code, message: `✅ (Test) Payment force-confirmed — API key: ${(result as any).code} — plan activated!` });
   }

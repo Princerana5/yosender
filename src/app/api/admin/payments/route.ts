@@ -24,7 +24,8 @@ export async function GET(req: NextRequest) {
   if (!isAdminRequest(req)) return NextResponse.json({ error: "Admin only" }, { status: 403 });
   // payments visible to anyone with overview or subs or keys perm, or owner
   const email = getRequestEmail(req);
-  const isOwner = !!(process.env.ADMIN_EMAILS || "").split(",").map(s=>s.trim().toLowerCase()).filter(Boolean).includes(email) || !(process.env.ADMIN_EMAILS || "").trim();
+  const { getAdminEmails } = await import("@/lib/admin");
+  const isOwner = getAdminEmails().includes(email);
   if (!isOwner && !hasPerm(req, "overview") && !hasPerm(req, "subs") && !hasPerm(req, "keys")) {
     return NextResponse.json({ error: "No permission: payments" }, { status: 403 });
   }
