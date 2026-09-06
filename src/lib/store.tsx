@@ -5,6 +5,7 @@ export type Campaign = {id:string,name:string,destinations:string[],message:stri
 export type Template = {id:string,name:string,message:string,category:string};
 export type TgAccountInfo = {id:string,phone:string,username:string,displayName:string,firstName:string,status:string,createdAt:string};
 type Store = {
+  lang:"en"|"ru"; setLang:(l:"en"|"ru")=>void;
   user:{name:string,email:string}|null; setUser:(u:any)=>void;
   tg:{username:string,phone:string,connected:boolean}|null; setTg:(t:any)=>void;
   tgAccounts:TgAccountInfo[]; activeTgId:string|null; setTgAccounts:(a:TgAccountInfo[])=>void; setActiveTgId:(id:string|null)=>void;
@@ -28,7 +29,9 @@ export function StoreProvider({children}:{children:React.ReactNode}){
   const [campaigns,setCampaigns]=useState<Campaign[]>([]);
   const [templates,setTemplates]=useState<Template[]>([]);
   const [view,setView]=useState("landing");
+  const [lang,setLangState]=useState<"en"|"ru">("en");
   const [hydrated,setHydrated]=useState(false);
+  const setLang=(l:"en"|"ru")=>{ setLangState(l); try{localStorage.setItem("yosender_lang",l);}catch{} };
   const refreshTgAccounts = async()=>{
     try{
       const r=await fetch("/api/telegram/accounts"); const j=await r.json();
@@ -36,6 +39,7 @@ export function StoreProvider({children}:{children:React.ReactNode}){
     }catch{}
   };
   useEffect(()=>{
+    try{const l=localStorage.getItem("yosender_lang"); if(l==="ru"||l==="en")setLangState(l);}catch{}
     const s=localStorage.getItem("tgm_store");
     if(s){try{const p=JSON.parse(s); if(p.user)setUser(p.user); if(p.tg)setTg(p.tg); if(p.view && p.view!=="connect")setView(p.view);}catch{}}
     fetch("/api/auth/me").then(r=>r.json()).then(j=>{ if(j.user) setUser(j.user); }).catch(()=>{});
@@ -98,5 +102,5 @@ export function StoreProvider({children}:{children:React.ReactNode}){
   useEffect(()=>{ if(tg?.connected && !prevActiveRef.current) refreshDests(); },[tg?.connected]);
   const addCampaign=async(c:Campaign)=>{ setCampaigns(prev=> prev.some(x=>String(x.id)===String(c.id)) ? prev : [c,...prev]); try{ await fetch("/api/campaigns",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(c)});}catch{}};
   const updateCampaign=async(id:string,patch:Partial<Campaign>)=>{ setCampaigns(prev=>prev.map(c=>c.id===id?{...c,...patch}:c)); try{ await fetch("/api/campaigns",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({patchId:id,patch})});}catch{}};
-  return <Ctx.Provider value={{user,setUser,tg,setTg,tgAccounts,setTgAccounts,activeTgId,setActiveTgId,refreshTgAccounts,dests,setDests,campaigns,setCampaigns,templates,setTemplates,addCampaign,updateCampaign: updateCampaign as any,view,setView,refreshDests,destsLoading} as any}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{lang,setLang,user,setUser,tg,setTg,tgAccounts,setTgAccounts,activeTgId,setActiveTgId,refreshTgAccounts,dests,setDests,campaigns,setCampaigns,templates,setTemplates,addCampaign,updateCampaign: updateCampaign as any,view,setView,refreshDests,destsLoading} as any}>{children}</Ctx.Provider>
 }

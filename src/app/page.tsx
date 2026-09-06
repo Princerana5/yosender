@@ -1,5 +1,6 @@
 "use client";
 import { StoreProvider, useStore } from "@/lib/store";
+import { t as tr, type Lang } from "@/lib/i18n";
 import { Send, Shield, ShieldCheck, Zap, Users, BarChart3, Check, Menu, X, ArrowRight, Sparkles, Clock, Lock, Search, Pause, LogOut, Settings, LayoutDashboard, Megaphone, FileText, History, HelpCircle, Star, TrendingUp, Layers, Globe, ChevronRight, Play, Download, Mail, Trash2, KeyRound, Save, AtSign, Gem, Crown, Zap as ZapIcon, Diamond, BookOpen, Video, ExternalLink, GraduationCap, ListChecks, MessageCircle, Compass } from "lucide-react";
 import { useState, useEffect } from "react";
 import { AdminPanel } from "./admin-panel";
@@ -431,7 +432,11 @@ function ComparisonTable() {
 
 function Landing({ onNav }: { onNav: (v: string) => void }) {
   const [mobile, setMobile] = useState(false);
-  const { user } = useStore() as any;
+  const { user, lang } = useStore() as any;
+  const l = (lang || "en") as Lang;
+  const nav = l === "ru"
+    ? { features: "Возможности", how: "Как это работает", pricing: "Тарифы", faq: "Вопросы", login: "Войти", start: "Начать →", dashboard: "Панель" }
+    : { features: "Features", how: "How it works", pricing: "Pricing", faq: "FAQ", login: "Login", start: "Get Started →", dashboard: "Dashboard" };
   return (
     <div className="min-h-screen bg-white text-slate-900">
       {/* Header — glassmorphism */}
@@ -443,18 +448,19 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
             <span className="hidden sm:inline-flex text-[10px] font-bold tracking-widest bg-[#EFF6FF] text-[#229ED9] border border-[#BFDBFE] px-2 py-0.5 rounded-full">PRO</span>
           </div>
           <nav className="hidden md:flex items-center gap-1 text-[13px] font-medium text-slate-500">
-            <a href="#features" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">Features</a>
-            <a href="#how" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">How it works</a>
-            <a href="#pricing" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">Pricing</a>
-            <a href="#faq" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">FAQ</a>
+            <a href="#features" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">{nav.features}</a>
+            <a href="#how" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">{nav.how}</a>
+            <a href="#pricing" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">{nav.pricing}</a>
+            <a href="#faq" className="px-3 py-2 rounded-full hover:bg-slate-50 hover:text-slate-900 transition">{nav.faq}</a>
           </nav>
           <div className="hidden md:flex items-center gap-2 shrink-0">
+            <LangSwitch compact />
             {user ? (
-              <button onClick={() => onNav("dashboard")} className="bg-[#229ED9] text-white text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-[#1B8AC4] hover:shadow-lg hover:shadow-[#229ED9]/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all flex items-center gap-1.5"><LayoutDashboard size={14} /> Dashboard</button>
+              <button onClick={() => onNav("dashboard")} className="bg-[#229ED9] text-white text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-[#1B8AC4] hover:shadow-lg hover:shadow-[#229ED9]/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all flex items-center gap-1.5"><LayoutDashboard size={14} /> {nav.dashboard}</button>
             ) : (
               <>
-                <button onClick={() => onNav("login")} className="text-sm font-medium px-4 py-2 rounded-full hover:bg-slate-50 transition">Login</button>
-                <button onClick={() => onNav("signup")} className="bg-[#229ED9] text-white text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-[#1B8AC4] hover:shadow-lg hover:shadow-[#229ED9]/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all">Get Started →</button>
+                <button onClick={() => onNav("login")} className="text-sm font-medium px-4 py-2 rounded-full hover:bg-slate-50 transition">{nav.login}</button>
+                <button onClick={() => onNav("signup")} className="bg-[#229ED9] text-white text-sm font-semibold px-5 py-2.5 rounded-full hover:bg-[#1B8AC4] hover:shadow-lg hover:shadow-[#229ED9]/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all">{nav.start}</button>
               </>
             )}
           </div>
@@ -463,18 +469,18 @@ function Landing({ onNav }: { onNav: (v: string) => void }) {
         {mobile && (
           <div className="md:hidden border-t border-slate-200 bg-white px-4 py-4 space-y-3 animate-slide-down">
             <nav className="flex flex-col gap-1 text-sm">
-              <a href="#features" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">Features</a>
-              <a href="#how" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">How it works</a>
-              <a href="#pricing" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">Pricing</a>
-              <a href="#faq" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">FAQ</a>
+              <a href="#features" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">{nav.features}</a>
+              <a href="#how" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">{nav.how}</a>
+              <a href="#pricing" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">{nav.pricing}</a>
+              <a href="#faq" onClick={() => setMobile(false)} className="py-2.5 px-3 rounded-xl font-medium text-slate-600 hover:bg-slate-50">{nav.faq}</a>
             </nav>
             <div className="pt-3 border-t border-slate-100 flex flex-col gap-2">
               {user ? (
-                <button onClick={() => { setMobile(false); onNav("dashboard"); }} className="bg-[#229ED9] text-white rounded-full py-3 font-semibold flex items-center justify-center gap-2"><LayoutDashboard size={16} /> Dashboard</button>
+                <button onClick={() => { setMobile(false); onNav("dashboard"); }} className="bg-[#229ED9] text-white rounded-full py-3 font-semibold flex items-center justify-center gap-2"><LayoutDashboard size={16} /> {nav.dashboard}</button>
               ) : (
                 <>
-                  <button onClick={() => { setMobile(false); onNav("login"); }} className="border border-slate-200 rounded-full py-3 font-semibold hover:bg-slate-50 transition">Login</button>
-                  <button onClick={() => { setMobile(false); onNav("signup"); }} className="bg-[#229ED9] text-white rounded-full py-3 font-semibold hover:bg-[#1B8AC4] transition">Get Started</button>
+                  <button onClick={() => { setMobile(false); onNav("login"); }} className="border border-slate-200 rounded-full py-3 font-semibold hover:bg-slate-50 transition">{nav.login}</button>
+                  <button onClick={() => { setMobile(false); onNav("signup"); }} className="bg-[#229ED9] text-white rounded-full py-3 font-semibold hover:bg-[#1B8AC4] transition">{nav.start}</button>
                 </>
               )}
             </div>
@@ -1373,16 +1379,37 @@ function PlanBadge({ onClick }: { onClick?: () => void }) {
   );
 }
 
+function LangSwitch({ compact }: { compact?: boolean }) {
+  const { lang, setLang } = useStore() as any;
+  const l = (lang || "en") as Lang;
+  return (
+    <div className="inline-flex items-center bg-slate-100 rounded-full p-0.5 gap-0.5" role="group" aria-label={tr(l, "lang_label")}>
+      {(["en", "ru"] as Lang[]).map(code => (
+        <button
+          key={code}
+          onClick={() => setLang(code)}
+          aria-pressed={l === code}
+          title={code === "en" ? tr(l, "lang_english") : tr(l, "lang_russian")}
+          className={`rounded-full font-bold transition-all ${compact ? "px-2 py-1 text-[11px]" : "px-2.5 py-1.5 text-[11px]"} ${l === code ? "bg-white text-slate-900 shadow-sm" : "text-slate-400 hover:text-slate-600"}`}
+        >
+          {code === "en" ? "EN" : "RU"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: string) => void }) {
-  const { tg, setTg, setView, view, tgAccounts, user } = useStore() as any;
+  const { tg, setTg, setView, view, tgAccounts, user, lang } = useStore() as any;
   const [open, setOpen] = useState(false);
   const accCount = tgAccounts?.length || 0;
+  const l = (lang || "en") as Lang;
   const isAdmin = user?.email?.toLowerCase() === "princeranarealme@gmail.com";
 
   const navGroups: Array<{ label: string; items: Array<[string, any, string]> }> = [
-    { label: "Workspace", items: [["dashboard", LayoutDashboard, "Dashboard"], ["plans", Sparkles, "Plans"], ["destinations", Search, "Groups & Joiner"], ["browse", Compass, "Browse Groups"], ["accounts", Users, `Accounts${accCount ? ` · ${accCount}/10` : ""}`]] },
-    { label: "Campaigns", items: [["create", Megaphone, "Create Campaign"], ["campaigns", History, "Campaigns"], ["templates", FileText, "Templates"], ["logs", BarChart3, "Delivery Logs"], ["rent", Star, "Rent Accounts"]] },
-    { label: "System", items: isAdmin ? [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"], ["admin", ShieldCheck, "Admin"]] : [["settings", Settings, "Settings"], ["help", HelpCircle, "Help"]] },
+    { label: tr(l, "nav_workspace"), items: [["dashboard", LayoutDashboard, tr(l, "nav_dashboard")], ["plans", Sparkles, tr(l, "nav_plans")], ["destinations", Search, tr(l, "nav_groups_joiner")], ["browse", Compass, tr(l, "nav_browse")], ["accounts", Users, `${tr(l, "nav_accounts")}${accCount ? ` · ${accCount}/10` : ""}`]] },
+    { label: tr(l, "nav_campaigns"), items: [["create", Megaphone, tr(l, "nav_create")], ["campaigns", History, tr(l, "nav_history")], ["templates", FileText, tr(l, "nav_templates")], ["logs", BarChart3, tr(l, "nav_logs")], ["rent", Star, tr(l, "nav_rent")]] },
+    { label: tr(l, "nav_system"), items: isAdmin ? [["settings", Settings, tr(l, "nav_settings")], ["help", HelpCircle, tr(l, "nav_help")], ["admin", ShieldCheck, tr(l, "nav_admin")]] : [["settings", Settings, tr(l, "nav_settings")], ["help", HelpCircle, tr(l, "nav_help")]] },
   ];
 
   const Nav = ({ onItemClick }: { onItemClick?: () => void }) => (
@@ -1470,8 +1497,10 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
             <span className="hidden md:inline-flex items-center gap-2 text-xs font-semibold text-slate-400 tracking-widest"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> WORKSPACE</span>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <Globe size={13} className="text-slate-400 shrink-0" aria-hidden="true" />
+            <LangSwitch compact />
             <PlanBadge onClick={() => setView("plans")} />
-            <button onClick={() => setView("settings")} className="hidden sm:inline-flex items-center gap-1.5 text-xs font-semibold border border-slate-200 bg-white px-3.5 py-2 rounded-full hover:bg-slate-50 hover:border-slate-300 hover:-translate-y-0.5 active:translate-y-0 transition-all"><Settings size={12} /> Settings</button>
+            <button onClick={() => setView("settings")} className="hidden sm:inline-flex items-center gap-1.5 text-xs font-semibold border border-slate-200 bg-white px-3.5 py-2 rounded-full hover:bg-slate-50 hover:border-slate-300 hover:-translate-y-0.5 active:translate-y-0 transition-all"><Settings size={12} /> {tr(l, "nav_settings")}</button>
           </div>
         </div>
         <div className="flex-1 p-4 md:p-6 lg:p-7 max-w-[1200px] w-full mx-auto">{children}</div>
