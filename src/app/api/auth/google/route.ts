@@ -1,13 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 
 function getAppUrl(req: NextRequest) {
+  // Prefer the request's actual host — never trust a stale NEXT_PUBLIC_APP_URL
+  // baked at build time (that was the localhost redirect_uri_mismatch bug).
+  const host = req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") || (host?.includes("yosender.com") ? "https" : "http");
+  if (host) {
+    // yosender.com / www.yosender.com / localhost:3000 all work correctly
+    return `${proto}://${host}`.replace(/\/$/, "");
+  }
   const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (envUrl) return envUrl.replace(/\/$/, "");
   const vercelUrl = process.env.VERCEL_URL?.trim();
   if (vercelUrl) return `https://${vercelUrl}`;
-  const host = req.headers.get("host");
-  const proto = req.headers.get("x-forwarded-proto") || "http";
-  if (host) return `${proto}://${host}`;
   return "http://localhost:3000";
 }
 

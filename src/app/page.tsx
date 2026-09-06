@@ -664,6 +664,8 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
   const { setUser } = useStore();
   const [name, setName] = useState(""), [email, setEmail] = useState(""), [pass, setPass] = useState(""), [tgUser, setTgUser] = useState("");
   const [loading, setLoading] = useState(false), [err, setErr] = useState("");
+  const [forgotOpen, setForgotOpen] = useState(false), [forgotEmail, setForgotEmail] = useState(""), [forgotMsg, setForgotMsg] = useState(""), [forgotLoading, setForgotLoading] = useState(false);
+  const [resetToken, setResetToken] = useState(""), [newPass, setNewPass] = useState(""), [resetMsg, setResetMsg] = useState(""), [resetLoading, setResetLoading] = useState(false);
   const submit = async () => {
     if (!email || !pass || (mode === "signup" && !name)) { setErr("Fill all fields"); return; }
     setErr(""); setLoading(true);
@@ -674,6 +676,27 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
       setUser(j.user); onNav("dashboard");
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+  };
+  const sendReset = async () => {
+    if (!forgotEmail.includes("@")) { setForgotMsg("Enter your account email"); return; }
+    setForgotLoading(true); setForgotMsg(""); setResetToken(""); setResetMsg(""); setNewPass("");
+    try {
+      const r = await fetch("/api/auth/forgot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: forgotEmail.trim() }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error);
+      setForgotMsg(j.message || "Reset link created.");
+      // No email service yet — the API returns the one-time token so the user can reset right here.
+      if (j.resetToken) setResetToken(j.resetToken);
+    } catch (e: any) { setForgotMsg(e.message); } finally { setForgotLoading(false); }
+  };
+  const doReset = async () => {
+    if (!resetToken || !newPass) { setResetMsg("Enter the reset token and a new password"); return; }
+    setResetLoading(true); setResetMsg("");
+    try {
+      const r = await fetch("/api/auth/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: resetToken.trim(), newPassword: newPass }) });
+      const j = await r.json(); if (!r.ok) throw new Error(j.error);
+      setResetMsg(j.message || "Password updated.");
+      setNewPass("");
+    } catch (e: any) { setResetMsg(e.message); } finally { setResetLoading(false); }
   };
   return (
     <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-6 relative overflow-hidden">
@@ -688,6 +711,24 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
         <input value={pass} onChange={e => setPass(e.target.value)} placeholder="Password" type="password" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 mb-2 text-sm focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none transition" />
         {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-2.5 mb-3">{err}</div>}
         <button onClick={submit} disabled={loading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{loading ? "..." : mode === "signup" ? "Create Account" : "Sign In"}</button>
+        {mode === "login" && <button onClick={() => { setForgotOpen(!forgotOpen); setForgotEmail(email); setForgotMsg(""); }} className="text-xs font-semibold text-[#229ED9] mt-3 hover:underline">Forgot password?</button>}
+        {mode === "login" && forgotOpen && (
+          <div className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
+            <div className="text-xs font-bold tracking-widest text-slate-500">RESET PASSWORD</div>
+            <input value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} placeholder="Account email" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-2.5 text-sm outline-none bg-white" />
+            <button onClick={sendReset} disabled={forgotLoading} className="w-full border border-slate-200 bg-white py-2.5 rounded-full text-sm font-semibold hover:bg-slate-100 transition disabled:opacity-50">{forgotLoading ? "Creating link…" : "Send reset link"}</button>
+            {forgotMsg && <p className="text-xs text-slate-600 leading-relaxed">{forgotMsg}</p>}
+            {resetToken && (
+              <div className="space-y-2.5 pt-1">
+                <p className="text-xs text-slate-500 leading-relaxed">No email service is set up yet, so use this one-time code (valid 30 min):</p>
+                <code className="block text-[11px] font-mono bg-white border border-slate-200 rounded-xl px-3 py-2.5 break-all select-all">{resetToken}</code>
+                <input value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="New password (min 6 chars)" type="password" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-2.5 text-sm outline-none bg-white" />
+                <button onClick={doReset} disabled={resetLoading} className="w-full bg-[#229ED9] text-white py-2.5 rounded-full text-sm font-semibold hover:bg-[#1B8AC4] transition disabled:opacity-50">{resetLoading ? "Updating…" : "Set new password"}</button>
+                {resetMsg && <p className="text-xs font-semibold text-emerald-700">{resetMsg} You can sign in now.</p>}
+              </div>
+            )}
+          </div>
+        )}
         <button onClick={() => window.location.href = "/api/auth/google"} className="w-full mt-3 border border-[#E2E8F0] py-3 rounded-full text-sm font-semibold flex items-center justify-center gap-2 hover:bg-[#F8FAFC] transition"><img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="" className="w-4 h-4" />Continue with Google</button>
         <p className="text-sm text-center mt-5 text-[#64748B]">{mode === "signup" ? "Already have an account? " : "No account? "}<button onClick={() => onNav(mode === "signup" ? "login" : "signup")} className="text-[#229ED9] font-semibold">{mode === "signup" ? "Login" : "Create one"}</button></p>
         <button onClick={() => onNav("landing")} className="text-xs font-medium text-[#64748B] mx-auto block mt-4 hover:text-slate-900">← Back to home</button>

@@ -3,13 +3,13 @@ import { getUsers, saveUsers } from "@/lib/db";
 import { signToken } from "@/lib/auth";
 
 function getAppUrl(req: NextRequest) {
+  const host = req.headers.get("host");
+  const proto = req.headers.get("x-forwarded-proto") || (host?.includes("yosender.com") ? "https" : "http");
+  if (host) return `${proto}://${host}`.replace(/\/$/, "");
   const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (envUrl) return envUrl.replace(/\/$/, "");
   const vercelUrl = process.env.VERCEL_URL?.trim();
   if (vercelUrl) return `https://${vercelUrl}`;
-  const host = req.headers.get("host");
-  const proto = req.headers.get("x-forwarded-proto") || "http";
-  if (host) return `${proto}://${host}`;
   return "http://localhost:3000";
 }
 
