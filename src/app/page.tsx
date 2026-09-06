@@ -1729,10 +1729,15 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
   };
 
   // Runs joins in the background: fires immediately (no modal wait), shows a
-  // live sticky progress bar, keeps working while browsing. confirmJoin is
-  // kept below for the single-Join button that picks the account first.
+  // live sticky progress bar, keeps working while browsing. Accepts full
+  // t.me URLs, @usernames, and bare usernames — bare `t.me/name` (no
+  // protocol) included, which the old /t\.me\// filter wrongly rejected.
   const validJoinLinks = (links: string[]) =>
-    [...new Set((links || []).map((l) => String(l || "").trim()).filter((l) => /t\.me\//i.test(l)))];
+    [...new Set(
+      (links || [])
+        .map((l) => String(l || "").trim())
+        .filter((l) => /(^|\.)t\.me\//i.test(l) || /^@[\w]{3,}/.test(l) || /^[\w]{3,32}$/.test(l))
+    )];
 
   const doJoinNow = async (links: string[], accountId: string | null) => {
     const valid = validJoinLinks(links);

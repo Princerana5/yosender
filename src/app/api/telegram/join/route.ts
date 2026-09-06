@@ -51,13 +51,17 @@ export async function POST(req: NextRequest) {
     for (const raw of links) {
       const link = String(raw).trim();
       if (!link) continue;
-      // Fast-reject anything that isn't a Telegram invite — no API call, no wait.
-      // (e.g. random website URLs pasted by mistake, masked "locked" placeholders)
-      if (!/(^|\.)t\.me\//i.test(link) && !/^@[\w]{3,}/.test(link) && !/^[\w]{3,32}$/.test(link)) {
-        results.push({ link, status: "Failed", error: "Not a Telegram invite link" });
-        continue;
-      }
-      let normalized = link.replace(/^https?:\/\/(www\.)?t\.me\//i, "").replace(/^t\.me\//i, "").replace(/^@/, "");
+      // Normalize every accepted input into something Telegram can resolve:
+      // full URLs (https://t.me/x, t.me/x), @usernames, and bare usernames.
+      // Anything else (random website URLs, locked placeholders) is skipped
+      // silently — the UI already filters, so don't spam Failed rows for them.
+      let normalized = link
+        .replace(/^https?:\/\/(www\.)?(t\.me|telegram\.me)\//i, "")
+        .replace(/^t\.me\//i, "")
+        .replace(/^@/, "")
+        .split(/[?\s]/)[0]
+        .replace(/\/$/, "");
+      if (!normalized || /^(locked|undefined|null)$/i.test(normalized)) continue;
       try {
         if (/^(\+|joinchat\/)/i.test(normalized)) {
           const hash = normalized.replace(/^joinchat\//i, "").replace(/^\+/, "");
