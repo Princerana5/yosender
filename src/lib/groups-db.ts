@@ -33,6 +33,11 @@ export type GroupRecord = {
   // Live member count, resolved via Telegram (participantsCount). Null = unknown yet.
   member_count: number | null;
   members_updated_at: string | null;
+  // Send-permission snapshot: true = messages are blocked in this group
+  // (admin-only / restricted). Set by admin refresh or leave/join flows;
+  // null = unknown yet (no badge shown).
+  send_restricted: boolean | null;
+  send_restricted_updated_at: string | null;
 };
 
 export type CategoryRecord = {
@@ -213,6 +218,8 @@ export function upsertGroupLink(opts: {
     admin_notes: opts.adminNotes || null,
     member_count: freshCount,
     members_updated_at: freshCount !== null ? now : null,
+    send_restricted: null,
+    send_restricted_updated_at: null,
   };
   groups.push(group);
   saveGroups(groups);

@@ -157,12 +157,30 @@ export function StoreProvider({children}:{children:React.ReactNode}){
   // tg (sidebar identity) derives ONLY from the account list — never fall back
   // to tgAccounts[0] when activeTgId is set but missing (that showed the wrong
   // account), and clear tg when there is no matching account at all.
+  // Expired rentals are filtered out here too: the server may still carry the
+  // row briefly, but the UI must never show a dead rental as connected.
+  const visibleAccounts = tgAccounts.filter((a:any)=>{
+    if(!(a as any).isRental) return true;
+    const exp = new Date((a as any).rentalExpiresAt || 0).getTime();
+    return exp && exp > Date.now();
+  });
   const prevActiveRef = React.useRef<string|null>(null);
   useEffect(()=>{
-    if(!tgAccounts.length){ setTg(null); setDests([]); prevActiveRef.current = null; return; }
-    const active = activeTgId ? tgAccounts.find(a=>a.id===activeTgId) : tgAccounts[0];
-    if(!active){ setTg(null); setDests([]); prevActiveRef.current = null; refreshTgAccounts(); return; }
-    if(active) setTg({username:active.username, phone:active.phone, connected:true, displayName: active.displayName, firstName: active.firstName});
+    if(!visibleAccounts.length){ setTg(null); setDests([]); prevActiveRef.current = null; return; }
+    const active = activeTgId ? visibleAccounts.find(a=>a.id===activeTgId) : visibleAccounts[0];
+    if(!active){
+      // Active id points at an expired/removed rental → fall to the first live
+      // account and persist it, so the sidebar never shows a ghost identity
+      // and the old logged-in account never resurfaces by accident.
+      const fallback = visibleAccounts[0];
+      setTg({username:fallback.username, phone:fallback.phone, connected:true, displayName: fallback.displayName, firstName: fallback.firstName});
+      setActiveTgId(fallback.id);
+      try{ fetch("/api/telegram/accounts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({accountId:fallback.id})}).catch(()=>{}); }catch{}
+      setDests([]); refreshDests(fallback.id);
+      prevActiveRef.current = fallback.id;
+      return;
+    }
+    setTg({username:active.username, phone:active.phone, connected:true, displayName: active.displayName, firstName: active.firstName});
     if(activeTgId && prevActiveRef.current !== activeTgId){
       setDests([]); // clear stale groups immediately — never flash the old account's list
       refreshDests(activeTgId);

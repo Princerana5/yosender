@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
 import { getUsers, saveUsers } from "@/lib/db";
+import { makeOtp, sendOtpEmail, emailConfigured } from "@/lib/email";
 
-// POST /api/auth/forgot — { email } → generates a reset token.
-// No email service is configured, so the reset link is shown in-app
-// (and to admins). Token expires in 30 min, single-use.
+const OTP_TTL_MS = 10 * 60 * 1000;
+
+// POST /api/auth/forgot — { email } → emails a 6-digit OTP (10 min).
+// The old long-token link flow is replaced: the UI now collects the OTP +
+// new password and calls /api/auth/reset with { email, code, newPassword }.
 export async function POST(req: NextRequest) {
   const { email } = await req.json().catch(() => ({}));
   if (!email || !String(email).includes("@")) {
@@ -14,17 +16,18 @@ export async function POST(req: NextRequest) {
   const idx = users.findIndex((u) => u.email.toLowerCase() === String(email).toLowerCase().trim());
   // Always respond the same way so emails can't be enumerated.
   if (idx === -1) {
-    return NextResponse.json({ ok: true, message: "If an account exists for this email, a reset link was created." });
+    return NextResponse.json({ ok: true, message: "If an account exists for this email, a reset code was sent." });
   }
-  const token = crypto.randomBytes(24).toString("hex");
-  (users[idx] as any).resetToken = token;
-  (users[idx] as any).resetExpires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const code = makeOtp();
+  (users[idx] as any).resetOtp = code;
+  (users[idx] as any).resetOtpExpires = new Date(Date.now() + OTP_TTL_MS).toISOString();
+  // Drop any legacy long-token so only the OTP path works.
+  delete (users[idx] as any).resetToken;
+  delete (users[idx] as any).resetExpires;
   saveUsers(users);
-  // No SMTP configured — return the link so the UI can display it.
-  // (Admin can also read it from .data/users.json if needed.)
-  return NextResponse.json({
-    ok: true,
-    message: "If an account exists for this email, a reset link was created.",
-    resetToken: token,
-  });
+  const { sent, error } = await sendOtpEmail(String(email).trim(), code, "reset");
+  const res: any = { ok: true, message: sent ? "Reset code sent to your email." : "Email service is being set up — use this code for now." };
+  if (!emailConfigured()) res.devOtp = code;
+  if (!sent && emailConfigured()) res.emailError = error;
+  return NextResponse.json(res);
 }

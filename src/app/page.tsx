@@ -709,35 +709,50 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
   const { setUser } = useStore();
   const [name, setName] = useState(""), [email, setEmail] = useState(""), [pass, setPass] = useState(""), [tgUser, setTgUser] = useState("");
   const [loading, setLoading] = useState(false), [err, setErr] = useState("");
+  // signup OTP step: after Create Account, user enters the 6-digit email code
+  const [otpSent, setOtpSent] = useState(false), [otp, setOtp] = useState(""), [otpMsg, setOtpMsg] = useState(""), [otpLoading, setOtpLoading] = useState(false), [devOtp, setDevOtp] = useState("");
   const [forgotOpen, setForgotOpen] = useState(false), [forgotEmail, setForgotEmail] = useState(""), [forgotMsg, setForgotMsg] = useState(""), [forgotLoading, setForgotLoading] = useState(false);
-  const [resetToken, setResetToken] = useState(""), [newPass, setNewPass] = useState(""), [resetMsg, setResetMsg] = useState(""), [resetLoading, setResetLoading] = useState(false);
+  const [resetCode, setResetCode] = useState(""), [resetSent, setResetSent] = useState(false), [newPass, setNewPass] = useState(""), [resetMsg, setResetMsg] = useState(""), [resetLoading, setResetLoading] = useState(false), [devResetOtp, setDevResetOtp] = useState("");
   const submit = async () => {
     if (!email || !pass || (mode === "signup" && !name)) { setErr("Fill all fields"); return; }
     setErr(""); setLoading(true);
     try {
-      const url = mode === "signup" ? "/api/auth/register" : "/api/auth/login";
-      const body: any = mode === "signup" ? { name, email, password: pass, telegramUsername: tgUser } : { email, password: pass };
-      const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (mode === "signup") {
+        const r = await fetch("/api/auth/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, email, password: pass, telegramUsername: tgUser }) });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error);
+        setOtpSent(true); setOtpMsg(j.message || "Code sent."); setDevOtp(j.devOtp || "");
+      } else {
+        const r = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password: pass }) });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error);
+        setUser(j.user); onNav("dashboard");
+      }
+    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+  };
+  const verifyOtp = async () => {
+    if (otp.trim().length !== 6) { setErr("Enter the 6-digit code from your email"); return; }
+    setErr(""); setOtpLoading(true);
+    try {
+      const r = await fetch("/api/auth/register", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, code: otp.trim() }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
       setUser(j.user); onNav("dashboard");
-    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+    } catch (e: any) { setErr(e.message); } finally { setOtpLoading(false); }
   };
   const sendReset = async () => {
     if (!forgotEmail.includes("@")) { setForgotMsg("Enter your account email"); return; }
-    setForgotLoading(true); setForgotMsg(""); setResetToken(""); setResetMsg(""); setNewPass("");
+    setForgotLoading(true); setForgotMsg(""); setResetCode(""); setResetSent(false); setResetMsg(""); setNewPass(""); setDevResetOtp("");
     try {
       const r = await fetch("/api/auth/forgot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: forgotEmail.trim() }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
-      setForgotMsg(j.message || "Reset link created.");
-      // No email service yet — the API returns the one-time token so the user can reset right here.
-      if (j.resetToken) setResetToken(j.resetToken);
+      setForgotMsg(j.message || "Reset code sent.");
+      setResetSent(true);
+      if (j.devOtp) setDevResetOtp(j.devOtp);
     } catch (e: any) { setForgotMsg(e.message); } finally { setForgotLoading(false); }
   };
   const doReset = async () => {
-    if (!resetToken || !newPass) { setResetMsg("Enter the reset token and a new password"); return; }
+    if (!resetCode || !newPass) { setResetMsg("Enter the email code and a new password"); return; }
     setResetLoading(true); setResetMsg("");
     try {
-      const r = await fetch("/api/auth/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: resetToken.trim(), newPassword: newPass }) });
+      const r = await fetch("/api/auth/reset", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: forgotEmail.trim(), code: resetCode.trim(), newPassword: newPass }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
       setResetMsg(j.message || "Password updated.");
       setNewPass("");
@@ -755,18 +770,28 @@ function Auth({ mode, onNav }: { mode: "login" | "signup", onNav: (v: string) =>
         {mode === "signup" && <div className="relative mb-3"><span className="absolute left-3.5 top-3.5 text-slate-400 text-sm">@</span><input value={tgUser} onChange={e => setTgUser(e.target.value)} placeholder="Telegram username (optional)" className="w-full border border-[#E2E8F0] rounded-xl pl-8 pr-3.5 py-3 text-sm focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none transition" /></div>}
         <input value={pass} onChange={e => setPass(e.target.value)} placeholder="Password" type="password" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 mb-2 text-sm focus:ring-2 focus:ring-[#229ED9]/20 focus:border-[#229ED9] outline-none transition" />
         {err && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-xl p-2.5 mb-3">{err}</div>}
-        <button onClick={submit} disabled={loading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{loading ? "..." : mode === "signup" ? "Create Account" : "Sign In"}</button>
+        {mode === "signup" && !otpSent && <button onClick={submit} disabled={loading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{loading ? "Sending code…" : "Create Account"}</button>}
+        {mode === "signup" && otpSent && (
+          <div className="space-y-2.5">
+            <p className="text-xs text-slate-600 leading-relaxed">{otpMsg} Enter the 6-digit code sent to <b>{email}</b> (valid 10 min).</p>
+            {devOtp && <code className="block text-sm font-mono text-center tracking-[8px] bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 select-all">{devOtp}</code>}
+            <input value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6-digit code" inputMode="numeric" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-3 text-sm text-center tracking-[8px] font-mono outline-none focus:border-[#229ED9] transition" />
+            <button onClick={verifyOtp} disabled={otpLoading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{otpLoading ? "Verifying…" : "Verify & Create Account"}</button>
+            <button onClick={submit} disabled={loading} className="text-xs font-semibold text-[#229ED9] mx-auto block hover:underline">Didn't get it? Resend code</button>
+          </div>
+        )}
+        {mode === "login" && <button onClick={submit} disabled={loading} className="w-full bg-[#229ED9] text-white py-3 rounded-full font-semibold hover:bg-[#1B8AC4] shadow-lg transition disabled:opacity-50">{loading ? "..." : "Sign In"}</button>}
         {mode === "login" && <button onClick={() => { setForgotOpen(!forgotOpen); setForgotEmail(email); setForgotMsg(""); }} className="text-xs font-semibold text-[#229ED9] mt-3 hover:underline">Forgot password?</button>}
         {mode === "login" && forgotOpen && (
           <div className="mt-3 bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2.5">
             <div className="text-xs font-bold tracking-widest text-slate-500">RESET PASSWORD</div>
             <input value={forgotEmail} onChange={e => setForgotEmail(e.target.value)} placeholder="Account email" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-2.5 text-sm outline-none bg-white" />
-            <button onClick={sendReset} disabled={forgotLoading} className="w-full border border-slate-200 bg-white py-2.5 rounded-full text-sm font-semibold hover:bg-slate-100 transition disabled:opacity-50">{forgotLoading ? "Creating link…" : "Send reset link"}</button>
+            <button onClick={sendReset} disabled={forgotLoading} className="w-full border border-slate-200 bg-white py-2.5 rounded-full text-sm font-semibold hover:bg-slate-100 transition disabled:opacity-50">{forgotLoading ? "Sending…" : "Send reset code"}</button>
             {forgotMsg && <p className="text-xs text-slate-600 leading-relaxed">{forgotMsg}</p>}
-            {resetToken && (
+            {resetSent && (
               <div className="space-y-2.5 pt-1">
-                <p className="text-xs text-slate-500 leading-relaxed">No email service is set up yet, so use this one-time code (valid 30 min):</p>
-                <code className="block text-[11px] font-mono bg-white border border-slate-200 rounded-xl px-3 py-2.5 break-all select-all">{resetToken}</code>
+                {devResetOtp && <code className="block text-sm font-mono text-center tracking-[8px] bg-white border border-slate-200 rounded-xl px-3 py-2.5 select-all">{devResetOtp}</code>}
+                <input value={resetCode} onChange={e => setResetCode(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6-digit code from email" inputMode="numeric" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-2.5 text-sm text-center tracking-[8px] font-mono outline-none bg-white focus:border-[#229ED9]" />
                 <input value={newPass} onChange={e => setNewPass(e.target.value)} placeholder="New password (min 6 chars)" type="password" className="w-full border border-[#E2E8F0] rounded-xl px-3.5 py-2.5 text-sm outline-none bg-white" />
                 <button onClick={doReset} disabled={resetLoading} className="w-full bg-[#229ED9] text-white py-2.5 rounded-full text-sm font-semibold hover:bg-[#1B8AC4] transition disabled:opacity-50">{resetLoading ? "Updating…" : "Set new password"}</button>
                 {resetMsg && <p className="text-xs font-semibold text-emerald-700">{resetMsg} You can sign in now.</p>}
@@ -830,16 +855,26 @@ function Connect({ onNav }: { onNav: (v: string) => void }) {
 }
 
 function AccountsView() {
-  const { tgAccounts, activeTgId, setActiveTgId, setTg, refreshTgAccounts, refreshDests, setView, campaigns } = useStore() as any;
+  const { tgAccounts: rawAccounts, activeTgId, setActiveTgId, setTg, refreshTgAccounts, refreshDests, setView, campaigns } = useStore() as any;
+  // Expired rentals never render here — the store already hides them from the
+  // sidebar, and this view must agree, otherwise a dead rental lingers on
+  // screen after its 24h window ("rented but time over, still shows").
+  const nowTick = Date.now();
+  const tgAccounts = (rawAccounts || []).filter((a: any) => {
+    if (!a?.isRental) return true;
+    const exp = new Date(a.rentalExpiresAt || 0).getTime();
+    return exp && exp > nowTick;
+  });
   const [switching, setSwitching] = useState<string | null>(null);
   const [perAccount, setPerAccount] = useState<any[] | null>(null);
+  useEffect(() => { refreshTgAccounts().catch(() => {}); }, []);
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try { const r = await fetch("/api/stats"); const j = await r.json(); if (alive && j.perAccount) setPerAccount(j.perAccount); } catch {}
     };
     load();
-    const t = setInterval(load, 8000);
+    const t = setInterval(load, 15000);
     return () => { alive = false; clearInterval(t); };
   }, [tgAccounts?.length, campaigns?.length]);
   const doSwitch = async (id: string) => {
@@ -851,7 +886,7 @@ function AccountsView() {
       const acc = tgAccounts.find((a: any) => a.id === id);
       if (acc) setTg({ username: acc.username, phone: acc.phone, connected: true, displayName: acc.displayName, firstName: acc.firstName });
       await refreshTgAccounts();
-      try { await refreshDests(); } catch {}
+      try { await refreshDests(id); } catch {}
     } catch (e: any) { alert(e.message); } finally { setSwitching(null); }
   };
   const doRemove = async (id: string) => {
@@ -866,7 +901,19 @@ function AccountsView() {
         return;
       }
       if (!r.ok) throw new Error((j as any).error);
-      await refreshTgAccounts(); if (activeTgId === id) try { await refreshDests(); } catch {}
+      // If the removed account was active, explicitly activate the first
+      // remaining live account — never let the UI fall back to a stale id
+      // (that resurfaced an old logged-in account that wasn't in the system).
+      const remaining = (tgAccounts || []).filter((a: any) => String(a.id) !== String(id));
+      if (activeTgId === id && remaining.length) {
+        try {
+          await fetch("/api/telegram/accounts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accountId: remaining[0].id }) });
+          setActiveTgId(remaining[0].id);
+          setTg({ username: remaining[0].username, phone: remaining[0].phone, connected: true, displayName: remaining[0].displayName, firstName: remaining[0].firstName });
+          await refreshDests(remaining[0].id);
+        } catch {}
+      }
+      await refreshTgAccounts();
     } catch (e: any) { alert(e.message); }
   };
   const count = tgAccounts?.length || 0;
@@ -900,6 +947,7 @@ function AccountsView() {
         <div className="mt-4 space-y-3">
           {tgAccounts.map((a: any) => {
             const active = a.id === activeTgId;
+            const isRental = !!(a as any).isRental;
             const initial = (a.displayName || a.username || a.phone || "?")[0].toUpperCase();
             return (
               <div key={a.id} className={`group bg-white border rounded-2xl p-4 flex flex-wrap gap-3 items-center justify-between transition ${active ? "border-slate-900 shadow-sm" : "border-slate-200 hover:border-slate-300"}`}>
@@ -909,6 +957,7 @@ function AccountsView() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[14px] font-semibold text-slate-900 truncate">{a.displayName || a.username || a.phone}</span>
                       {active && <span className="inline-flex items-center gap-1 text-[10px] font-bold tracking-widest bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />ACTIVE</span>}
+                      {isRental && <span className="inline-flex items-center gap-1 text-[10px] font-bold tracking-widest bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full">RENTED · till {new Date(a.rentalExpiresAt).toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>}
                     </div>
                     <div className="text-xs text-slate-500 truncate mt-0.5">{a.username ? `@${a.username}` : a.phone} <span className="mx-1 text-slate-300">·</span> {a.phone}</div>
                     <div className="text-[11px] text-slate-400 mt-0.5">Added {new Date(a.createdAt).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })} · {new Date(a.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
@@ -1307,14 +1356,12 @@ function PlansView() {
         </div>
       )}
 
-      {/* Crypto orders — show pending/confirmed keys */}
+      {/* Crypto orders — show pending/confirmed keys. Single support button
+          lives at the bottom of this card — nowhere else in Plans. */}
       {cryptoOrders.length > 0 && (
         <div className="mt-4 bg-white border border-slate-200 rounded-2xl p-5">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-bold flex items-center gap-2">₿ Crypto Orders</h3>
-            <a href="https://t.me/princerana" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-xs font-bold bg-[#229ED9] text-white px-3.5 py-1.5 rounded-full hover:bg-[#1B8AC4] hover:shadow-md transition shrink-0">
-              <MessageCircle size={12} /> Support
-            </a>
           </div>
           <p className="text-xs text-slate-500 mt-1">Your crypto invoices — status updates automatically. On <b>finished</b>, your API key is auto-generated & plan auto-activated.</p>
           <div className="mt-3 space-y-2">
@@ -1461,17 +1508,21 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
     try { await refreshTgAccounts(); } catch {}
     setView("landing");
   };
-  // Sidebar identity resolves from the account list — tg can lag/stick after
-  // logout or account removal, but the list is the source of truth, so a ghost
-  // avatar can never render here.
+  // Sidebar identity resolves from the LIVE account list — expired rentals are
+  // excluded, so a dead rental can never render as the connected identity.
+  const liveAccounts = (tgAccounts || []).filter((a: any) => {
+    if (!a?.isRental) return true;
+    const exp = new Date(a.rentalExpiresAt || 0).getTime();
+    return exp && exp > Date.now();
+  });
   const sidebarTg = (() => {
-    if (!tgAccounts?.length) return null;
-    if (activeTgId) return tgAccounts.find((a: any) => a.id === activeTgId) || null;
-    return tgAccounts[0] || null;
+    if (!liveAccounts?.length) return null;
+    if (activeTgId) return liveAccounts.find((a: any) => a.id === activeTgId) || liveAccounts[0];
+    return liveAccounts[0] || null;
   })();
   const sidebarCard = sidebarTg ? { username: sidebarTg.username, phone: sidebarTg.phone, connected: true, displayName: sidebarTg.displayName, firstName: sidebarTg.firstName } : null;
   const [open, setOpen] = useState(false);
-  const accCount = tgAccounts?.length || 0;
+  const accCount = liveAccounts?.length || 0;
   const l = (lang || "en") as Lang;
   const isAdmin = user?.email?.toLowerCase() === "princeranarealme@gmail.com";
 
@@ -1592,7 +1643,13 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
     load(); const t = setInterval(load, 5000); return () => { alive = false; clearInterval(t); };
   }, [safeCamps.length]);
   const statusDot: Record<string, string> = { Completed: "bg-emerald-500", Running: "bg-blue-500 animate-pulse", Paused: "bg-amber-500", Failed: "bg-red-500", Repeating: "bg-violet-500 animate-pulse" };
-  const deliveryRate = safeCamps.length ? Math.round(safeCamps.reduce((a,c)=>a+campOk(c),0) / Math.max(1,safeCamps.reduce((a,c)=>a+campDests(c).length,0)) * 100) : 0;
+  // Delivery rate = Sent ÷ Attempted, clamped 0–100. Repeating campaigns log
+  // MANY sends per destination, so successful can exceed destinations — the old
+  // formula divided by destinations and showed absurd values like 1500%.
+  const totalOk = safeCamps.reduce((a,c)=>a+campOk(c),0);
+  const totalFail = safeCamps.reduce((a,c)=>a+(Number(c?.failed)||0),0);
+  const totalAttempted = totalOk + totalFail;
+  const deliveryRate = totalAttempted > 0 ? Math.min(100, Math.round(totalOk / totalAttempted * 100)) : 0;
   const mine = stats?.mine || null;
   const todaySent = mine ? (mine.todaySent ?? stats.todaySent ?? 0) : (stats ? stats.todaySent : 0);
   const totalSentAll = mine ? mine.totalSent : (stats ? stats.totalSent : safeCamps.reduce((a,c)=>a+campOk(c),0));
@@ -2106,22 +2163,26 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
                   )}
                 </header>
                 <ul className="divide-y divide-slate-100">
-                  {list.map((g: any) => (
+                  {list.map((g: any) => {
+                    const blocked = g.send_restricted === true;
+                    return (
                     <li key={g.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50/60 transition-colors">
                       {!locked && <input type="checkbox" checked={selected.has(g.id)} onChange={() => toggle(g.id)} aria-label={`Select ${g.group_name || g.group_username || "group"}`} className="accent-emerald-600 w-4 h-4 shrink-0" />}
                       <span className="w-10 h-10 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-sm font-bold text-slate-600 shrink-0" aria-hidden="true">{groupInitial(g)}</span>
                       <div className="min-w-0 flex-1">
                         <div className="text-sm font-semibold text-slate-900 truncate">{g.group_name || (g.group_username ? `@${g.group_username}` : "Unnamed group")}</div>
-                        <div className="text-caption truncate mt-0.5 flex items-center gap-1.5">
+                        <div className="text-caption truncate mt-0.5 flex items-center gap-1.5 flex-wrap">
                           <Users size={11} className="shrink-0" />
                           {memberLabel(g) || "Members unavailable"}
                           <span aria-hidden="true">·</span>
                           <span className="capitalize">{g.group_type}</span>
+                          {blocked && !locked && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full" title="Messages cannot be sent in this group from the current account">✕ No-send</span>}
                         </div>
                       </div>
                       <button onClick={() => locked ? onNav("plans") : startJoin([g.normalized_link || g.group_link])} disabled={joining} className={`btn !py-2 text-xs shrink-0 ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock" : "Join"}</button>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               </section>
             );
@@ -2197,25 +2258,42 @@ function DestinationsView() {
   const doLeave = async (d: any) => {
     if (!confirm(`Leave "${d.title}"? You will need an invite link to rejoin private groups.`)) return;
     setLeavingId(d.id); setErr("");
+    // Optimistic removal FIRST — the row vanishes instantly even if Telegram is
+    // slow; the silent re-check below restores it if the leave actually failed.
+    setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String(d.id)) : prev);
     try {
-      // Leave from the ACTIVE account (the list always shows the active one) —
-      // the old body omitted accountId, so multi-account setups left from the
-      // wrong session and nothing happened.
       const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title, kind: d.kind, accessHash: d.accessHash, accountId: activeTgId || refreshAccountId }) });
       const j = await r.json();
-      // 404 = account vanished mid-session — resync accounts so the list can't
-      // keep showing a deleted account's groups.
       if (r.status === 404 && /Account not found/i.test(j.error || "")) { try { await refreshTgAccounts(); } catch {} setReal([]); throw new Error(j.error || "Failed to leave"); }
       if (!r.ok) throw new Error(j.error || "Failed to leave");
-      // Server-confirmed: drop from list, then verify against Telegram (no cache).
-      // Optimistic removal alone lies when the leave actually fails server-side.
-      setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String(d.id)) : prev);
-      await refresh();
-    } catch (e: any) { setErr(e.message); } finally { setLeavingId(null); }
+      // Silent verify: confirm Telegram agrees, but only auto-restore on failure
+      // (no full-list flash on success — the row is already gone).
+      try {
+        const aid = activeTgId || cookieActiveId();
+        const qs = aid ? `?accountId=${encodeURIComponent(aid)}` : "";
+        const vr = await fetch(`/api/telegram/dialogs${qs}`); const vj = await vr.json().catch(() => ({}));
+        if (vr.ok && Array.isArray(vj.dialogs)) {
+          const stillThere = (vj.dialogs as any[]).some((x: any) => String(x.id) === String(d.id));
+          if (stillThere) {
+            setReal(groupsOnly(vj.dialogs || []));
+            throw new Error("Telegram still shows this group — leave didn't complete. Try again in a minute.");
+          }
+        }
+      } catch (e: any) { if (e?.message && !/Failed to fetch/i.test(e.message)) throw e; }
+    } catch (e: any) {
+      // Restore the row on failure — but only if a silent recheck shows it.
+      // If the verify already restored the full list, don't touch anything.
+      setErr(e.message);
+      try {
+        const aid = activeTgId || cookieActiveId();
+        const qs = aid ? `?accountId=${encodeURIComponent(aid)}` : "";
+        const rr = await fetch(`/api/telegram/dialogs${qs}`); const jj = await rr.json().catch(() => ({}));
+        if (rr.ok && Array.isArray(jj.dialogs)) setReal(groupsOnly(jj.dialogs || []));
+      } catch {}
+    } finally { setLeavingId(null); }
   };
   const doJoin = async () => {
     if (!joinList.length) return alert("Paste at least one group link");
-    setTab("list");
     setJoining(true); setErr(""); setJoinResults([]);
     setPendingJoinCount(joinList.length);
     try {
@@ -2235,98 +2313,137 @@ function DestinationsView() {
   };
   // Total being joined — joinResults live on both tabs, so progress stays visible.
   const [pendingJoinCount, setPendingJoinCount] = useState(0);
+  const [targetsTotal, setTargetsTotal] = useState(0);
   const doLeaveAll = async () => {
     if (!filtered.length) return alert("Nothing to leave — the list is empty");
     if (!confirm(`Leave all ${filtered.length} shown groups? You will need invite links to rejoin private ones.`)) return;
     setLeavingAll(true); setErr(""); setLeaveResults([]);
+    // Snapshot + clear immediately — rows vanish at once, progress streams in.
+    // A silent re-check at the end restores anything Telegram refused.
+    const targets = [...filtered];
+    setTargetsTotal(targets.length);
+    const targetIds = new Set(targets.map((d: any) => String(d.id)));
+    setReal(prev => prev ? prev.filter((x: any) => !targetIds.has(String(x.id))) : prev);
     const all: any[] = [];
     try {
-      // Parallel batches — 5 concurrent leaves per batch instead of one-by-one
-      const CONCURRENCY = 5;
-      for (let i = 0; i < filtered.length; i += CONCURRENCY) {
-        const batch = filtered.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(batch.map(async (d: any) => {
-          try {
-            const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title, kind: d.kind, accessHash: d.accessHash, accountId: activeTgId || refreshAccountId }) });
-            const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to leave");
-            return { ok: true, d };
-          } catch (e: any) {
-            return { ok: false, d, error: e.message };
-          }
-        }));
-        for (const res of results) {
-          if ((res as any).ok) {
-            all.push({ title: (res as any).d.title, status: "Left" });
-            setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String((res as any).d.id)) : prev);
-          } else {
-            all.push({ title: (res as any).d.title, status: "Failed", error: (res as any).error });
-          }
+      // Sequential, one at a time — parallel leaves tripped Telegram flood
+      // limits and made "Leave all" report success while nothing left.
+      for (const d of targets) {
+        try {
+          const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title, kind: d.kind, accessHash: d.accessHash, accountId: activeTgId || refreshAccountId }) });
+          const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || "Failed to leave");
+          all.push({ title: d.title, status: "Left" });
+        } catch (e: any) {
+          all.push({ title: d.title, status: "Failed", error: e.message });
         }
         setLeaveResults([...all]);
+        // Gentle pacing so Telegram doesn't flood-limit the batch.
+        await new Promise(res2 => setTimeout(res2, 1200));
       }
-      // Verify against Telegram so failed leaves reappear instead of vanishing
-      await refresh();
+      // Silent verify: restore only the groups Telegram says are still joined.
+      try {
+        const aid = activeTgId || cookieActiveId();
+        const qs = aid ? `?accountId=${encodeURIComponent(aid)}` : "";
+        const vr = await fetch(`/api/telegram/dialogs${qs}`); const vj = await vr.json().catch(() => ({}));
+        if (vr.ok && Array.isArray(vj.dialogs)) {
+          const live = groupsOnly(vj.dialogs || []);
+          const stillJoined = live.filter((x: any) => targetIds.has(String(x.id)));
+          if (stillJoined.length) {
+            setReal(prev => [...(prev || []), ...stillJoined.filter((s: any) => !(prev || []).some((p: any) => String(p.id) === String(s.id)))]);
+            setErr(`${stillJoined.length} group(s) could not be left — they were restored to the list. Try again in a few minutes.`);
+          }
+        }
+      } catch {}
     } finally { setLeavingAll(false); }
   };
+  const allowedCount = list.filter((d: any) => d.allowed).length;
+  const restrictedCount = list.length - allowedCount;
   return (
-    <div>
+    <div className="max-w-5xl mx-auto">
       <div className="flex flex-wrap gap-3 justify-between items-start">
         <div>
           <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900">Groups & Joiner</h1>
-          <p className="text-sm text-slate-500 mt-1">{tab === "list" ? <>{real ? <span className="inline-flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-semibold"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> Live — {tg ? `@${tg.username}` : ""}</span> : <span className="inline-flex items-center gap-1.5 text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full text-xs font-semibold">↻ Hit Refresh to load groups</span>} <span className="text-xs text-slate-400 ml-1">— active account only</span></> : "Join public & private groups via invite links."}</p>
+          <p className="text-sm text-slate-500 mt-1">
+            {tab === "list"
+              ? <>{list.length > 0
+                ? <span className="inline-flex items-center gap-1.5 text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-semibold"><span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" /> {list.length} groups · {allowedCount} sendable</span>
+                : <span className="inline-flex items-center gap-1.5 text-slate-500 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-semibold">No groups yet — join some below</span>}
+                {tg ? <span className="text-xs text-slate-400 ml-1">· @{tg.username || tg.phone}</span> : null}</>
+              : "Join public & private groups via invite links."}
+          </p>
         </div>
-        {tab === "list" && (
-          <div className="flex gap-2 shrink-0">
-            <button onClick={doLeaveAll} disabled={loading || leavingAll || !filtered.length} className="btn btn-destructive !py-2.5">{leavingAll ? "Leaving…" : `Leave all (${filtered.length})`}</button>
-            <button onClick={refresh} disabled={loading} className="btn btn-primary !py-2.5"><Search size={14} />{loading ? "Loading…" : "Refresh"}</button>
-          </div>
+        {tab === "list" && list.length > 0 && (
+          <button onClick={doLeaveAll} disabled={loading || leavingAll || !filtered.length} className="btn btn-destructive !py-2.5 shrink-0">{leavingAll ? `Leaving ${leaveResults?.length || 0}/${targetsTotal}…` : `Leave all (${filtered.length})`}</button>
         )}
       </div>
-      <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1 mt-4">
-        <button onClick={() => setTab("list")} className={`px-5 py-2 rounded-full text-xs font-bold transition-all duration-200 ${tab === "list" ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>My Groups</button>
-        <button onClick={() => setTab("join")} className={`px-5 py-2 rounded-full text-xs font-bold transition-all duration-200 ${tab === "join" ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>Join Groups</button>
-      </div>
       {err && <div className="badge badge-danger mt-3 !text-xs !py-2 !px-3.5 !whitespace-normal !leading-relaxed" role="alert">{err}</div>}
+      {(leavingAll || (leaveResults && leaveResults.length > 0)) && (
+        <div className="card card-elevated mt-3 p-4" role="status" aria-live="polite">
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className={`badge ${leavingAll ? "badge-danger" : "badge-neutral"}`}>{leavingAll ? `Leaving ${leaveResults?.length || 0} of ${targetsTotal}…` : `Done — ${leaveResults?.filter((r: any) => r.status === "Left").length || 0} of ${leaveResults?.length || 0} left`}</span>
+            {!leavingAll && leaveResults && (leaveResults as any[]).some((r: any) => r.status !== "Left") && <span className="badge badge-danger">{(leaveResults as any[]).filter((r: any) => r.status !== "Left").length} failed</span>}
+            {!leavingAll && <button onClick={() => setLeaveResults(null)} className="btn btn-ghost ml-auto !px-2 !py-1 text-xs">Dismiss</button>}
+          </div>
+          <div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden" role="progressbar" aria-valuenow={targetsTotal ? Math.round(((leaveResults?.length || 0) / targetsTotal) * 100) : 0} aria-valuemin={0} aria-valuemax={100}>
+            <div className="h-full bg-red-500 rounded-full transition-all duration-300" style={{ width: `${targetsTotal ? Math.min(100, Math.round(((leaveResults?.length || 0) / targetsTotal) * 100)) : 0}%` }} />
+          </div>
+        </div>
+      )}
       {(joining || (joinResults && joinResults.length > 0)) && (
         <JoinProgressCard joining={joining} results={joinResults} total={pendingJoinCount || joinResults?.length || 0} onDismiss={() => { setJoinResults(null); setPendingJoinCount(0); }} />
       )}
-      {leavingAll && leaveResults && <div className="text-caption text-red-600 mt-3 font-semibold">{leaveResults.length} of {filtered.length} left…</div>}
-      {tab === "join" ? (
-        <div className="card p-5 mt-4 space-y-3">
-          <div className="text-micro text-slate-500">Group links — one per line</div>
-          <p className="text-body-sm text-slate-500">Private (<code className="bg-slate-100 px-1 rounded">t.me/+AbCdEf…</code>, <code className="bg-slate-100 px-1 rounded">t.me/joinchat/…</code>) and public (<code className="bg-slate-100 px-1 rounded">t.me/username</code>, <code className="bg-slate-100 px-1 rounded">@username</code>) links. Duplicates are removed. Telegram may rate-limit large batches — failed ones can be retried.</p>
-          <textarea value={joinLinks} onChange={e => setJoinLinks(e.target.value)} placeholder={"https://t.me/+AbCdEfGhIjKlMnOp\nhttps://t.me/joinchat/AAAAAE...\nt.me/mypublicgroup\n@anothergroup"} rows={10} aria-label="Group links, one per line" className="input !font-mono" />
-          <div className="flex gap-2 items-center text-xs"><span className={`badge ${joinList.length ? "badge-success" : "badge-neutral"}`}>{joinList.length.toLocaleString()} links</span><button onClick={() => { setJoinLinks(""); setJoinResults(null); }} className="btn btn-ghost ml-auto !py-1.5 text-xs">Clear</button></div>
-          <button onClick={doJoin} disabled={joining || !joinList.length} className="btn btn-primary !px-7 !py-3">{joining && joinResults ? `Joining ${joinResults.length} of ${joinList.length}…` : `Join ${joinList.length ? joinList.length.toLocaleString() : ""} groups`}</button>
-          {joinResults && <div className="card overflow-hidden"><div className="max-h-64 overflow-auto divide-y divide-slate-100">{joinResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.link}</span><span className={`badge shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "badge-success" : r.status === "RateLimited" ? "badge-warning" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}</div><button onClick={() => { setTab("list"); refresh(); }} className="btn btn-ghost m-2 text-xs">Refresh My Groups →</button></div>}
-        </div>
-      ) : (
+      <div className="relative mt-4"><Search size={16} className="absolute left-3.5 top-3.5 text-slate-400" /><input value={q} onChange={e => setQ(e.target.value)} placeholder={tab === "list" ? "Search my groups…" : "Search groups…"} aria-label="Search groups" className="input !rounded-xl !pl-10 !py-3 shadow-sm" /></div>
+      {tab === "list" ? (
         <>
-          <div className="flex flex-wrap items-center gap-2 mt-4" role="group" aria-label="Group filters">
+          <div className="flex flex-wrap items-center gap-2 mt-3" role="group" aria-label="Group filters">
+            <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1" role="group" aria-label="Permission filter">
+              {[["All", `All (${list.length})`], ["Allowed", `✓ Sendable (${allowedCount})`], ["Restricted", `✕ No-send (${restrictedCount})`]].map(([v, label]) => <button key={v} onClick={() => setPermF(v as any)} aria-pressed={permF === v} title={v === "All" ? "Show every group" : v === "Allowed" ? "Only groups you can send to" : "Only groups blocking sends"} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${permF === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>)}
+            </div>
             <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1" role="group" aria-label="Privacy filter">
               {["All", "Private", "Public"].map(p => <button key={p} onClick={() => setPf(p)} aria-pressed={pf === p} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${pf === p ? "bg-[#229ED9] text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{p}</button>)}
             </div>
-            <div className="inline-flex bg-slate-100 rounded-full p-1 gap-1" role="group" aria-label="Permission filter">
-              {[["All", "All groups"], ["Allowed", "✓ Allowed"], ["Restricted", "✕ Restricted"]].map(([v, label]) => <button key={v} onClick={() => setPermF(v as any)} aria-pressed={permF === v} title={v === "All" ? "Show every group" : v === "Allowed" ? "Only groups you can send to" : "Only groups blocking sends"} className={`px-4 py-2 rounded-full text-xs font-bold transition-all duration-200 ${permF === v ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>)}
-            </div>
-            <span className="badge badge-neutral">{filtered.length} shown</span>
           </div>
-          {leaveResults && !leavingAll && (
-            <div className="card mt-3 overflow-hidden">
-              <div className="max-h-64 overflow-auto divide-y divide-slate-100">
-                {leaveResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.title}</span><span className={`badge shrink-0 ${r.status === "Left" ? "badge-neutral" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}
+          {loading ? (
+            <div className="card mt-4 p-6 space-y-3" aria-busy="true" aria-label="Loading groups">
+              {[0, 1, 2].map(i => <div key={i} className="flex items-center gap-3"><div className="skeleton !rounded-full" style={{ width: 40, height: 40 }} /><div className="flex-1 space-y-2"><div className="skeleton skeleton-text !w-2/3" /><div className="skeleton skeleton-text !w-1/3" /></div><div className="skeleton" style={{ width: 72, height: 32, borderRadius: 9999 }} /></div>)}
+            </div>
+          ) : !filtered.length ? (
+            <div className="card mt-4">
+              <div className="empty-state">
+                <div className="empty-state-icon"><Users size={24} /></div>
+                <div className="empty-state-title">{list.length ? "No groups match these filters" : "No groups yet"}</div>
+                <div className="empty-state-desc">{list.length ? "Try a different search or filter." : "Paste invite links below to join your first groups — no refresh needed."}</div>
+                {!list.length && <button onClick={() => setTab("join")} className="btn btn-primary mt-4">Join groups →</button>}
               </div>
-              <button onClick={() => setLeaveResults(null)} className="btn btn-ghost m-2 text-xs">Dismiss</button>
+            </div>
+          ) : (
+            <div className="table-container card mt-4">
+              <table className="table">
+                <thead><tr><th>Group</th><th>Privacy</th><th>Members</th><th>Permission</th><th className="!text-right">Action</th></tr></thead>
+                <tbody>{filtered.map((d: any) => <tr key={d.id}><td><div className="font-semibold">{d.title}</div>{d.username && <div className="text-caption">@{d.username}</div>}</td><td><span className={`badge ${d.privacy === "Public" ? "badge-info" : "badge-neutral"}`}>{d.privacy || "Private"}</span></td><td className="tabular-nums">{Number(d.members || 0).toLocaleString()}</td><td>{d.allowed ? <span className="badge badge-success">✓ Sendable</span> : <span className="badge badge-danger" title="Sending is blocked in this group">✕ No-send</span>}</td><td className="!text-right"><button onClick={() => doLeave(d)} disabled={leavingId === d.id || leavingAll} className="btn btn-destructive !py-1.5 !px-3 text-xs">{leavingId === d.id ? "Leaving…" : "Leave"}</button></td></tr>)}</tbody>
+              </table>
             </div>
           )}
-          <div className="relative mt-3"><Search size={16} className="absolute left-3.5 top-3.5 text-slate-400" /><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search groups" aria-label="Search my groups" className="input !rounded-xl !pl-10 !py-3 shadow-sm" /></div>
-          <div className="table-container card mt-4">
-            <table className="table">
-              <thead><tr><th>Group</th><th>Privacy</th><th>Members</th><th>Permission</th><th className="!text-right">Action</th></tr></thead>
-              <tbody>{filtered.map((d: any) => <tr key={d.id}><td><div className="font-semibold">{d.title}</div>{d.username && <div className="text-caption">@{d.username}</div>}</td><td><span className={`badge ${d.privacy === "Public" ? "badge-info" : "badge-neutral"}`}>{d.privacy || "Private"}</span></td><td className="tabular-nums">{d.members?.toLocaleString?.() ?? d.members}</td><td>{d.allowed ? <span className="badge badge-success">✓ Allowed</span> : <span className="badge badge-danger" title="Sending is blocked in this group">✕ Restricted</span>}</td><td className="!text-right"><button onClick={() => doLeave(d)} disabled={leavingId === d.id} className="btn btn-destructive !py-1.5 !px-3 text-xs">{leavingId === d.id ? "Leaving…" : "Leave"}</button></td></tr>)}</tbody>
-            </table>
+          <div className="card p-5 mt-6 space-y-3">
+            <div className="text-micro text-slate-500">Join more — paste links, one per line</div>
+            <textarea value={joinLinks} onChange={e => setJoinLinks(e.target.value)} placeholder={"https://t.me/+AbCdEfGhIjKlMnOp\nt.me/mypublicgroup\n@anothergroup"} rows={4} aria-label="Group links, one per line" className="input !font-mono" />
+            <div className="flex gap-2 items-center text-xs flex-wrap">
+              {joinList.length > 0 && <span className="badge badge-success">{joinList.length.toLocaleString()} links</span>}
+              <button onClick={doJoin} disabled={joining || !joinList.length} className="btn btn-primary !px-7 !py-2.5">{joining && joinResults ? `Joining ${joinResults.length} of ${joinList.length}…` : `Join ${joinList.length ? joinList.length.toLocaleString() : ""} groups`}</button>
+              {joinList.length > 0 && <button onClick={() => { setJoinLinks(""); setJoinResults(null); }} className="btn btn-ghost !py-1.5 text-xs">Clear</button>}
+            </div>
+            {joinResults && joinResults.length > 0 && <div className="card overflow-hidden"><div className="max-h-48 overflow-auto divide-y divide-slate-100">{joinResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.link}</span><span className={`badge shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "badge-success" : r.status === "RateLimited" ? "badge-warning" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}</div></div>}
           </div>
         </>
+      ) : (
+        <div className="card p-5 mt-4 space-y-3">
+          <div className="text-micro text-slate-500">Group links — one per line</div>
+          <p className="text-body-sm text-slate-500">Private (<code className="bg-slate-100 px-1 rounded">t.me/+AbCdEf…</code>, <code className="bg-slate-100 px-1 rounded">t.me/joinchat/…</code>) and public (<code className="bg-slate-100 px-1 rounded">t.me/username</code>, <code className="bg-slate-100 px-1 rounded">@username</code>) links. Duplicates are removed. Joined groups appear in the list above automatically.</p>
+          <textarea value={joinLinks} onChange={e => setJoinLinks(e.target.value)} placeholder={"https://t.me/+AbCdEfGhIjKlMnOp\nhttps://t.me/joinchat/AAAAAE...\nt.me/mypublicgroup\n@anothergroup"} rows={10} aria-label="Group links, one per line" className="input !font-mono" />
+          <div className="flex gap-2 items-center text-xs"><span className={`badge ${joinList.length ? "badge-success" : "badge-neutral"}`}>{joinList.length.toLocaleString()} links</span><button onClick={() => { setJoinLinks(""); setJoinResults(null); }} className="btn btn-ghost ml-auto !py-1.5 text-xs">Clear</button></div>
+          <button onClick={doJoin} disabled={joining || !joinList.length} className="btn btn-primary !px-7 !py-3">{joining && joinResults ? `Joining ${joinResults.length} of ${joinList.length}…` : `Join ${joinList.length ? joinList.length.toLocaleString() : ""} groups`}</button>
+          {joinResults && <div className="card overflow-hidden"><div className="max-h-64 overflow-auto divide-y divide-slate-100">{joinResults.map((r: any, i: number) => <div key={i} className="flex justify-between items-center gap-3 px-4 py-2.5 text-sm"><span className="font-medium truncate text-slate-700">{r.link}</span><span className={`badge shrink-0 ${r.status === "Joined" || r.status === "Already member" ? "badge-success" : r.status === "RateLimited" ? "badge-warning" : "badge-danger"}`}>{r.status}{r.error ? ` — ${r.error}` : ""}</span></div>)}</div></div>}
+        </div>
       )}
     </div>
   );
@@ -2724,12 +2841,17 @@ function CampaignsView() {
   };
   const activeBanner = campaigns.filter((c:any)=>c.status==="Repeating");
 
+  // Repeating campaigns ARE running campaigns — merge them into the Running
+  // filter so they show under "Running", not hidden behind a separate tab.
+  const runningCount = campaigns.filter((c:any)=>c.status==="Running"||c.status==="Repeating").length;
+  const visibleList = f === "Running" ? campaigns.filter((c:any)=>c.status==="Running"||c.status==="Repeating") : f === "All" ? campaigns : campaigns.filter((c:any) => c.status === f);
+
   return (
     <div>
       <h1 className="text-2xl font-extrabold tracking-tight">Campaigns</h1>
-      {activeBanner.length > 0 && <div className="mt-3 bg-[#EFF6FF] border border-[#BFDBFE] rounded-2xl p-3 flex flex-wrap gap-2 items-center text-sm"><span className="w-2 h-2 bg-[#EFF6FF]0 rounded-full animate-pulse" /><span className="font-bold text-blue-800">{activeBanner.length} repeating</span><span className="text-blue-600 text-xs">— repeating campaigns have Pause & Stop.</span><button onClick={()=>setF("All")} className="ml-auto bg-[#229ED9] text-white px-3 py-1 rounded-full text-xs font-bold">Show all</button></div>}
-      <div className="flex gap-2 mt-4 flex-wrap">{["All", "Completed", "Running", "Repeating", "Scheduled", "Paused", "Failed"].map(s => <button key={s} onClick={() => setF(s)} className={`px-4 py-2 rounded-full text-xs font-bold border transition ${f === s ? "bg-[#229ED9] text-white border-slate-900 shadow" : "bg-white border-[#E2E8F0] hover:bg-[#F8FAFC]"}`}>{s}</button>)}</div>
-      <div className="space-y-3 mt-5">{list.map((c:any, idx:number) => {
+      {activeBanner.length > 0 && <div className="mt-3 bg-[#EFF6FF] border border-[#BFDBFE] rounded-2xl p-3 flex flex-wrap gap-2 items-center text-sm"><span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" /><span className="font-bold text-blue-800">{activeBanner.length} repeating</span><span className="text-blue-600 text-xs">— repeating campaigns have Pause & Stop.</span><button onClick={()=>setF("Running")} className="ml-auto bg-[#229ED9] text-white px-3 py-1 rounded-full text-xs font-bold">Show running</button></div>}
+      <div className="flex gap-2 mt-4 flex-wrap">{["All", "Completed", "Running", "Scheduled", "Paused", "Failed"].map(s => <button key={s} onClick={() => setF(s)} className={`px-4 py-2 rounded-full text-xs font-bold border transition ${f === s ? "bg-[#229ED9] text-white border-slate-900 shadow" : "bg-white border-[#E2E8F0] hover:bg-[#F8FAFC]"}`}>{s === "Running" ? `Running (${runningCount})` : s}</button>)}</div>
+      <div className="space-y-3 mt-5">{visibleList.map((c:any, idx:number) => {
         const isRepeating = c.status === "Repeating";
         const isRunning = c.status === "Running";
         const isPausedRepeating = c.status === "Paused" && c.repeatIntervalId;
@@ -2742,7 +2864,7 @@ function CampaignsView() {
           </div>
         </div>;
       })}
-        {list.length === 0 && <div className="bg-white border border-[#E2E8F0] rounded-[20px] p-10 text-center shadow-sm"><p className="font-bold">No campaigns yet</p><p className="text-sm text-[#64748B] mt-1">Create your first campaign to manage your Telegram communications.</p></div>}</div>
+        {visibleList.length === 0 && <div className="bg-white border border-[#E2E8F0] rounded-[20px] p-10 text-center shadow-sm"><p className="font-bold">No campaigns yet</p><p className="text-sm text-[#64748B] mt-1">Create your first campaign to manage your Telegram communications.</p></div>}</div>
     </div>
   );
 }

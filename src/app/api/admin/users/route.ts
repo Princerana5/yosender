@@ -41,6 +41,8 @@ export async function GET(req: NextRequest) {
       createdAt: u.createdAt,
       lastLoginAt: (u as any).lastLoginAt || "Never",
       isBanned: (u as any).isBanned || false,
+      emailVerified: (u as any).emailVerified !== false,
+      authMethod: !(u as any).passwordHash ? "Google" : (u as any).googleId ? "Both" : "Email",
       tgAccounts: userAccounts.length,
       plan: plan?.name || "None",
       planId: sub?.planId || null,

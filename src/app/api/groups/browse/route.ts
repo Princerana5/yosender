@@ -72,6 +72,8 @@ export async function GET(req: NextRequest) {
   // private invites. notes stay admin-only. Member counts stay visible for all.
   const safe = groups.map((g) => {
     const memberCount = typeof g.member_count === "number" ? g.member_count : null;
+    // null = unknown (no badge); true/false = known snapshot.
+    const noSend = (g as any).send_restricted === true ? true : (g as any).send_restricted === false ? false : null;
     if (!locked) {
       return {
         id: g.id,
@@ -84,6 +86,7 @@ export async function GET(req: NextRequest) {
         category_name: g.category_name,
         notes: g.notes,
         member_count: memberCount,
+        send_restricted: noSend,
       };
     }
     return {
@@ -100,6 +103,7 @@ export async function GET(req: NextRequest) {
       category_name: g.category_name,
       notes: null,
       member_count: memberCount,
+      send_restricted: noSend,
     };
   });
 
