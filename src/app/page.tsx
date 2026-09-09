@@ -1,9 +1,35 @@
 "use client";
 import { StoreProvider, useStore } from "@/lib/store";
 import { t as tr, type Lang } from "@/lib/i18n";
-import { Send, Shield, ShieldCheck, Zap, Users, BarChart3, Check, Menu, X, ArrowRight, Sparkles, Clock, Lock, Search, Pause, LogOut, Settings, LayoutDashboard, Megaphone, FileText, History, HelpCircle, Star, TrendingUp, Layers, Globe, ChevronRight, Play, Download, Mail, Trash2, KeyRound, Save, AtSign, Gem, Crown, Zap as ZapIcon, Diamond, BookOpen, Video, ExternalLink, GraduationCap, ListChecks, MessageCircle, Compass } from "lucide-react";
-import { useState, useEffect } from "react";
+import { Send, Shield, ShieldCheck, Zap, Users, BarChart3, Check, Menu, X, ArrowRight, Sparkles, Clock, Lock, Search, Pause, LogOut, Settings, LayoutDashboard, Megaphone, FileText, History, HelpCircle, Star, TrendingUp, Layers, Globe, ChevronRight, Play, Download, Mail, Trash2, KeyRound, Save, AtSign, Gem, Crown, Zap as ZapIcon, Diamond, BookOpen, Video, ExternalLink, GraduationCap, ListChecks, MessageCircle, Compass, AlertCircle } from "lucide-react";
+import { useState, useEffect, Component, type ReactNode } from "react";
 import { AdminPanel } from "./admin-panel";
+
+// A render throw in ANY view (e.g. a malformed campaign/group row) unmounts
+// the whole tree, leaving every button dead until refresh — the "sometimes no
+// button works" freeze. This boundary isolates the crash to one view and
+// offers recovery, so one bad row can never freeze the whole platform again.
+class ViewErrorBoundary extends Component<{ viewKey: string; children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidUpdate(prev: { viewKey: string }) {
+    if (prev.viewKey !== this.props.viewKey && this.state.error) this.setState({ error: null });
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="max-w-2xl mx-auto">
+          <div className="bg-white border border-red-200 rounded-2xl p-8 text-center">
+            <h2 className="text-lg font-bold text-slate-900">Something went wrong in this section</h2>
+            <p className="text-sm text-slate-500 mt-2">The rest of the app still works — this is isolated to one view.</p>
+            <button onClick={() => this.setState({ error: null })} className="mt-5 bg-[#229ED9] text-white px-6 py-2.5 rounded-full text-sm font-semibold hover:bg-[#1B8AC4] transition">Try again</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function JoinProgressCard({ joining, results, total, onDismiss }: { joining: boolean; results: any[] | null; total: number; onDismiss: () => void }) {
   const ok = (results || []).filter((r: any) => r.status === "Joined" || r.status === "Already member").length;
@@ -212,10 +238,23 @@ function TelegramAccountsCard({ onConnect }: { onConnect: () => void }) {
     } catch (e: any) { alert(e.message); } finally { setSwitching(null); }
   };
   const remove = async (id: string) => {
-    if (!confirm("Remove this Telegram account? You can reconnect it anytime.")) return;
+    const acc = tgAccounts.find((a: any) => a.id === id);
+    const isRental = !!(acc as any)?.isRental;
+    if (!confirm(isRental ? "Hide this rented sender from your list? It stays usable till its 24h expiry — this only hides it here." : "Remove this Telegram account? You can reconnect it anytime.")) return;
     try {
       const r = await fetch(`/api/telegram/accounts?id=${id}`, { method: "DELETE" });
-      const j = await r.json();
+      const j = await r.json().catch(() => ({}));
+      // 409 hideOnly = active rental: server keeps the row (24h must survive),
+      // so hide it client-side for this session.
+      if (!r.ok && (j as any)?.hideOnly) {
+        try {
+          const hidden = JSON.parse(localStorage.getItem("yosender_hidden_rentals") || "[]");
+          if (!hidden.includes(id)) { hidden.push(id); localStorage.setItem("yosender_hidden_rentals", JSON.stringify(hidden)); }
+        } catch {}
+        await refreshTgAccounts();
+        if (activeTgId === id) { try { await refreshDests(); } catch {} }
+        return;
+      }
       if (!r.ok) throw new Error(j.error);
       await refreshTgAccounts();
       if (activeTgId === id) { try { await refreshDests(); } catch {} }
@@ -816,8 +855,19 @@ function AccountsView() {
     } catch (e: any) { alert(e.message); } finally { setSwitching(null); }
   };
   const doRemove = async (id: string) => {
-    if (!confirm("Remove this Telegram account? You can reconnect it anytime.")) return;
-    try { const r = await fetch(`/api/telegram/accounts?id=${id}`, { method: "DELETE" }); const j = await r.json(); if (!r.ok) throw new Error(j.error); await refreshTgAccounts(); if (activeTgId === id) try { await refreshDests(); } catch {} } catch (e: any) { alert(e.message); }
+    const acc = (tgAccounts || []).find((a: any) => a.id === id);
+    const isRental = !!(acc as any)?.isRental;
+    if (!confirm(isRental ? "Hide this rented sender from your list? It stays usable till its 24h expiry — this only hides it here." : "Remove this Telegram account? You can reconnect it anytime.")) return;
+    try {
+      const r = await fetch(`/api/telegram/accounts?id=${id}`, { method: "DELETE" }); const j = await r.json().catch(() => ({}));
+      if (!r.ok && (j as any)?.hideOnly) {
+        try { const h = JSON.parse(localStorage.getItem("yosender_hidden_rentals") || "[]"); if (!h.includes(id)) { h.push(id); localStorage.setItem("yosender_hidden_rentals", JSON.stringify(h)); } } catch {}
+        await refreshTgAccounts(); if (activeTgId === id) try { await refreshDests(); } catch {}
+        return;
+      }
+      if (!r.ok) throw new Error((j as any).error);
+      await refreshTgAccounts(); if (activeTgId === id) try { await refreshDests(); } catch {}
+    } catch (e: any) { alert(e.message); }
   };
   const count = tgAccounts?.length || 0;
   return (
@@ -1400,7 +1450,26 @@ function LangSwitch({ compact }: { compact?: boolean }) {
 }
 
 function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: string) => void }) {
-  const { tg, setTg, setView, view, tgAccounts, user, lang } = useStore() as any;
+  const { tg, setTg, setView, view, tgAccounts, setTgAccounts, activeTgId, setActiveTgId, setDests, refreshTgAccounts, user, lang } = useStore() as any;
+  // Sidebar logout: server deletes ALL tg accounts + clears cookies, then wipe
+  // local state too — otherwise tgAccounts stays populated and the card below
+  // keeps rendering from the stale list even though the server is clean.
+  const handleTgLogout = async () => {
+    try { await fetch("/api/telegram/logout", { method: "POST" }); } catch {}
+    setTg(null); setTgAccounts([]); setActiveTgId(null); setDests([]);
+    try { localStorage.removeItem("tgm_store"); } catch {}
+    try { await refreshTgAccounts(); } catch {}
+    setView("landing");
+  };
+  // Sidebar identity resolves from the account list — tg can lag/stick after
+  // logout or account removal, but the list is the source of truth, so a ghost
+  // avatar can never render here.
+  const sidebarTg = (() => {
+    if (!tgAccounts?.length) return null;
+    if (activeTgId) return tgAccounts.find((a: any) => a.id === activeTgId) || null;
+    return tgAccounts[0] || null;
+  })();
+  const sidebarCard = sidebarTg ? { username: sidebarTg.username, phone: sidebarTg.phone, connected: true, displayName: sidebarTg.displayName, firstName: sidebarTg.firstName } : null;
   const [open, setOpen] = useState(false);
   const accCount = tgAccounts?.length || 0;
   const l = (lang || "en") as Lang;
@@ -1463,8 +1532,8 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
         </div>
         <nav className="p-4 flex-1 overflow-auto"><Nav /></nav>
         <div className="p-3 border-t border-slate-200 bg-slate-50/50">
-          {tg ? (
-            <ConnectedCard tg={tg} onLogout={() => { setTg(null); localStorage.removeItem("tgm_store"); fetch("/api/telegram/logout",{method:"POST"}).finally(()=>{ setView("landing"); }); }} />
+          {sidebarCard ? (
+            <ConnectedCard tg={sidebarCard} onLogout={handleTgLogout} />
           ) : (
             <button onClick={() => onNav("connect")} className="w-full bg-[#229ED9] text-white rounded-xl py-3 text-sm font-semibold hover:bg-[#1B8AC4] hover:shadow-lg hover:shadow-[#229ED9]/20 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] transition-all flex items-center justify-center gap-2"><Send size={14} /> Connect Telegram</button>
           )}
@@ -1483,7 +1552,7 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
             </div>
             <div className="flex-1 overflow-auto p-4"><Nav onItemClick={() => setOpen(false)} /></div>
             <div className="p-3 border-t border-slate-200">
-              {tg ? <ConnectedCard tg={tg} onLogout={() => { setTg(null); localStorage.removeItem("tgm_store"); fetch("/api/telegram/logout",{method:"POST"}).finally(()=>{ setView("landing"); setOpen(false); }); }} /> : <button onClick={() => { onNav("connect"); setOpen(false); }} className="w-full bg-[#229ED9] text-white rounded-xl py-2.5 text-sm font-semibold">Connect Telegram</button>}
+              {sidebarCard ? <ConnectedCard tg={sidebarCard} onLogout={() => { handleTgLogout().finally(() => setOpen(false)); }} /> : <button onClick={() => { onNav("connect"); setOpen(false); }} className="w-full bg-[#229ED9] text-white rounded-xl py-2.5 text-sm font-semibold">Connect Telegram</button>}
             </div>
           </div>
         </div>
@@ -1511,18 +1580,23 @@ function Shell({ children, onNav }: { children: React.ReactNode, onNav: (v: stri
 
 function DashboardView({ onNav }: { onNav: (v: string) => void }) {
   const { tg, campaigns, dests } = useStore();
+  // Malformed rows (missing destinations/successful) must degrade to 0, never
+  // throw mid-render — a render throw unmounts the page and ALL buttons die.
+  const safeCamps = Array.isArray(campaigns) ? campaigns : [];
+  const campDests = (c: any) => Array.isArray(c?.destinations) ? c.destinations : [];
+  const campOk = (c: any) => Number(c?.successful) || 0;
   const [stats, setStats] = useState<any>(null);
   useEffect(() => {
     let alive = true;
     const load = async () => { try { const r = await fetch("/api/stats", { cache: "no-store" }); const j = await r.json(); if (alive) setStats(j); } catch {} };
     load(); const t = setInterval(load, 5000); return () => { alive = false; clearInterval(t); };
-  }, [campaigns.length]);
+  }, [safeCamps.length]);
   const statusDot: Record<string, string> = { Completed: "bg-emerald-500", Running: "bg-blue-500 animate-pulse", Paused: "bg-amber-500", Failed: "bg-red-500", Repeating: "bg-violet-500 animate-pulse" };
-  const deliveryRate = campaigns.length ? Math.round(campaigns.reduce((a,c)=>a+c.successful,0) / Math.max(1,campaigns.reduce((a,c)=>a+c.destinations.length,0)) * 100) : 0;
+  const deliveryRate = safeCamps.length ? Math.round(safeCamps.reduce((a,c)=>a+campOk(c),0) / Math.max(1,safeCamps.reduce((a,c)=>a+campDests(c).length,0)) * 100) : 0;
   const mine = stats?.mine || null;
   const todaySent = mine ? (mine.todaySent ?? stats.todaySent ?? 0) : (stats ? stats.todaySent : 0);
-  const totalSentAll = mine ? mine.totalSent : (stats ? stats.totalSent : campaigns.reduce((a,c)=>a+c.successful,0));
-  const totalGroupsAll = mine ? (mine.uniqueGroups ?? mine.totalDestinations ?? 0) : (stats ? stats.uniqueGroups : new Set(campaigns.flatMap(c=>c.destinations||[])).size);
+  const totalSentAll = mine ? mine.totalSent : (stats ? stats.totalSent : safeCamps.reduce((a,c)=>a+campOk(c),0));
+  const totalGroupsAll = mine ? (mine.uniqueGroups ?? mine.totalDestinations ?? 0) : (stats ? stats.uniqueGroups : new Set(safeCamps.flatMap(c=>campDests(c))).size);
   const todayGroups = mine ? (mine.todayGroups ?? 0) : (stats ? stats.todayGroups : 0);
 
   return (
@@ -1606,9 +1680,9 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {[
           ["Connected", tg ? `@${tg.username || tg.phone}` : "Not connected", TrendingUp, tg ? "Active" : "Connect needed"],
-          ["Destinations", String(dests.filter(d => d.allowed).length), Globe, `${dests.length} total`],
-          ["Campaigns", String(campaigns.length), Megaphone, `${campaigns.filter(c=>c.status==="Running"||c.status==="Repeating").length} active`],
-          ["Delivery", `${deliveryRate}%`, Send, `${campaigns.reduce((a,c)=>a+c.successful,0)} sent`],
+          ["Destinations", String((Array.isArray(dests)?dests:[]).filter(d => d.allowed).length), Globe, `${(Array.isArray(dests)?dests:[]).length} total`],
+          ["Campaigns", String(safeCamps.length), Megaphone, `${safeCamps.filter(c=>c.status==="Running"||c.status==="Repeating").length} active`],
+          ["Delivery", `${deliveryRate}%`, Send, `${safeCamps.reduce((a,c)=>a+campOk(c),0)} sent`],
         ].map(([k, v, Icon, sub]: any) => (
           <div key={k as string} className="group bg-white border border-slate-200 rounded-2xl p-4 hover:border-[#BFDBFE] hover:shadow-md hover:-translate-y-0.5 transition-all duration-200">
             <div className="flex items-center gap-2">
@@ -1627,7 +1701,7 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
           <h2 className="font-semibold text-sm text-slate-900">Recent Campaigns</h2>
           <button onClick={() => onNav("campaigns")} className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 border border-slate-200 bg-white px-3.5 py-2 rounded-full hover:bg-slate-50 hover:border-slate-300 hover:text-slate-700 hover:-translate-y-0.5 active:translate-y-0 transition-all shrink-0">View all <ChevronRight size={12} /></button>
         </div>
-        {campaigns.length === 0 ? (
+        {safeCamps.length === 0 ? (
           <div className="p-10 text-center animate-slide-up">
             <div className="w-14 h-14 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center mx-auto"><Megaphone size={20} className="text-slate-400" /></div>
             <p className="text-sm font-semibold text-slate-700 mt-4">No campaigns yet</p>
@@ -1638,16 +1712,16 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
           <>
             {/* Mobile: cards */}
             <div className="md:hidden divide-y divide-slate-100">
-              {campaigns.slice(0, 5).map((c: any) => (
+              {safeCamps.slice(0, 5).map((c: any) => (
                 <div key={c.id} className="p-4 flex items-center gap-3">
                   <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusDot[c.status]||"bg-slate-300"}`} />
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-semibold text-slate-900 truncate">{c.name}</div>
-                    <div className="text-xs text-slate-400 mt-0.5">{c.destinations.length} destinations · {c.createdAt}</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{campDests(c).length} destinations · {c.createdAt}</div>
                   </div>
                   <div className="text-right shrink-0">
                     <span className={`inline-flex px-2.5 py-1 rounded-full text-[11px] font-bold border ${c.status === "Completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : c.status === "Repeating" ? "bg-violet-50 text-violet-700 border-violet-200" : c.status === "Running" ? "bg-[#EFF6FF] text-blue-700 border-[#BFDBFE]" : c.status === "Paused" ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-slate-50 border-slate-200"}`}>{c.status}</span>
-                    <div className="text-xs font-semibold text-slate-600 mt-1">{c.successful}/{c.destinations.length}</div>
+                    <div className="text-xs font-semibold text-slate-600 mt-1">{campOk(c)}/{campDests(c).length}</div>
                   </div>
                 </div>
               ))}
@@ -1656,7 +1730,7 @@ function DashboardView({ onNav }: { onNav: (v: string) => void }) {
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-slate-500 text-xs font-bold tracking-widest"><tr><th className="text-left px-5 py-3">CAMPAIGN</th><th className="px-4 py-3 text-center">DEST.</th><th className="px-4 py-3">STATUS</th><th className="px-4 py-3">CREATED</th><th className="px-4 py-3 text-right">RESULT</th></tr></thead>
-                <tbody>{campaigns.slice(0, 5).map((c: any) => <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="font-semibold text-slate-900 flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${statusDot[c.status]||"bg-slate-300"}`} />{c.name}</div><div className="text-xs text-slate-400 mt-0.5">{c.destinations.length} destinations</div></td><td className="px-4 text-center"><span className="bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-semibold">{c.destinations.length}</span></td><td className="px-4"><span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${c.status === "Completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : c.status === "Repeating" ? "bg-violet-50 text-violet-700 border-violet-200" : c.status === "Running" ? "bg-[#EFF6FF] text-blue-700 border-[#BFDBFE]" : c.status === "Paused" ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-slate-50 border-slate-200"}`}>{c.status}</span></td><td className="px-4 text-slate-500 text-xs">{c.createdAt}</td><td className="px-5 text-right"><span className="font-bold text-slate-900">{c.successful}/{c.destinations.length}</span><span className="text-xs text-slate-400 ml-1.5">{Math.round(c.successful/Math.max(1,c.destinations.length)*100)}%</span></td></tr>)}</tbody>
+                <tbody>{safeCamps.slice(0, 5).map((c: any) => <tr key={c.id} className="border-t border-slate-100 hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="font-semibold text-slate-900 flex items-center gap-2"><span className={`w-2.5 h-2.5 rounded-full ${statusDot[c.status]||"bg-slate-300"}`} />{c.name}</div><div className="text-xs text-slate-400 mt-0.5">{campDests(c).length} destinations</div></td><td className="px-4 text-center"><span className="bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-semibold">{campDests(c).length}</span></td><td className="px-4"><span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${c.status === "Completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : c.status === "Repeating" ? "bg-violet-50 text-violet-700 border-violet-200" : c.status === "Running" ? "bg-[#EFF6FF] text-blue-700 border-[#BFDBFE]" : c.status === "Paused" ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-slate-50 border-slate-200"}`}>{c.status}</span></td><td className="px-4 text-slate-500 text-xs">{c.createdAt}</td><td className="px-5 text-right"><span className="font-bold text-slate-900">{campOk(c)}/{campDests(c).length}</span><span className="text-xs text-slate-400 ml-1.5">{Math.round(campOk(c)/Math.max(1,campDests(c).length)*100)}%</span></td></tr>)}</tbody>
               </table>
             </div>
           </>
@@ -1686,6 +1760,13 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
   const [joining, setJoining] = useState(false);
   const [joinResults, setJoinResults] = useState<any[] | null>(null);
   const [joinDone, setJoinDone] = useState<{ total: number; account: string } | null>(null);
+  const [showRules, setShowRules] = useState(true);
+  const [retryIn, setRetryIn] = useState(0);
+  useEffect(() => {
+    if (retryIn <= 0) return;
+    const t = setTimeout(() => setRetryIn(s => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [retryIn]);
 
   const load = async (opts?: { categoryId?: string; search?: string; groupType?: string }) => {
     setLoading(true); setErr(""); setLocked(false);
@@ -1736,7 +1817,10 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
     [...new Set(
       (links || [])
         .map((l) => String(l || "").trim())
-        .filter((l) => /(^|\.)t\.me\//i.test(l) || /^@[\w]{3,}/.test(l) || /^[\w]{3,32}$/.test(l))
+        // Any string containing t.me/ (full https:// URLs included), @username, or
+        // bare username is joinable. The old (^|\.)t\.me\/ pattern missed full
+        // https://t.me/... URLs, so every Join click died with "No joinable links".
+        .filter((l) => /t\.me\//i.test(l) || /^@[\w]{3,}/.test(l) || /^[\w]{3,32}$/.test(l))
     )];
 
   const doJoinNow = async (links: string[], accountId: string | null) => {
@@ -1748,20 +1832,50 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
     if (!accountId) { setErr("Pick an account to join from"); return; }
     const account = (tgAccounts || []).find((a: any) => a.id === accountId) || { displayName: "your account" };
     setPendingLinks(valid);
-    setJoinResults([]); setErr("");
+    setJoinResults([]); setErr(""); setRetryIn(0);
     setJoining(true);
     try {
-      const CHUNK = 10;
+      // Small chunks + auto-retry: when Telegram rate-limits a chunk, the
+      // server waits out short flood-waits itself; for longer ones the UI
+      // counts down visibly, then resends just the leftover links until the
+      // whole queue is done. One click finishes everything, slowly and safely.
+      const CHUNK = 3;
+      let queue = [...valid];
       const all: any[] = [];
-      for (let i = 0; i < valid.length; i += CHUNK) {
-        const chunk = valid.slice(i, i + CHUNK);
+      let guard = 0;
+      while (queue.length && guard < 40) {
+        guard++;
+        const chunk = queue.slice(0, CHUNK);
+        queue = queue.slice(CHUNK);
         const r = await fetch("/api/telegram/join", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ links: chunk, accountId }) });
         const j = await r.json();
         if (r.status === 403 && j.premiumRequired) { onNav("plans"); throw new Error(j.error); }
         if (!r.ok) throw new Error(j.error || "Join failed");
-        all.push(...(j.results || []));
+        const res = j.results || [];
+        all.push(...res);
         setJoinResults([...all]);
+        const limited = res.filter((x: any) => x.status === "RateLimited");
+        if (limited.length) {
+          const wait = Math.max(0, ...limited.map((x: any) => Number(x.retryAfter || 0)));
+          // Put the limited links back at the front of the queue.
+          queue = [...limited.map((x: any) => x.link), ...queue];
+          if (wait > 0) {
+            // Long flood-wait: count down in the UI so the user sees the
+            // Telegram-mandated pause, then continue automatically.
+            setRetryIn(wait);
+            await new Promise(res2 => setTimeout(res2, (wait + 2) * 1000));
+            setRetryIn(0);
+          }
+          // Short waits were already slept server-side — brief breather here.
+          await new Promise(res2 => setTimeout(res2, 3000));
+        }
       }
+      // Persist the join account as the ACTIVE one server-side (cookie) so the
+      // My Groups list and every other section follow the account just joined
+      // with — then sync local state to the same account.
+      try {
+        await fetch("/api/telegram/accounts", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accountId }) });
+      } catch {}
       setActiveTgId(accountId);
       setJoinDone({ total: valid.length, account: account.displayName || account.username || account.phone || "your account" });
     } catch (e: any) { setErr(e.message); } finally { setJoining(false); }
@@ -1854,6 +1968,22 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
       </div>
 
       {err && !locked && <div className="bg-red-50 border-red-200 text-red-700 border text-sm rounded-xl p-3 mt-3">{err}</div>}
+
+      {/* ── Telegram rules notice (dismissible, premium users) ── */}
+      {!locked && showRules && (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 mt-4 flex flex-wrap gap-3 items-start text-xs">
+          <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-[260px] text-slate-700">
+            <span className="font-semibold">Telegram rules we respect so your account stays safe:</span>
+            <ul className="mt-1 space-y-0.5 list-disc list-inside">
+              <li>Short pauses between joins (auto) — fast but safe.</li>
+              <li>If Telegram says <b>Flood wait Xs</b>, we wait it out for you and continue automatically.</li>
+              <li>Hard limit: <b>500 supergroups/channels per account</b> (Telegram enforces this). Leave some first if you hit it.</li>
+            </ul>
+          </div>
+          <button onClick={() => setShowRules(false)} className="btn btn-ghost !px-3 !py-1.5 text-xs shrink-0">Dismiss</button>
+        </div>
+      )}
 
       {/* ── Premium banner (locked only) ── */}
       {locked && (
@@ -1969,10 +2099,11 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
                   <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: catColor }} />
                   <span className="font-bold text-sm text-slate-900">{cn}</span>
                   <span className="text-caption">{list.length} {list.length === 1 ? "group" : "groups"}</span>
-                  <div className="ml-auto flex gap-2">
-                    {!locked && <button onClick={() => toggleCat(cn, ids)} className="btn btn-ghost !py-1.5 text-xs">{allSel ? "Deselect" : "Select all"}</button>}
-                    <button onClick={() => locked ? onNav("plans") : startJoin(selectedLinks(ids))} disabled={joining} className={`btn !py-1.5 text-xs ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock to Join" : `Join all ${list.length}`}</button>
-                  </div>
+                  {!locked && (
+                    <div className="ml-auto flex gap-2">
+                      <button onClick={() => toggleCat(cn, ids)} className="btn btn-ghost !py-1.5 text-xs">{allSel ? "Deselect" : "Select all"}</button>
+                    </div>
+                  )}
                 </header>
                 <ul className="divide-y divide-slate-100">
                   {list.map((g: any) => (
@@ -2015,11 +2146,20 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
 }
 
 function DestinationsView() {
-  const { dests, tg, activeTgId } = useStore() as any;
+  const { dests, tg, activeTgId, refreshTgAccounts } = useStore() as any;
   const [real, setReal] = useState<any[] | null>(null);
   const [q, setQ] = useState(""), [loading, setLoading] = useState(false), [err, setErr] = useState("");
   const [pf, setPf] = useState("All");
   const [tab, setTab] = useState<"list" | "join">("list");
+  // activeTgId from context can lag behind the persisted cookie on first load —
+  // read the cookie directly so Refresh hits the right account immediately.
+  const cookieActiveId = () => {
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)tg_active_id=([^;]*)/);
+      return m ? decodeURIComponent(m[1]) : "";
+    } catch { return ""; }
+  };
+  const refreshAccountId = activeTgId || cookieActiveId();
   useEffect(() => { setReal(null); }, [activeTgId]);
   // join state
   const [joinLinks, setJoinLinks] = useState("");
@@ -2032,24 +2172,44 @@ function DestinationsView() {
   const [leaveResults, setLeaveResults] = useState<any[] | null>(null);
   const groupsOnly = (arr: any[]) => arr.filter((d: any) => d.type === "Group");
   const list = groupsOnly(real ?? dests);
-  let filtered = list.filter((d: any) => d.title.toLowerCase().includes(q.toLowerCase()));
+  let filtered = list.filter((d: any) => String(d.title || "").toLowerCase().includes(q.toLowerCase()));
   if (pf !== "All") filtered = filtered.filter((d: any) => (d.privacy || "Private") === pf);
   if (permF === "Allowed") filtered = filtered.filter((d: any) => d.allowed);
   else if (permF === "Restricted") filtered = filtered.filter((d: any) => !d.allowed);
   const [leavingId, setLeavingId] = useState<string | null>(null);
+  // Refresh the groups of the ACTIVE account (context id, else the persisted
+  // cookie) — never the join dropdown. This is the "My Groups" list.
   const refresh = async () => {
     setLoading(true); setErr("");
-    try { const r = await fetch("/api/telegram/dialogs"); const j = await r.json(); if (!r.ok) throw new Error(j.error); setReal(groupsOnly(j.dialogs || [])); } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+    try {
+      const aid = activeTgId || cookieActiveId();
+      const qs = aid ? `?accountId=${encodeURIComponent(aid)}` : "";
+      const r = await fetch(`/api/telegram/dialogs${qs}`); const j = await r.json();
+      // 404 = the requested account no longer exists (deleted elsewhere) —
+      // resync the account list instead of showing a stale/wrong group list.
+      if (r.status === 404 && /Account not found/i.test(j.error || "")) { try { await refreshTgAccounts(); } catch {} setReal([]); throw new Error(j.error); }
+      if (!r.ok) throw new Error(j.error); setReal(groupsOnly(j.dialogs || []));
+    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   };
+  // Auto-load the active account's groups when opening this section or
+  // switching accounts — never show another account's stale cached list.
+  useEffect(() => { setReal(null); refresh(); }, [activeTgId]);
   const doLeave = async (d: any) => {
     if (!confirm(`Leave "${d.title}"? You will need an invite link to rejoin private groups.`)) return;
     setLeavingId(d.id); setErr("");
     try {
-      const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title }) });
-      const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to leave");
-      // remove from local list immediately
+      // Leave from the ACTIVE account (the list always shows the active one) —
+      // the old body omitted accountId, so multi-account setups left from the
+      // wrong session and nothing happened.
+      const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title, kind: d.kind, accessHash: d.accessHash, accountId: activeTgId || refreshAccountId }) });
+      const j = await r.json();
+      // 404 = account vanished mid-session — resync accounts so the list can't
+      // keep showing a deleted account's groups.
+      if (r.status === 404 && /Account not found/i.test(j.error || "")) { try { await refreshTgAccounts(); } catch {} setReal([]); throw new Error(j.error || "Failed to leave"); }
+      if (!r.ok) throw new Error(j.error || "Failed to leave");
+      // Server-confirmed: drop from list, then verify against Telegram (no cache).
+      // Optimistic removal alone lies when the leave actually fails server-side.
       setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String(d.id)) : prev);
-      // also update dests via refresh
       await refresh();
     } catch (e: any) { setErr(e.message); } finally { setLeavingId(null); }
   };
@@ -2081,17 +2241,30 @@ function DestinationsView() {
     setLeavingAll(true); setErr(""); setLeaveResults([]);
     const all: any[] = [];
     try {
-      for (const d of filtered) {
-        try {
-          const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title }) });
-          const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to leave");
-          all.push({ title: d.title, status: "Left" });
-          setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String(d.id)) : prev);
-        } catch (e: any) {
-          all.push({ title: d.title, status: "Failed", error: e.message });
+      // Parallel batches — 5 concurrent leaves per batch instead of one-by-one
+      const CONCURRENCY = 5;
+      for (let i = 0; i < filtered.length; i += CONCURRENCY) {
+        const batch = filtered.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(batch.map(async (d: any) => {
+          try {
+            const r = await fetch("/api/telegram/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, title: d.title, kind: d.kind, accessHash: d.accessHash, accountId: activeTgId || refreshAccountId }) });
+            const j = await r.json(); if (!r.ok) throw new Error(j.error || "Failed to leave");
+            return { ok: true, d };
+          } catch (e: any) {
+            return { ok: false, d, error: e.message };
+          }
+        }));
+        for (const res of results) {
+          if ((res as any).ok) {
+            all.push({ title: (res as any).d.title, status: "Left" });
+            setReal(prev => prev ? prev.filter((x: any) => String(x.id) !== String((res as any).d.id)) : prev);
+          } else {
+            all.push({ title: (res as any).d.title, status: "Failed", error: (res as any).error });
+          }
         }
         setLeaveResults([...all]);
       }
+      // Verify against Telegram so failed leaves reappear instead of vanishing
       await refresh();
     } finally { setLeavingAll(false); }
   };
@@ -2160,7 +2333,18 @@ function DestinationsView() {
 }
 
 function CreateCampaign() {
-  const { dests, tg, addCampaign, refreshDests, destsLoading, setView, templates, activeTgId, tgAccounts, setActiveTgId, setTg } = useStore() as any;
+  const { dests: rawDests, tg, addCampaign, refreshDests, refreshTgAccounts, destsLoading, setView, templates, activeTgId, tgAccounts, setActiveTgId, setTg } = useStore() as any;
+  const dests = Array.isArray(rawDests) ? rawDests : [];
+  // Create Campaign must show groups for the ACTIVE account even if nothing
+  // fetched them yet (user jumped straight here). Fetch once on mount with
+  // the live activeTgId — without this, dests stays [] and step 1 shows
+  // "No groups" while Groups & Joiner (which fetches on open) shows plenty.
+  useEffect(() => {
+    if (!dests.length && !destsLoading) {
+      if (!tgAccounts?.length) { refreshTgAccounts().catch(() => {}); }
+      refreshDests().catch(() => {});
+    }
+  }, []);
   const [step, setStep] = useState(1);
   const [sel, setSel] = useState<string[]>([]);
   const [msg, setMsg] = useState("");
@@ -2388,7 +2572,7 @@ function CreateCampaign() {
             <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" title="Allowed" />
             <span className="text-sm font-semibold flex-1 truncate">{d.title}</span>
             <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full shrink-0">✓ Allowed</span>
-            <span className="text-xs text-[#64748B] bg-white border border-[#E2E8F0] px-2 py-0.5 rounded-full shrink-0 hidden sm:inline">{d.type} · {d.members.toLocaleString()}</span>
+            <span className="text-xs text-[#64748B] bg-white border border-[#E2E8F0] px-2 py-0.5 rounded-full shrink-0 hidden sm:inline">{d.type} · {Number(d.members || 0).toLocaleString()}</span>
           </label>
         ) : (
           <div key={d.id} className="flex items-center gap-3 border-2 border-red-200 bg-[#FEF2F2] rounded-xl px-4 py-3">
@@ -2396,7 +2580,7 @@ function CreateCampaign() {
             <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 animate-pulse" title="Restricted" />
             <span className="text-sm font-semibold flex-1 truncate text-red-900">{d.title}</span>
             <span className="text-xs font-bold text-white bg-red-500 px-2.5 py-0.5 rounded-full shrink-0">✕ Restricted — can&apos;t send</span>
-            <span className="text-xs text-red-600 bg-white border border-red-200 px-2 py-0.5 rounded-full shrink-0 hidden sm:inline">{d.type} · {d.members.toLocaleString()}</span>
+            <span className="text-xs text-red-600 bg-white border border-red-200 px-2 py-0.5 rounded-full shrink-0 hidden sm:inline">{d.type} · {Number(d.members || 0).toLocaleString()}</span>
           </div>
         ))}
         </div>
@@ -2506,7 +2690,8 @@ function CreateCampaign() {
 }
 
 function CampaignsView() {
-  const { campaigns, updateCampaign } = useStore() as any;
+  const { campaigns: rawCamps, updateCampaign } = useStore() as any;
+  const campaigns = Array.isArray(rawCamps) ? rawCamps : [];
   const [f, setF] = useState("All");
   const list = f === "All" ? campaigns : campaigns.filter((c:any) => c.status === f);
   const intervalRef = (globalThis as any).__tgm_intervals as Map<string, any> | undefined;
@@ -2549,7 +2734,7 @@ function CampaignsView() {
         const isRunning = c.status === "Running";
         const isPausedRepeating = c.status === "Paused" && c.repeatIntervalId;
         return <div key={`${c.id}-${idx}`} className="bg-white border border-[#E2E8F0] rounded-[20px] p-5 flex flex-wrap justify-between items-center gap-3 hover:shadow-md transition shadow-sm">
-          <div><div className="font-bold flex items-center gap-2">{c.name} {isRepeating && <span className="w-2 h-2 bg-[#EFF6FF]0 rounded-full animate-pulse" />} {isRepeating && <span className="text-[10px] font-bold tracking-widest bg-[#EFF6FF] text-blue-700 border border-[#BFDBFE] px-2 py-0.5 rounded-full">REPEATING every {c.repeatEveryMins||c.delayMins}m</span>}</div><div className="text-xs text-[#64748B] mt-1">{c.createdAt} · {c.destinations.length} destinations · {c.successful}✓ {c.failed}✕</div></div>
+          <div><div className="font-bold flex items-center gap-2">{c.name} {isRepeating && <span className="w-2 h-2 bg-[#EFF6FF]0 rounded-full animate-pulse" />} {isRepeating && <span className="text-[10px] font-bold tracking-widest bg-[#EFF6FF] text-blue-700 border border-[#BFDBFE] px-2 py-0.5 rounded-full">REPEATING every {c.repeatEveryMins||c.delayMins}m</span>}</div><div className="text-xs text-[#64748B] mt-1">{c.createdAt} · {(Array.isArray(c.destinations)?c.destinations:[]).length} destinations · {Number(c.successful)||0}✓ {Number(c.failed)||0}✕</div></div>
           <div className="flex items-center gap-2">
             <span className={`px-3 py-1 rounded-full text-xs font-bold border ${c.status === "Completed" ? "bg-emerald-50 text-emerald-700 border-emerald-200" : c.status === "Repeating" ? "bg-[#EFF6FF] text-blue-700 border-[#BFDBFE]" : c.status === "Paused" ? "bg-amber-50 text-amber-700 border-amber-200" : "bg-gray-50 border-[#E2E8F0]"}`}>{c.status}</span>
             {isRepeating && <><button onClick={()=>stopRepeat(c)} className="border border-amber-200 bg-amber-50 text-amber-700 px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><Pause size={12}/>Pause</button><button onClick={()=>cancelRepeat(c)} className="bg-red-50 border border-red-200 text-red-600 px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1"><X size={12}/>Stop</button></>}
@@ -2563,26 +2748,32 @@ function CampaignsView() {
 }
 
 function TemplatesView() {
-  const { templates, setTemplates } = useStore();
+  const { templates, saveTemplate, editTemplate, deleteTemplate } = useStore() as any;
   const [mode, setMode] = useState<"list" | "create">("list");
   const [name, setName] = useState(""), [msg, setMsg] = useState("");
   const [image, setImage] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
   const onTplImage = (f: File | null) => {
     setImage(f);
     if (f) { const r = new FileReader(); r.onload = () => setImagePreview(r.result as string); r.readAsDataURL(f); } else setImagePreview(null);
   };
-  const reset = () => { setName(""); setMsg(""); setImage(null); setImagePreview(null); setEditingId(null); };
-  const save = () => {
+  const reset = () => { setName(""); setMsg(""); setImage(null); setImagePreview(null); setEditingId(null); setSaveErr(""); };
+  const save = async () => {
     if (!name.trim()) return alert("Template name required");
     if (!msg.trim() && !imagePreview) return alert("Add text or image");
-    if (editingId) {
-      setTemplates(templates.map((t: any) => t.id === editingId ? { ...t, name: name.trim(), message: msg, image: imagePreview } : t));
-    } else {
-      setTemplates([...templates, { id: (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now().toString(36)+Math.random().toString(36).slice(2,9)), name: name.trim(), message: msg, image: imagePreview, category: "General" } as any]);
-    }
-    reset(); setMode("list");
+    setSaving(true); setSaveErr("");
+    try {
+      if (editingId) {
+        await editTemplate(editingId, { name: name.trim(), message: msg, image: imagePreview });
+      } else {
+        await saveTemplate({ name: name.trim(), message: msg, image: imagePreview, category: "General" });
+      }
+      reset(); setMode("list");
+    } catch (e: any) { setSaveErr(e.message || "Failed to save template"); }
+    finally { setSaving(false); }
   };
   const edit = (t: any) => { setEditingId(t.id); setName(t.name); setMsg(t.message || ""); setImagePreview(t.image || null); setImage(null); setMode("create"); };
   if (mode === "create") {
@@ -2606,7 +2797,8 @@ function TemplatesView() {
             </label>
             {imagePreview && <img src={imagePreview} alt="preview" className="mt-3 rounded-xl border border-[#E2E8F0] max-h-52 object-contain" />}
           </div>
-          <button onClick={save} className="bg-[#229ED9] text-white px-7 py-3 rounded-full text-sm font-bold shadow">Save Template</button>
+          {saveErr && <div className="bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl px-3 py-2">{saveErr}</div>}
+          <button onClick={save} disabled={saving} className="bg-[#229ED9] text-white px-7 py-3 rounded-full text-sm font-bold shadow disabled:opacity-50">{saving ? "Saving…" : "Save Template"}</button>
         </div>
       </div>
     );
@@ -2622,7 +2814,7 @@ function TemplatesView() {
         <div className="flex justify-between items-start gap-2"><div className="font-bold">{t.name}</div><span className="text-[10px] font-bold tracking-widest bg-[#F1F5F9] border border-[#E2E8F0] px-2 py-0.5 rounded-full">{t.category || "General"}</span></div>
         {t.image && <img src={t.image} alt="" className="mt-3 rounded-xl border border-[#E2E8F0] max-h-40 object-contain" />}
         <div className="text-sm mt-2 leading-6 text-[#475569] whitespace-pre-wrap">{t.message || "(image only)"}</div>
-        <div className="flex gap-2 mt-3"><button onClick={() => edit(t)} className="border border-[#E2E8F0] bg-white px-4 py-1.5 rounded-full text-xs font-bold hover:bg-[#F8FAFC]">Edit</button><button onClick={() => { if(confirm("Delete template?")) setTemplates(templates.filter((x:any)=>x.id!==t.id)); }} className="text-red-600 border border-red-200 bg-red-50 px-4 py-1.5 rounded-full text-xs font-bold">Delete</button></div>
+        <div className="flex gap-2 mt-3"><button onClick={() => edit(t)} className="border border-[#E2E8F0] bg-white px-4 py-1.5 rounded-full text-xs font-bold hover:bg-[#F8FAFC]">Edit</button><button onClick={async () => { if(confirm("Delete template?")) { try { await deleteTemplate(t.id); } catch (e: any) { alert(e.message || "Failed to delete template"); } } }} className="text-red-600 border border-red-200 bg-red-50 px-4 py-1.5 rounded-full text-xs font-bold">Delete</button></div>
       </div>)}</div>}
     </div>
   );
@@ -2662,8 +2854,19 @@ function SettingsView() {
     } catch (e: any) { alert(e.message); } finally { setSwitching(null); }
   };
   const doRemove = async (id: string) => {
-    if (!confirm("Remove this Telegram account?")) return;
-    try { const r = await fetch(`/api/telegram/accounts?id=${id}`, { method: "DELETE" }); const j = await r.json(); if (!r.ok) throw new Error(j.error); await refreshTgAccounts(); } catch (e: any) { alert(e.message); }
+    const acc = (tgAccounts || []).find((a: any) => a.id === id);
+    const isRental = !!(acc as any)?.isRental;
+    if (!confirm(isRental ? "Hide this rented sender from your list? It stays usable till its 24h expiry — this only hides it here." : "Remove this Telegram account?")) return;
+    try {
+      const r = await fetch(`/api/telegram/accounts?id=${id}`, { method: "DELETE" }); const j = await r.json().catch(() => ({}));
+      if (!r.ok && (j as any)?.hideOnly) {
+        try { const h = JSON.parse(localStorage.getItem("yosender_hidden_rentals") || "[]"); if (!h.includes(id)) { h.push(id); localStorage.setItem("yosender_hidden_rentals", JSON.stringify(h)); } } catch {}
+        await refreshTgAccounts();
+        return;
+      }
+      if (!r.ok) throw new Error((j as any).error);
+      await refreshTgAccounts();
+    } catch (e: any) { alert(e.message); }
   };
 
   const saveProfile = async () => {
@@ -2859,16 +3062,19 @@ function SettingsView() {
 }
 
 function DeliveryLogsView() {
-  const { campaigns, dests } = useStore();
+  const { campaigns: rawCamps, dests: rawDests } = useStore();
+  const camplist = Array.isArray(rawCamps) ? rawCamps : [];
+  const destlist = Array.isArray(rawDests) ? rawDests : [];
   const [filter, setFilter] = useState("All");
   const [campaignFilter, setCampaignFilter] = useState("All");
 
-  const destMap = Object.fromEntries(dests.map(d => [d.id, d]));
+  const destMap = Object.fromEntries(destlist.map(d => [d.id, d]));
 
   // Build flat rows: every log entry is a row — so a repeating campaign that sent 1000 messages shows 1000 rows
-  const rows = campaigns.flatMap(c => {
-    const logs = (c as any).logs || [];
-    const isRepeatingLike = c.status === "Repeating" || logs.length > (c.destinations?.length || 0);
+  const rows = camplist.flatMap(c => {
+    const logs = Array.isArray((c as any).logs) ? (c as any).logs : [];
+    const destsArr = Array.isArray(c.destinations) ? c.destinations : [];
+    const isRepeatingLike = c.status === "Repeating" || logs.length > (destsArr.length || 0);
     if (isRepeatingLike && logs.length) {
       return logs.map((log: any) => {
         const d = destMap[String(log.dest)];
@@ -2877,19 +3083,19 @@ function DeliveryLogsView() {
     }
     if (!logs.length) {
       if (c.status === "Completed") {
-        return c.destinations.map((did: string) => {
+        return destsArr.map((did: string) => {
           const d = destMap[did];
           return { campaign: c.name, campaignId: c.id, campaignStatus: c.status, createdAt: c.createdAt, destTitle: d?.title || did, destType: d?.type || "-", destMembers: d?.members ?? "-", status: "Sent" as const, time: c.createdAt, error: "" };
         });
       }
       if (c.status === "Failed") {
-        return c.destinations.map((did: string) => {
+        return destsArr.map((did: string) => {
           const d = destMap[did];
           return { campaign: c.name, campaignId: c.id, campaignStatus: c.status, createdAt: c.createdAt, destTitle: d?.title || did, destType: d?.type || "-", destMembers: d?.members ?? "-", status: "Failed" as const, time: c.createdAt, error: "" };
         });
       }
     }
-    return c.destinations.map((did: string) => {
+    return destsArr.map((did: string) => {
       const d = destMap[did];
       const log = logs.find((l: any) => String(l.dest) === String(did));
       let status = (log?.status as string) || (c.status === "Completed" ? "Sent" : c.status === "Failed" ? "Failed" : c.status === "Paused" ? "Paused" : "Pending");
@@ -2922,7 +3128,7 @@ function DeliveryLogsView() {
       <div className="flex flex-wrap gap-2 mt-4">
         <select value={campaignFilter} onChange={e => setCampaignFilter(e.target.value)} className="border border-[#E2E8F0] bg-white rounded-full px-4 py-2 text-sm font-medium">
           <option value="All">All campaigns</option>
-          {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          {camplist.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
         {["All", "Sent", "Failed", "Pending", "Paused"].map(s => (
           <button key={s} onClick={() => setFilter(s)} className={`px-4 py-2 rounded-full text-xs font-bold border transition ${filter === s ? "bg-[#229ED9] text-white border-slate-900" : "bg-white border-[#E2E8F0] hover:bg-[#F8FAFC]"}`}>{s}</button>
@@ -3118,7 +3324,14 @@ function HelpView() {
 }
 
 function AppInner() {
-  const { view, setView, user, setUser } = useStore() as any;
+  const { view, setView, user, setUser, setTg, setTgAccounts, setActiveTgId, setDests } = useStore() as any;
+  // Logged-out email (e.g. cookie expired or another tab logged out) must never
+  // keep Telegram identities on screen — wipe them as soon as /auth/me says so.
+  useEffect(() => {
+    fetch("/api/auth/me").then(r => r.json()).then(j => {
+      if (!j.user) { setTg(null); setTgAccounts([]); setActiveTgId(null); setDests([]); }
+    }).catch(() => {});
+  }, []);
   // After Google OAuth callback (?google=success), refresh user from cookie and go to dashboard
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -3157,7 +3370,7 @@ function AppInner() {
   else if (view === "admin") content = <AdminPanel />;
   else if (view === "help") content = <HelpView />;
   else content = <DashboardView onNav={setView} />;
-  return <Shell onNav={setView}>{content}</Shell>;
+  return <Shell onNav={setView}><ViewErrorBoundary viewKey={view}>{content}</ViewErrorBoundary></Shell>;
 }
 
 export default function Home() {

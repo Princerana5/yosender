@@ -61,11 +61,13 @@ export async function POST(req: NextRequest) {
   const pool = getRentalPool();
   const p = pool.find((x) => x.id === poolAccountId);
   if (!p) return NextResponse.json({ error: "Account not found" }, { status: 404 });
-  if (p.status !== "available") return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
-
+  // Exclusive claim: pool row AND live rental records must both agree this
+  // sender is free. A stale "available" row with an active holder (e.g. after
+  // a crash between writes) must never double-assign one sender to 2 users.
   const rentals = getRentals();
-  if (rentals.some((r) => r.userId === id && r.poolAccountId === p.id && r.status === "active")) {
-    return NextResponse.json({ error: "You already rented this account" }, { status: 409 });
+  const holder = rentals.find((r) => r.poolAccountId === p.id && r.status === "active");
+  if (p.status !== "available" || (holder && holder.userId !== id)) {
+    return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
   }
 
   // free rent logic

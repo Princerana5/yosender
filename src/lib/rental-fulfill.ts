@@ -22,7 +22,13 @@ export function fulfillRentalOrder(order: { orderId: string; userId: string; poo
   const pool = getRentalPool();
   const p = pool.find((x) => x.id === order.poolAccountId);
   if (!p) throw new Error("Rented sender no longer exists");
-  if (p.status !== "available") throw new Error("Sender was just rented by someone else — try another");
+  // Exclusive claim: re-check under the same read that a DIFFERENT user doesn't
+  // hold this pool account right now (stale "available" reads from concurrent
+  // claims). The pool row is the lock — rented+rentedBy wins, never available.
+  const holder = rentals.find((r: any) => r.poolAccountId === p.id && r.status === "active");
+  if (p.status !== "available" || (holder && holder.userId !== order.userId)) {
+    throw new Error("Sender was just rented by someone else — try another");
+  }
 
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString();

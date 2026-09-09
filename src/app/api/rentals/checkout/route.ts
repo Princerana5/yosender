@@ -25,7 +25,18 @@ export async function POST(req: NextRequest) {
   const pool = getRentalPool();
   const p = pool.find((x) => x.id === poolAccountId);
   if (!p) return NextResponse.json({ error: "Account not found" }, { status: 404 });
-  if (p.status !== "available") return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+  // Exclusive claim: pool row AND live rental records must both agree this
+  // sender is free — a paid invoice for an already-rented sender must fail here,
+  // before money moves, not at fulfillment time.
+  try {
+    const { getRentals } = await import("@/lib/db");
+    const holder = (getRentals() as any[]).find((r: any) => r.poolAccountId === p.id && r.status === "active");
+    if (p.status !== "available" || (holder && holder.userId !== user.id)) {
+      return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+    }
+  } catch {
+    if (p.status !== "available") return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+  }
 
   const priceAmount = Number(p.pricePerDay) || 1;
   const payCurrency = body.payCurrency ? String(body.payCurrency).trim().toLowerCase() : undefined;

@@ -68,9 +68,16 @@ export function campaignsTodayCount(userId: string): number {
 
 export function freeRentUsedToday(userId: string): number {
   const today = new Date().toISOString().slice(0, 10);
-  // count rentals created today that were free (price 0 or marked free)
-  // we store free rentals with price 0
-  return getRentals().filter(r => r.userId === userId && r.rentedAt.slice(0, 10) === today && (r as any).isFree).length;
+  // Quota = free rentals CLAIMED today. Expired rentals don't count (the user
+  // didn't get value), but ACTIVE ones do — including ones claimed yesterday
+  // whose 24h window still runs today. Otherwise the counter under-counts
+  // (shows 3/3 left while holding 1 active rental) or over-counts.
+  return getRentals().filter((r) => {
+    if (r.userId !== userId || !(r as any).isFree) return false;
+    if (r.status === "expired") return false;
+    if (r.status === "active") return true;
+    return String(r.rentedAt || "").slice(0, 10) === today;
+  }).length;
 }
 
 export function generateKeyCode(planId: PlanId, billing: "daily" | "monthly"): string {

@@ -43,11 +43,29 @@ export function getSessionForAccount(userId: string, accountId: string | null): 
   return acc?.session || null;
 }
 
-export function getSessionForReqWithAccount(req: NextRequest, accountId?: string | null): string | null {
+export function getAccountForReqWithAccount(req: NextRequest, accountId?: string | null) {
   const uid = getUserIdFromReq(req);
   if (uid && accountId) {
-    const s = getSessionForAccount(uid, accountId);
-    if (s) return s;
+    const acc = getAccounts().find((a) => a.id === String(accountId) && a.userId === uid);
+    // Explicit account requested but not found (belongs to another user or was
+    // deleted): return null so callers 401/404 instead of silently serving the
+    // ACTIVE account's data — that fallback is what showed account B's groups
+    // while acting on account A ("wrong groups", leaves that do nothing).
+    if (acc?.session) return acc;
+    return null;
   }
+  return getActiveAccount(req);
+}
+
+export function getSessionForReqWithAccount(req: NextRequest, accountId?: string | null): string | null {
+  // Explicit account requested but not found: return null (401/400 upstream),
+  // NEVER fall back to the active session — that fallback acted on the wrong
+  // account (wrong groups, leaves/sends that "succeed" but do nothing).
+  if (accountId) {
+    const acc = getAccountForReqWithAccount(req, accountId);
+    return acc?.session || null;
+  }
+  const acc = getAccountForReqWithAccount(req, accountId);
+  if (acc?.session) return acc.session;
   return getSessionForReq(req);
 }

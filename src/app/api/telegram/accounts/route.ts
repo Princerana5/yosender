@@ -6,6 +6,29 @@ import { getClient } from "@/lib/tg";
 export async function GET(req: NextRequest) {
   const uid = getUserIdFromReq(req);
   if (!uid) return NextResponse.json({ error: "Login required" }, { status: 401 });
+  // Lazy rental expiry: an expired rental's tg row must disappear from the
+  // list even if nobody hits /api/rentals — expiry is time-based, not
+  // logout-based, so rentals survive logout until their 24h window ends.
+  // The tg row is deleted too (auto-logout from that user's senders) and the
+  // pool account returns to available for the next renter.
+  try {
+    const { getRentals, saveRentals, getRentalPool, saveRentalPool, getAccounts, saveAccounts } = await import("@/lib/db");
+    const now = Date.now();
+    const rentals = getRentals();
+    const pool = getRentalPool();
+    const accounts = getAccounts();
+    let touched = false;
+    for (const r of rentals) {
+      if (r.status === "active" && new Date(r.expiresAt).getTime() <= now) {
+        r.status = "expired"; touched = true;
+        const p = pool.find((x) => x.id === r.poolAccountId);
+        if (p && p.status === "rented" && p.rentedBy === r.userId) { p.status = "available"; p.rentedBy = null; p.rentedAt = null; p.expiresAt = null; }
+        const idx = accounts.findIndex((a) => a.id === r.tgAccountId);
+        if (idx !== -1) accounts.splice(idx, 1);
+      }
+    }
+    if (touched) { saveRentals(rentals); saveRentalPool(pool); saveAccounts(accounts); }
+  } catch {}
   let all = getAccounts().filter((a) => a.userId === uid);
   // Auto-migrate legacy tg_session cookie into tg_accounts (so already-connected account shows up)
   if (!all.length) {
@@ -72,8 +95,15 @@ export async function DELETE(req: NextRequest) {
   const id = searchParams.get("id");
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
   const all = getAccounts();
+  const target = all.find((a) => a.id === String(id) && a.userId === uid);
+  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  // Active rentals can only be HIDDEN client-side (X button hides them for this
+  // session). The server row + pool hold stay until the 24h expiry — deleting
+  // here would hand the pool account to someone else mid-rental.
+  if ((target as any).isRental) {
+    return NextResponse.json({ error: "Rented senders stay till expiry — they auto-remove after 24h", hideOnly: true }, { status: 409 });
+  }
   const idx = all.findIndex((a) => a.id === String(id) && a.userId === uid);
-  if (idx === -1) return NextResponse.json({ error: "Not found" }, { status: 404 });
   all.splice(idx, 1);
   saveAccounts(all);
   const remaining = all.filter((a) => a.userId === uid);

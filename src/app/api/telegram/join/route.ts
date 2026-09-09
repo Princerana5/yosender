@@ -3,6 +3,24 @@ import { getClient } from "@/lib/tg";
 import { Api } from "telegram/tl";
 import { getSessionForReqWithAccount } from "@/lib/tg-accounts";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+// Join batches are long single requests — need minutes on self-hosted Next
+// (PM2/nginx path, already 360s). Serverless platforms clamp to their ceiling.
+export const maxDuration = 300;
+
+// Adaptive pacing: small batches join fast (~4s apart — feels instant, still
+// 3x safer than the old 1.5s that caused Flood wait 70s). Only large batches
+// slow down, since that's where Telegram's burst radar actually bites.
+// Public links cost 2 calls (resolve + join), private invites cost 1.
+const JOIN_PAUSE_FAST_MS = 4000;
+const JOIN_PAUSE_SLOW_MS = 8000;
+const FAST_JOIN_COUNT = 5;
+// Telegram's documented per-account ceiling for supergroups/channels.
+// (Kept module-private: Next route files may only export HTTP handlers +
+// known config keys, anything else breaks the production type-check.)
+const TG_MAX_GROUPS_PER_ACCOUNT = 500;
+
 export async function POST(req: NextRequest) {
   const { links, accountId } = await req.json();
   if (!Array.isArray(links) || !links.length) return NextResponse.json({ error: "No links" }, { status: 400 });
@@ -24,7 +42,14 @@ export async function POST(req: NextRequest) {
     }
   } catch {}
 
-  // Join from the chosen account when provided, else the active account.
+  // Join ONLY from the chosen account — never silently fall back to active
+  // (that joined account B's links from account A after an account switch).
+  if (accountId != null) {
+    const { getAccountForReqWithAccount } = await import("@/lib/tg-accounts");
+    if (!getAccountForReqWithAccount(req, String(accountId))) {
+      return NextResponse.json({ error: "Account not found — refresh accounts and try again" }, { status: 404 });
+    }
+  }
   const session = getSessionForReqWithAccount(req, accountId != null ? String(accountId) : null);
   if (!session) return NextResponse.json({ error: "Selected Telegram account not found or not connected" }, { status: 401 });
 
@@ -48,6 +73,25 @@ export async function POST(req: NextRequest) {
   try {
     await client.connect();
     const results: any[] = [];
+    // Adaptive pacing: first few joins go fast, then ease off. When a
+    // FLOOD_WAIT arrives anyway, honor it exactly (server-side sleep) and
+    // continue the queue — never abandon links.
+    let joinsDone = 0;
+    const pacedPause = async () => {
+      joinsDone++;
+      // links.length is the chunk the UI sent (3). Fast for short queues,
+      // slow lane only kicks in past FAST_JOIN_COUNT in one request.
+      const slow = links.length > FAST_JOIN_COUNT && joinsDone >= FAST_JOIN_COUNT;
+      await new Promise(r => setTimeout(r, slow ? JOIN_PAUSE_SLOW_MS : JOIN_PAUSE_FAST_MS));
+    };
+    const floodSleep = async (sec: number) => {
+      // Honor Telegram's exact wait, capped so one bad link can't stall the
+      // route past maxDuration. Remainder stays queued for the UI's retry.
+      const capped = Math.min(Math.max(sec, 1), 120);
+      await new Promise(r => setTimeout(r, (capped + 2) * 1000));
+      return sec > capped ? sec - capped : 0;
+    };
+    let pendingFlood = 0;
     for (const raw of links) {
       const link = String(raw).trim();
       if (!link) continue;
@@ -62,6 +106,12 @@ export async function POST(req: NextRequest) {
         .split(/[?\s]/)[0]
         .replace(/\/$/, "");
       if (!normalized || /^(locked|undefined|null)$/i.test(normalized)) continue;
+      // Skip internal / malformed links the catalog sometimes stores
+      // (t.me/c/... needs an invite hash and can never be joined directly).
+      if (/^c(\/|$)/i.test(normalized)) {
+        results.push({ link, status: "Failed", error: "Private group — needs an invite link" });
+        continue;
+      }
       try {
         if (/^(\+|joinchat\/)/i.test(normalized)) {
           const hash = normalized.replace(/^joinchat\//i, "").replace(/^\+/, "");
@@ -95,28 +145,81 @@ export async function POST(req: NextRequest) {
             }
           } catch (e: any) {
             const m = e.errorMessage || e.message || String(e);
+            if (m.includes("FLOOD_WAIT") || (m === "FLOOD" && (e as any)?.code === 420)) {
+              const sec = Number(m.match(/(\d+)/)?.[1] || (e as any)?.seconds || 60);
+              const rest = await floodSleep(sec);
+              if (rest > 0) {
+                pendingFlood = rest;
+                results.push({ link, status: "RateLimited", retryAfter: rest, error: `Flood wait ${sec}s — auto-retrying shortly` });
+                continue;
+              }
+              // Wait honored — retry this link once before moving on.
+              try {
+                const entity: any = await client.getEntity(normalized as any);
+                await (client as any).invoke(new Api.channels.JoinChannel({ channel: entity } as any));
+                results.push({ link, status: "Joined" });
+              } catch (e2: any) {
+                const m2 = e2.errorMessage || e2.message || String(e2);
+                if (m2.includes("FLOOD_WAIT")) {
+                  const s2 = Number(m2.match(/(\d+)/)?.[1] || 60);
+                  pendingFlood = s2;
+                  results.push({ link, status: "RateLimited", retryAfter: s2, error: `Flood wait ${s2}s — auto-retrying shortly` });
+                } else {
+                  results.push({ link, status: "Failed", error: m2.slice(0, 120) });
+                }
+              }
+              continue;
+            }
             results.push({ link, status: "Failed", error: m.slice(0, 120) });
           }
         }
-        // No delay between successful joins — keep the batch moving.
-        // Rate limits still surface as RateLimited results per link.
+        // Polite pause between joins — Telegram flags rapid join bursts.
+        await pacedPause();
       } catch (e: any) {
         const m = e.errorMessage || e.message || String(e);
-        if (m.includes("FLOOD_WAIT")) {
-          const sec = Number(m.match(/(\d+)/)?.[1] || 30);
-          results.push({ link, status: "RateLimited", error: `Flood wait ${sec}s` });
-          await new Promise(r => setTimeout(r, Math.min(sec, 5) * 1000));
+        if (m.includes("FLOOD_WAIT") || (m === "FLOOD" && (e as any)?.code === 420)) {
+          const sec = Number(m.match(/(\d+)/)?.[1] || (e as any)?.seconds || 60);
+          const rest = await floodSleep(sec);
+          if (rest > 0) {
+            pendingFlood = rest;
+            results.push({ link, status: "RateLimited", retryAfter: rest, error: `Flood wait ${sec}s — auto-retrying shortly` });
+          } else {
+            // Wait honored — retry this link once before moving on.
+            try {
+              if (/^(\+|joinchat\/)/i.test(normalized)) {
+                const hash = normalized.replace(/^joinchat\//i, "").replace(/^\+/, "");
+                await (client as any).invoke(new Api.messages.ImportChatInvite({ hash } as any));
+              } else {
+                const entity: any = await client.getEntity(normalized as any);
+                await (client as any).invoke(new Api.channels.JoinChannel({ channel: entity } as any));
+              }
+              results.push({ link, status: "Joined" });
+            } catch (e2: any) {
+              const m2 = e2.errorMessage || e2.message || String(e2);
+              if (m2.includes("FLOOD_WAIT")) {
+                const s2 = Number(m2.match(/(\d+)/)?.[1] || 60);
+                pendingFlood = s2;
+                results.push({ link, status: "RateLimited", retryAfter: s2, error: `Flood wait ${s2}s — auto-retrying shortly` });
+              } else if (m2.includes("INVITE_HASH_EXPIRED") || m2.includes("INVITE_HASH_INVALID")) {
+                results.push({ link, status: "Failed", error: "Invite expired/invalid" });
+              } else if (m2.includes("CHANNELS_TOO_MUCH")) {
+                results.push({ link, status: "Failed", error: "Too many channels (500 max) — leave some first" });
+              } else {
+                results.push({ link, status: "Failed", error: m2.slice(0, 120) });
+              }
+            }
+          }
         } else if (m.includes("INVITE_HASH_EXPIRED") || m.includes("INVITE_HASH_INVALID")) {
           results.push({ link, status: "Failed", error: "Invite expired/invalid" });
         } else if (m.includes("CHANNELS_TOO_MUCH")) {
-          results.push({ link, status: "Failed", error: "Too many channels — leave some first" });
+          results.push({ link, status: "Failed", error: "Too many channels (500 max) — leave some first" });
         } else {
           results.push({ link, status: "Failed", error: m.slice(0, 120) });
         }
       }
     }
     await client.disconnect();
-    return NextResponse.json({ results });
+    return NextResponse.json({ results, joinPauseMs: JOIN_PAUSE_FAST_MS, maxGroupsPerAccount: TG_MAX_GROUPS_PER_ACCOUNT, pendingFlood });
   } catch (e: any) {
     try { await client.disconnect(); } catch {}
     return NextResponse.json({ error: e.errorMessage || e.message || String(e) }, { status: 500 });

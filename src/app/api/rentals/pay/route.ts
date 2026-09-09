@@ -25,11 +25,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Free-claim quota checks (same rules as before — error messages unchanged)
+  // Free-claim quota checks (same rules as before — error messages unchanged).
+  // Exclusive claim: pool row AND live rental records must both agree this
+  // sender is free — never double-assign one sender to 2 users.
   const pool = getRentalPool();
   const pAcc = pool.find((x) => x.id === poolAccountId);
   if (!pAcc) return NextResponse.json({ error: "Account not found" }, { status: 404 });
-  if (pAcc.status !== "available") return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+  try {
+    const { getRentals } = await import("@/lib/db");
+    const holder = (getRentals() as any[]).find((r: any) => r.poolAccountId === pAcc.id && r.status === "active");
+    if (pAcc.status !== "available" || (holder && holder.userId !== userId)) {
+      return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+    }
+  } catch {
+    if (pAcc.status !== "available") return NextResponse.json({ error: "Already rented — try another" }, { status: 409 });
+  }
   const sub = getActiveSubscription(userId);
   const plan = sub ? getPlan(sub.planId) : null;
   if (!plan) return NextResponse.json({ error: "No active plan — free rent requires a subscription" }, { status: 403 });
