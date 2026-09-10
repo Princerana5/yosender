@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAccounts } from "@/lib/db";
+import { getAccounts, saveAccounts } from "@/lib/db";
 import { getUserIdFromReq, getActiveId, MAX_TG_ACCOUNTS } from "@/lib/tg-accounts";
+import { getClient } from "@/lib/tg";
 
 export async function GET(req: NextRequest) {
   const uid = getUserIdFromReq(req);
