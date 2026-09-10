@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getAccounts, saveAccounts } from "@/lib/db";
+import { getAccounts } from "@/lib/db";
 import { getUserIdFromReq, getActiveId, MAX_TG_ACCOUNTS } from "@/lib/tg-accounts";
-import { getClient } from "@/lib/tg";
 
 export async function GET(req: NextRequest) {
   const uid = getUserIdFromReq(req);
@@ -29,39 +28,22 @@ export async function GET(req: NextRequest) {
     }
     if (touched) { saveRentals(rentals); saveRentalPool(pool); saveAccounts(accounts); }
   } catch {}
-  let all = getAccounts().filter((a) => a.userId === uid);
-  // Auto-migrate legacy tg_session cookie into tg_accounts (so already-connected account shows up)
-  if (!all.length) {
-    const legacy = req.cookies.get("tg_session")?.value;
-    if (legacy) {
-      try {
-        const c = getClient(legacy);
-        await c.connect();
-        const me: any = await c.getMe();
-        await c.disconnect();
-        const username = me.username || "";
-        const firstName = me.firstName || "";
-        const lastName = me.lastName || "";
-        const displayName = [firstName, lastName].filter(Boolean).join(" ") || username || me.phone || "Telegram";
-        const phone = me.phone || "";
-        const full = getAccounts();
-        // avoid duplicate by phone if race
-        if (!full.some((a) => a.userId === uid && a.phone === phone && phone)) {
-          const acc = { id: (globalThis.crypto as any)?.randomUUID?.() || `${Date.now().toString(36)}${Math.random().toString(36).slice(2,9)}`, userId: uid, phone, username, displayName, firstName, session: legacy, status: "connected", createdAt: new Date().toISOString() };
-          full.push(acc);
-          saveAccounts(full);
-          all = full.filter((a) => a.userId === uid);
-          // set active cookie for this response
-          const res = NextResponse.json({ accounts: all.map(({ session, ...rest }) => rest), activeId: acc.id, max: MAX_TG_ACCOUNTS, migrated: true });
-          res.cookies.set("tg_active_id", acc.id, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 60 * 60 * 24 * 365 });
-          return res;
-        }
-      } catch {}
-    }
-  }
+  const all = getAccounts().filter((a) => a.userId === uid);
+  // Legacy tg_session auto-migration REMOVED: it resurrected explicitly
+  // deleted/logged-out accounts from a stale cookie ("deleted but still
+  // shows"). The DB is the only source of truth — no rows, no accounts.
+  // Any stale tg_session cookie is cleared so it can't revive anything.
   const activeId = getActiveId(req);
   const safe = all.map(({ session, ...rest }) => rest);
-  return NextResponse.json({ accounts: safe, activeId: activeId || (all[0]?.id ?? null), max: MAX_TG_ACCOUNTS });
+  const res = NextResponse.json({ accounts: safe, activeId: activeId || (all[0]?.id ?? null), max: MAX_TG_ACCOUNTS });
+  // Kill any stale tg_session cookie: with auto-migration gone, a leftover
+  // cookie would otherwise keep /telegram/me reporting a deleted account as
+  // connected (sidebar ghost) even with zero rows in the DB.
+  if (!all.length) {
+    res.cookies.set("tg_session", "", { maxAge: 0, path: "/" });
+    res.cookies.set("tg_active_id", "", { maxAge: 0, path: "/" });
+  }
+  return res;
 }
 
 export async function POST(req: NextRequest) {
