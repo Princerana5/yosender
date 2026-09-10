@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getUserIdFromReq, getActiveId } from "@/lib/tg-accounts";
-import { getAccounts, saveAccounts, getRentals } from "@/lib/db";
+import { getAccounts, saveAccounts } from "@/lib/db";
 export async function POST(req: NextRequest) {
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
@@ -34,14 +34,15 @@ export async function POST(req: NextRequest) {
     }
     return r;
   }
-  // Sidebar logout: clear the BROWSER session only (cookies). Do NOT delete:
-  //  - own non-rental accounts (they reconnect next login via saved session)
-  //  - rental accounts (must survive logout until their 24h expiry)
-  // Client wipes visible state; server re-serves everything on next login.
+  // Sidebar logout: the user explicitly disconnected — DELETE their own
+  // non-rental accounts server-side so a removed account can NEVER resurface
+  // on next login ("deleted but still shows as logged in"). Rentals are
+  // protected: the row + pool hold stay until the 24h expiry.
+  const all = getAccounts();
+  const remaining = all.filter((a) => a.userId !== uid || (a as any).isRental);
+  if (remaining.length !== all.length) saveAccounts(remaining);
   const r = NextResponse.json({ ok: true });
   r.cookies.set("tg_session", "", { maxAge: 0, path: "/" });
   r.cookies.set("tg_active_id", "", { maxAge: 0, path: "/" });
-  // Touch rentals so expired ones clean up even on logout ping
-  try { void getRentals(); } catch {}
   return r;
 }
