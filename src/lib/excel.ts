@@ -141,8 +141,27 @@ function sheetXml(sheet: SheetDef): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols>${colsXml}</cols><sheetData><row r="1" ht="18" customHeight="1">${headerCells}</row>${dataRows}</sheetData><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><autoFilter ref="A1:${colLetter(cols - 1)}1"/></worksheet>`;
 }
 
-// ── Public: build XLSX ──
+// ── Public: build XLSX (via the xlsx lib — the old hand-rolled ZIP writer
+// produced files Excel sometimes refused to open) ──
 export function buildXlsx(sheets: SheetDef[]): Uint8Array {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const X = require("xlsx");
+    const wb = X.utils.book_new();
+    for (const s of sheets) {
+      const safe = String(s.name || "Sheet").replace(/[:\\/?*[\]]/g, "_").slice(0, 31) || "Sheet";
+      const ws = X.utils.aoa_to_sheet([s.headers, ...s.rows]);
+      ws["!cols"] = (s.colWidths || s.headers.map(() => 20)).map((w: number) => ({ wch: Math.max(10, Math.min(50, w)) }));
+      X.utils.book_append_sheet(wb, ws, safe);
+    }
+    const buf: Buffer = X.write(wb, { type: "buffer", bookType: "xlsx" });
+    return new Uint8Array(buf);
+  } catch {
+    return buildXlsxLegacy(sheets);
+  }
+}
+
+function buildXlsxLegacy(sheets: SheetDef[]): Uint8Array {
   const sheetNames = sheets.map((s) => s.name);
   // sanitize sheet names (max 31 chars, no : \ / ? * [ ])
   const safeNames = sheetNames.map((n) => n.replace(/[:\\\/\?\*\[\]]/g, "_").slice(0, 31) || "Sheet");

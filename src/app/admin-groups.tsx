@@ -277,8 +277,8 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
     setSaving(false);
   };
 
-  const doExport = (scope: string, extra?: string) => {
-    let url = `/api/admin/groups/export?scope=${scope}`;
+  const doExport = (scope: string, extra?: string, format: "xlsx" | "txt" = "xlsx") => {
+    let url = `/api/admin/groups/export?scope=${scope}&format=${format}`;
     if (scope === "category" && (extra || fCategory)) url += `&categoryId=${extra || fCategory}`;
     if (scope === "selected" && selected.size) url += `&ids=${[...selected].join(",")}`;
     window.open(url, "_blank");
@@ -507,7 +507,8 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
             <span className="text-xs font-bold bg-[#229ED9] text-white px-3 py-1.5 rounded-full">{selected.size} selected</span>
             <button onClick={() => setShowBulkCat(true)} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full">Assign Category</button>
             <button onClick={() => refreshMembers([...selected])} disabled={refreshing} className="text-xs font-bold bg-white border border-emerald-200 text-emerald-700 px-3 py-1.5 rounded-full flex items-center gap-1 disabled:opacity-50"><RefreshCw size={12} /> Refresh Members</button>
-            <button onClick={() => doExport("selected")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1"><Download size={12} /> Export Selected</button>
+            <button onClick={() => doExport("selected", undefined, "xlsx")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1"><Download size={12} /> Selected Excel</button>
+            <button onClick={() => doExport("selected", undefined, "txt")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1"><Download size={12} /> Selected TXT</button>
             <button onClick={doBulkDelete} className="text-xs font-bold bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-full">Delete Selected</button>
             <button onClick={() => setSelected(new Set())} className="text-xs font-bold text-slate-400">Clear</button>
           </>
@@ -515,9 +516,10 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
           <span className="text-xs text-slate-400 px-1">Tick checkboxes to bulk-assign, export or delete</span>
         )}
         <div className="ml-auto flex flex-wrap gap-2">
-          <button onClick={() => doExport("all")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50"><Download size={12} /> Export All</button>
-          <button onClick={() => doExport("category")} disabled={!fCategory} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50 disabled:opacity-40" title={fCategory ? "Export current category filter" : "Select a category filter first"}><Download size={12} /> Export Category</button>
-          <button onClick={() => doExport("by-category")} className="text-xs font-bold bg-slate-900 text-white px-3 py-1.5 rounded-full flex items-center gap-1"><Download size={12} /> Export All Categories</button>
+          <button onClick={() => doExport("all", undefined, "xlsx")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50"><Download size={12} /> Excel</button>
+          <button onClick={() => doExport("all", undefined, "txt")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50"><Download size={12} /> TXT</button>
+          <button onClick={() => doExport("category", undefined, "xlsx")} disabled={!fCategory} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50 disabled:opacity-40" title={fCategory ? "Export current category filter as Excel" : "Select a category filter first"}><Download size={12} /> Category Excel</button>
+          <button onClick={() => doExport("category", undefined, "txt")} disabled={!fCategory} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50 disabled:opacity-40" title={fCategory ? "Export current category filter as text (1 link per line)" : "Select a category filter first"}><Download size={12} /> Category TXT</button>
           <button onClick={() => setShowImport(true)} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50">
             <Upload size={12} /> Import
           </button>
