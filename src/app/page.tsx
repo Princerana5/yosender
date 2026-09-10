@@ -324,7 +324,10 @@ function LiveHeroCard() {
   const uniqueGroups = stats?.uniqueGroups ?? 0;
   const running = stats?.running ?? 0;
   const hasActivity = totalCampaigns > 0 || totalSent > 0;
-  const pct = totalDests ? Math.round((totalSent / totalDests) * 100) : 0;
+  // Repeating campaigns send MANY times per destination, so totalSent can be
+  // far larger than totalDests — the old ratio showed absurd values like
+  // 1500%. A rate can never exceed 100: clamp it.
+  const pct = totalDests ? Math.min(100, Math.round((totalSent / totalDests) * 100)) : 0;
   const isLive = running > 0;
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 relative min-w-0 overflow-hidden">
