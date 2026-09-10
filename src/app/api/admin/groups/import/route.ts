@@ -52,7 +52,8 @@ function extractLinksFromText(text: string): string[] {
   return [...new Set(links)];
 }
 
-// POST /api/admin/groups/import — multipart form: file, category_id?
+// POST /api/admin/groups/import — multipart form: links (pasted text, 1 per
+// line) and/or file (.txt/.csv/.xlsx), category_id?
 export async function POST(req: NextRequest) {
   const perm = requirePerm(req, "groups");
   if (!perm.ok) return perm.res;
@@ -63,15 +64,15 @@ export async function POST(req: NextRequest) {
   try {
     form = await req.formData();
   } catch {
-    return NextResponse.json({ error: "Expected multipart form with file" }, { status: 400 });
+    return NextResponse.json({ error: "Expected multipart form with links or file" }, { status: 400 });
   }
 
   const file = form.get("file") as File | null;
+  const pasted = String(form.get("links") || "").trim();
   const categoryId = (form.get("category_id") as string) || (form.get("categoryId") as string) || null;
 
-  if (!file) return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
-  const name = (file.name || "").toLowerCase();
-  if (file.size > 10 * 1024 * 1024) return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 400 });
+  if (!file && !pasted) return NextResponse.json({ error: "Paste links or upload a file" }, { status: 400 });
+  if (file && file.size > 10 * 1024 * 1024) return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 400 });
 
   let categoryName: string | null = null;
   if (categoryId) {
@@ -80,15 +81,20 @@ export async function POST(req: NextRequest) {
     categoryName = cat.name;
   }
 
-  const ab = await file.arrayBuffer();
-  const buf = Buffer.from(ab);
-
   let links: string[] = [];
-  if (name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".zip")) {
-    links = extractLinksFromXlsx(buf);
-  } else {
-    // csv, txt — decode as utf8
-    links = extractLinksFromText(buf.toString("utf-8"));
+  // Pasted text (1 link per line) wins when both are provided.
+  if (pasted) {
+    links = extractLinksFromText(pasted);
+  } else if (file) {
+    const name = (file.name || "").toLowerCase();
+    const ab = await file.arrayBuffer();
+    const buf = Buffer.from(ab);
+    if (name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".zip")) {
+      links = extractLinksFromXlsx(buf);
+    } else {
+      // csv, txt — decode as utf8
+      links = extractLinksFromText(buf.toString("utf-8"));
+    }
   }
 
   if (!links.length) {

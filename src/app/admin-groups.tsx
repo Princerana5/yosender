@@ -85,6 +85,8 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
   const [importCat, setImportCat] = useState("");
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<any>(null);
+  const [showImport, setShowImport] = useState(false);
+  const [importText, setImportText] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
   const loadCats = useCallback(async () => {
@@ -282,12 +284,17 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
     window.open(url, "_blank");
   };
 
+  // Import accepts EITHER a pasted list (1 link per line) OR a .txt/.csv/
+  // .xlsx file — whichever is provided. Pasted text wins when both are set.
+  const importLinks = [...new Set(importText.split("\n").map(s => s.trim()).filter(Boolean))];
   const doImport = async () => {
-    if (!importFile) return notify("Choose a file first", true);
+    const pasted = importText.split("\n").map(s => s.trim()).filter(Boolean);
+    if (!pasted.length && !importFile) return notify("Paste links or choose a file first", true);
     setImporting(true); setImportResult(null);
     try {
       const fd = new FormData();
-      fd.append("file", importFile);
+      if (pasted.length) fd.append("links", pasted.join("\n"));
+      else if (importFile) fd.append("file", importFile);
       if (importCat) fd.append("category_id", importCat);
       const r = await fetch("/api/admin/groups/import", { method: "POST", body: fd });
       const j = await r.json();
@@ -511,44 +518,62 @@ export function GroupsTab({ notify }: { notify: (msg: string, isErr?: boolean) =
           <button onClick={() => doExport("all")} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50"><Download size={12} /> Export All</button>
           <button onClick={() => doExport("category")} disabled={!fCategory} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50 disabled:opacity-40" title={fCategory ? "Export current category filter" : "Select a category filter first"}><Download size={12} /> Export Category</button>
           <button onClick={() => doExport("by-category")} className="text-xs font-bold bg-slate-900 text-white px-3 py-1.5 rounded-full flex items-center gap-1"><Download size={12} /> Export All Categories</button>
-          <label className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 cursor-pointer hover:bg-slate-50">
+          <button onClick={() => setShowImport(true)} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full flex items-center gap-1 hover:bg-slate-50">
             <Upload size={12} /> Import
-            <input type="file" accept=".xlsx,.xls,.csv,.txt" className="hidden" onChange={(e) => setImportFile(e.target.files?.[0] || null)} />
-          </label>
+          </button>
         </div>
       </div>
 
-      {/* ── Import panel ── */}
-      {importFile && (
-        <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4">
-          <div className="flex items-center gap-2 text-sm font-bold text-indigo-900"><Upload size={15} /> Import: {importFile.name} <span className="text-xs font-medium text-indigo-500">({(importFile.size / 1024).toFixed(1)} KB)</span>
-            <button onClick={() => { setImportFile(null); setImportResult(null); }} className="ml-auto text-indigo-400 hover:text-indigo-700"><X size={16} /></button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2 items-center">
-            <select value={importCat} onChange={(e) => setImportCat(e.target.value)} className="border border-indigo-200 rounded-full px-3 py-2 text-sm bg-white max-w-[200px]">
-              <option value="">No category (→ Uncategorized)</option>
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <button onClick={doImport} disabled={importing} className="bg-indigo-600 text-white px-5 py-2 rounded-full text-xs font-bold disabled:opacity-50">{importing ? "Importing…" : "Start Import"}</button>
-          </div>
-          {importResult && (
-            <div className="mt-3 bg-white border border-indigo-200 rounded-xl p-4">
-              <div className="text-sm font-bold text-slate-900">Import Completed</div>
-              <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-2 text-center">
-                {[["Total Rows", importResult.summary.totalRows], ["Valid", importResult.summary.validGroups], ["New", importResult.summary.newGroups], ["Duplicates", importResult.summary.duplicates], ["Invalid", importResult.summary.invalidLinks]].map(([k, v]: any) => (
-                  <div key={k} className="bg-slate-50 border border-slate-200 rounded-xl px-2 py-2"><div className="text-[10px] font-bold tracking-widest text-slate-400">{String(k).toUpperCase()}</div><div className="font-extrabold">{v}</div></div>
-                ))}
-              </div>
-              {importResult.errors?.length > 0 && (
-                <details className="mt-2 text-xs">
-                  <summary className="cursor-pointer font-bold text-red-600">Invalid rows ({importResult.errors.length}) — click to view</summary>
-                  <div className="mt-1 max-h-40 overflow-auto space-y-1">
-                    {importResult.errors.slice(0, 50).map((e: any, i: number) => <div key={i} className="bg-red-50 border border-red-100 rounded-lg px-2 py-1 font-mono truncate">{e.link} — {e.error}</div>)}
-                  </div>
-                </details>
-              )}
+      {/* ── Import modal: paste 1-link-per-line OR upload .txt/.csv/.xlsx ── */}
+      {showImport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" onClick={() => setShowImport(false)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold flex items-center gap-2"><Upload size={15} /> Import Groups</h3>
+              <button onClick={() => setShowImport(false)} className="w-8 h-8 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center"><X size={14} /></button>
             </div>
-          )}
+            <label className="block text-xs font-bold text-slate-700">PASTE LINKS — 1 PER LINE
+              <textarea value={importText} onChange={(e) => setImportText(e.target.value)} rows={8} placeholder={"https://t.me/mygroup\nhttps://t.me/+AbCdEfGhIjKlMnOp\n@anothergroup"} className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-mono font-normal outline-none focus:border-indigo-500" />
+            </label>
+            <div className="flex items-center gap-2 text-xs">
+              <span className={`font-bold px-2.5 py-1 rounded-full border ${importLinks.length ? "bg-indigo-50 text-indigo-700 border-indigo-200" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{importLinks.length.toLocaleString()} links</span>
+              {importText.trim() && <button onClick={() => setImportText("")} className="font-bold text-slate-400 hover:text-slate-600 ml-auto">Clear</button>}
+            </div>
+            <div className="flex items-center gap-2 text-[11px] font-bold text-slate-400"><span className="flex-1 h-px bg-slate-200" /> OR UPLOAD FILE <span className="flex-1 h-px bg-slate-200" /></div>
+            <label className="flex items-center gap-2 border border-dashed border-slate-300 rounded-xl px-3 py-2.5 text-sm cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/50 transition">
+              <Upload size={14} className="text-indigo-600 shrink-0" />
+              <span className="font-semibold text-slate-700 truncate">{importFile ? importFile.name : "Choose .txt, .csv or .xlsx file…"}</span>
+              {importFile && <span className="text-xs text-slate-400 shrink-0">({(importFile.size / 1024).toFixed(1)} KB)</span>}
+              {importFile && <button onClick={(e) => { e.preventDefault(); setImportFile(null); }} className="ml-auto text-slate-400 hover:text-red-600 shrink-0"><X size={14} /></button>}
+              <input type="file" accept=".txt,.csv,.xlsx,.xls" className="hidden" onChange={(e) => setImportFile(e.target.files?.[0] || null)} />
+            </label>
+            <label className="block text-xs font-bold text-slate-700">CATEGORY
+              <select value={importCat} onChange={(e) => setImportCat(e.target.value)} className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-normal bg-white">
+                <option value="">No category (→ Uncategorized)</option>
+                {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </label>
+            <button onClick={doImport} disabled={importing || (!importLinks.length && !importFile)} className="w-full bg-indigo-600 text-white py-3 rounded-full text-sm font-bold disabled:opacity-50">{importing ? "Importing…" : `Import ${((importLinks.length || (importFile ? 1 : 0)) ? (importLinks.length || "file") : "")} ${importLinks.length === 1 ? "group" : "groups"}`.trim() || "Import"}</button>
+            {importResult && (
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                <div className="text-sm font-bold text-slate-900">Import Completed</div>
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-2 text-center">
+                  {[["Total Rows", importResult.summary.totalRows], ["Valid", importResult.summary.validGroups], ["New", importResult.summary.newGroups], ["Duplicates", importResult.summary.duplicates], ["Invalid", importResult.summary.invalidLinks]].map(([k, v]: any) => (
+                    <div key={k} className="bg-white border border-slate-200 rounded-xl px-2 py-2"><div className="text-[10px] font-bold tracking-widest text-slate-400">{String(k).toUpperCase()}</div><div className="font-extrabold">{v}</div></div>
+                  ))}
+                </div>
+                {importResult.errors?.length > 0 && (
+                  <details className="mt-2 text-xs">
+                    <summary className="cursor-pointer font-bold text-red-600">Invalid rows ({importResult.errors.length}) — click to view</summary>
+                    <div className="mt-1 max-h-40 overflow-auto space-y-1">
+                      {importResult.errors.slice(0, 50).map((e: any, i: number) => <div key={i} className="bg-red-50 border border-red-100 rounded-lg px-2 py-1 font-mono truncate">{e.link} — {e.error}</div>)}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
