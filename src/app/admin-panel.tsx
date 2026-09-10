@@ -174,7 +174,7 @@ export function AdminPanel() {
     try {
       const r = await fetch("/api/admin/users", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action, ...extra }) });
       const j = await r.json(); if (!r.ok) throw new Error(j.error);
-      setMsg(action === "ban" ? "User banned" : action === "unban" ? "User unbanned" : "Password reset");
+      setMsg(action === "ban" ? "User banned" : action === "unban" ? "User unbanned" : action === "reset_password" ? "Password changed" : action);
       loadUsers(usersPage);
       setTimeout(()=>setMsg(""), 3000);
     } catch (e: any) { setErr(e.message); }
@@ -355,7 +355,7 @@ export function AdminPanel() {
                     <td className="px-3 py-3">
                       <div className="flex gap-1 justify-end flex-wrap">
                         {u.isBanned ? <button onClick={()=>doUserAction(u.id,"unban")} className="text-xs font-bold bg-emerald-600 text-white px-3 py-1.5 rounded-full">Unban</button> : <button onClick={()=>doUserAction(u.id,"ban")} className="text-xs font-bold bg-red-50 text-red-700 border border-red-200 px-3 py-1.5 rounded-full">Ban</button>}
-                        <button onClick={()=>{ const p = prompt("New password (min 6 chars):"); if(p) doUserAction(u.id,"reset_password",{newPassword:p}); }} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full">Reset PW</button>
+                        <button onClick={()=>{ const p = prompt(`Set a new password for ${u.email} (min 6 chars):`); if (p === null) return; if (p.length < 6) { alert("Password min 6 chars — cancelled."); return; } if (!confirm(`Change password for ${u.email}? They must use the new password on next login.`)) return; doUserAction(u.id,"reset_password",{newPassword:p}); }} className="text-xs font-bold bg-white border border-slate-200 px-3 py-1.5 rounded-full">Change PW</button>
                         <button onClick={()=>deleteUser(u.id)} className="text-xs font-bold bg-white border border-red-200 text-red-600 px-3 py-1.5 rounded-full">Delete</button>
                       </div>
                     </td>
