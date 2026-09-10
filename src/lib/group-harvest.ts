@@ -44,6 +44,16 @@ function seedFromDialog(d: any): GroupSeed | null {
       : typeof d?.entity?.participantsCount === "number"
         ? d.entity.participantsCount
         : null;
+  // Send-permission snapshot from the dialog entity itself (same logic as
+  // /api/telegram/dialogs): creator/admins can always post; otherwise the
+  // default send ban decides. No extra MTProto calls — this rides the dialogs
+  // fetch the harvest already performs.
+  const sendAllowed =
+    e?.creator === true || e?.adminRights
+      ? true
+      : e?.defaultBannedRights?.sendMessages === true
+        ? false
+        : null;
 
   if (username) {
     return {
@@ -51,6 +61,7 @@ function seedFromDialog(d: any): GroupSeed | null {
       name: title,
       username: String(username).toLowerCase(),
       memberCount,
+      sendAllowed,
     };
   }
   // Private group — no public link. Stable placeholder keyed by Telegram id.
@@ -61,6 +72,7 @@ function seedFromDialog(d: any): GroupSeed | null {
     name: title,
     username: null,
     memberCount,
+    sendAllowed,
   };
 }
 

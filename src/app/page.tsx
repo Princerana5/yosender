@@ -2126,7 +2126,10 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
                 </header>
                 <ul className="divide-y divide-slate-100">
                   {list.map((g: any) => {
-                    const blocked = g.send_restricted === true;
+                    // send_restricted: true = no-send, false = sendable, null =
+                    // unknown (not yet snapshotted) — show a clear badge for all
+                    // three states so users always know where sending is allowed.
+                    const sendState = g.send_restricted === true ? "blocked" : g.send_restricted === false ? "allowed" : "unknown";
                     return (
                     <li key={g.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50/60 transition-colors">
                       {!locked && <input type="checkbox" checked={selected.has(g.id)} onChange={() => toggle(g.id)} aria-label={`Select ${g.group_name || g.group_username || "group"}`} className="accent-emerald-600 w-4 h-4 shrink-0" />}
@@ -2138,7 +2141,10 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
                           {memberLabel(g) || "Members unavailable"}
                           <span aria-hidden="true">·</span>
                           <span className="capitalize">{g.group_type}</span>
-                          {blocked && !locked && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full" title="Messages cannot be sent in this group from the current account">✕ No-send</span>}
+                          <span aria-hidden="true">·</span>
+                          {sendState === "allowed" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full" title="You can send messages in this group">✓ Send allowed</span>}
+                          {sendState === "blocked" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full" title="Messages cannot be sent in this group — sending is restricted">✕ Restricted — no send</span>}
+                          {sendState === "unknown" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Send permission not checked yet — join the group to find out">? Send status unknown</span>}
                         </div>
                       </div>
                       <button onClick={() => locked ? onNav("plans") : startJoin([g.normalized_link || g.group_link])} disabled={joining} className={`btn !py-2 text-xs shrink-0 ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock" : "Join"}</button>

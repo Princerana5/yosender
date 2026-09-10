@@ -158,6 +158,7 @@ export function upsertGroupLink(opts: {
   notes?: string | null;
   adminNotes?: string | null;
   memberCount?: number | null;
+  sendAllowed?: boolean | null;
 }): { group: GroupRecord; isNew: boolean } {
   const raw = String(opts.rawLink || "").trim();
   if (!raw) throw new Error("Group link required");
@@ -181,6 +182,12 @@ export function upsertGroupLink(opts: {
       existing.member_count = opts.memberCount;
       existing.members_updated_at = now;
     }
+    // refresh the send-permission snapshot when the harvester supplies one —
+    // this is what powers the Allowed/Restricted badges in Browse.
+    if (typeof opts.sendAllowed === "boolean") {
+      existing.send_restricted = !opts.sendAllowed;
+      existing.send_restricted_updated_at = now;
+    }
     saveGroups(groups);
     return { group: existing, isNew: false };
   }
@@ -197,6 +204,7 @@ export function upsertGroupLink(opts: {
   }
 
   const freshCount = typeof opts.memberCount === "number" && opts.memberCount >= 0 ? opts.memberCount : null;
+  const freshRestricted = typeof opts.sendAllowed === "boolean" ? !opts.sendAllowed : null;
   const group: GroupRecord = {
     id: `grp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
     group_link: raw,
@@ -218,8 +226,8 @@ export function upsertGroupLink(opts: {
     admin_notes: opts.adminNotes || null,
     member_count: freshCount,
     members_updated_at: freshCount !== null ? now : null,
-    send_restricted: null,
-    send_restricted_updated_at: null,
+    send_restricted: freshRestricted,
+    send_restricted_updated_at: freshRestricted !== null ? now : null,
   };
   groups.push(group);
   saveGroups(groups);
@@ -234,6 +242,10 @@ export type GroupSeed = {
   name?: string | null;
   username?: string | null;
   memberCount?: number | null;
+  // send permission snapshot from the harvester's own dialogs: true = the
+  // harvesting account CAN post here, false = restricted. Carried through
+  // bulkUpsert so Browse can badge each group without extra MTProto calls.
+  sendAllowed?: boolean | null;
 };
 
 export function bulkUpsertGroupLinks(
@@ -265,6 +277,7 @@ export function bulkUpsertGroupLinks(
         categoryId: meta.categoryId || null,
         groupName: seed.name || null,
         memberCount: typeof seed.memberCount === "number" ? seed.memberCount : null,
+        sendAllowed: typeof seed.sendAllowed === "boolean" ? seed.sendAllowed : null,
       });
       if (res.isNew) newGroups++;
       else duplicates++;
