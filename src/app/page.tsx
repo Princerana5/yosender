@@ -2141,10 +2141,9 @@ function BrowseGroupsView({ onNav }: { onNav: (v: string) => void }) {
                           {memberLabel(g) || "Members unavailable"}
                           <span aria-hidden="true">·</span>
                           <span className="capitalize">{g.group_type}</span>
-                          <span aria-hidden="true">·</span>
+                          {sendState !== "unknown" && <span aria-hidden="true">·</span>}
                           {sendState === "allowed" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full" title="You can send messages in this group">✓ Send allowed</span>}
                           {sendState === "blocked" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full" title="Messages cannot be sent in this group — sending is restricted">✕ Restricted — no send</span>}
-                          {sendState === "unknown" && <span className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-500 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Send permission not checked yet — join the group to find out">? Send status unknown</span>}
                         </div>
                       </div>
                       <button onClick={() => locked ? onNav("plans") : startJoin([g.normalized_link || g.group_link])} disabled={joining} className={`btn !py-2 text-xs shrink-0 ${locked ? "btn-secondary" : "btn-primary"}`}>{locked ? "Unlock" : "Join"}</button>
