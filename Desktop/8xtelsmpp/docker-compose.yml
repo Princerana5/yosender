@@ -1,0 +1,116 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-xtel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xtel_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-xtelsmpp}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-xtel}"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: ./services/api
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  smpp-server:
+    build: ./services/smpp-server
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${SMPP_PORT:-2775}:2775"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  vendor-worker:
+    build: ./services/vendor-worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  routing-worker:
+    build: ./services/routing-worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  dlr-worker:
+    build: ./services/dlr-worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  billing-worker:
+    build: ./services/billing-worker
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://xtel:xtel_secret@postgres:5432/xtelsmpp
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,22 @@
+{
+  "name": "8xtelsmpp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "8xtelSMPP — Enterprise SMPP & Multi-Channel Messaging Gateway",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:api": "npm run dev --workspace=@8xtel/api",
+    "dev:frontend": "npm run dev --workspace=@8xtel/frontend",
+    "migrate": "npm run migrate --workspace=@8xtel/api",
+    "seed": "npm run seed --workspace=@8xtel/api",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

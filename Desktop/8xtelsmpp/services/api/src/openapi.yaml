@@ -1,0 +1,55 @@
+openapi: 3.0.3
+info:
+  title: 8xtelSMPP API
+  version: 1.0.0
+  description: Enterprise SMPP & multi-channel messaging gateway (§33)
+servers:
+  - url: http://localhost:8080
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+paths:
+  /auth/login:
+    post:
+      security: []
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200': { description: JWT token + user }
+  /clients:
+    get: { summary: List clients, responses: { '200': { description: ok } } }
+    post: { summary: Create client + SMPP credentials, responses: { '201': { description: created } } }
+  /clients/{id}: { get: { summary: Client detail, responses: { '200': { description: ok } } } }
+  /vendors:
+    get: { summary: List vendors, responses: { '200': { description: ok } } }
+    post: { summary: Create vendor, responses: { '201': { description: created } } }
+  /routes:
+    get: { summary: List routes, responses: { '200': { description: ok } } }
+    post: { summary: Create route, responses: { '201': { description: created } } }
+  /messages:
+    get: { summary: Searchable message log, responses: { '200': { description: ok } } }
+  /billing/wallets:
+    get: { summary: Client wallets, responses: { '200': { description: ok } } }
+  /reports/dashboard:
+    get: { summary: Dashboard aggregate, responses: { '200': { description: ok } } }
+  /reports/traffic/hourly:
+    get: { summary: Hourly traffic, responses: { '200': { description: ok } } }
+  /reports/financial:
+    get: { summary: Revenue/cost/profit, responses: { '200': { description: ok } } }
+  /system/health:
+    get: { summary: Health, responses: { '200': { description: ok } } }
+  /connectors:
+    get: { summary: Channel connectors, responses: { '200': { description: ok } } }

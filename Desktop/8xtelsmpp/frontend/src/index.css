@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background: #0b1210;
+  color: #e7efeb;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.card {
+  @apply bg-panel border border-line rounded-lg p-4;
+}
+
+.tbl th {
+  @apply text-left text-xs uppercase tracking-wide text-gray-400 font-medium px-3 py-2 border-b border-line;
+}
+.tbl td {
+  @apply px-3 py-2 text-sm border-b border-line/60;
+}
+
+.input {
+  @apply bg-ink border border-line rounded px-3 py-2 text-sm w-full outline-none focus:border-brand;
+}
+.btn {
+  @apply bg-brand hover:bg-green-600 text-white text-sm font-medium px-4 py-2 rounded transition;
+}
+.btn-ghost {
+  @apply border border-line hover:border-brand text-sm px-4 py-2 rounded transition;
+}
+.badge {
+  @apply inline-block text-xs px-2 py-0.5 rounded-full;
+}
