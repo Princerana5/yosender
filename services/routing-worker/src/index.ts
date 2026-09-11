@@ -7,7 +7,7 @@ import { resolveCountry, applyFilters, findRoutes, orderVendors, recordEvent } f
 // Fails over across the ordered vendor chain at SEND time (vendor-worker
 // re-queues with next index); here we attach the chain + pricing snapshot.
 
-async function process(job: { data: MessageJob }): Promise<void> {
+async function handleJob(job: { data: MessageJob }): Promise<void> {
   const msg = job.data;
   const pool = getPool();
 
@@ -87,7 +87,7 @@ async function process(job: { data: MessageJob }): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  createWorker(QUEUES.submit, process, 20);
+  createWorker(QUEUES.submit, handleJob, 20);
   console.log('[8xtelSMPP routing-worker] started');
 }
 

@@ -24,7 +24,7 @@ function pick(vendorId: string): VendorConnector | undefined {
   return list[Math.floor(Math.random() * list.length)];
 }
 
-async function process(job: { data: SendJob }): Promise<void> {
+async function handleJob(job: { data: SendJob }): Promise<void> {
   const msg = job.data;
   const pool = getPool();
   const vendorId = msg.vendor_chain[msg.vendor_index];
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     await c.start();
   }
   await listenControl(connectors);
-  createWorker(QUEUES.vendorSend, process, 30);
+  createWorker(QUEUES.vendorSend, handleJob, 30);
   console.log(`[8xtelSMPP vendor-worker] started with ${connectors.length} connector(s)`);
 }
 

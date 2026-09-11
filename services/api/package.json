@@ -23,7 +23,7 @@
     "multer": "^1.4.5-lts.1",
     "csv-parse": "^5.5.5",
     "swagger-ui-express": "^5.0.1",
-    "yamljs": "^2.1.0",
+    "yaml": "^2.4.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
@@ -33,8 +33,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/multer": "^1.4.11",
     "@types/node": "^20.12.0",
-    "@types/swagger-ui-express": "^4.6.0",
-    "@types/yamljs": "^2.1.4",
+    "@types/swagger-ui-express": "^4.1.6",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
     "vitest": "^1.5.0"

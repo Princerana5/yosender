@@ -49,7 +49,7 @@ export function getQueue(name: QueueName): Queue {
 
 export function createWorker<T>(
   name: QueueName,
-  processor: (job: { data: T; attemptsMade: number }) => Promise<void>,
+  processor: (job: { data: T; attemptsMade: number; name: string }) => Promise<void>,
   concurrency = 10,
 ): Worker {
   return new Worker(name, async (job) => processor(job as never), {
