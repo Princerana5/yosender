@@ -19,11 +19,11 @@ export function getRedis(): IORedis {
 }
 
 export const QUEUES = {
-  submit: 'sms:submit',
-  vendorSend: 'sms:vendor-send',
-  dlr: 'sms:dlr',
-  billing: 'sms:billing',
-  clientDlr: 'sms:client-dlr',
+  submit: 'sms-submit',
+  vendorSend: 'sms-vendor-send',
+  dlr: 'sms-dlr',
+  billing: 'sms-billing',
+  clientDlr: 'sms-client-dlr',
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];

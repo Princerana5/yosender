@@ -13,7 +13,7 @@ CREATE TABLE roles (
 
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email CITEXT UNIQUE NOT NULL,
+  email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,             -- bcrypt (§32)
   full_name TEXT,
   role_id UUID REFERENCES roles(id),
@@ -22,10 +22,8 @@ CREATE TABLE users (
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
--- CITEXT may not exist; fallback:
-DO $$ BEGIN
-  CREATE EXTENSION IF NOT EXISTS citext;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+-- Case-insensitive email lookup (portable alternative to CITEXT):
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (lower(email));
 
 -- ── Countries / prefixes (§22) ──────────────────────────────────────────────
 CREATE TABLE countries (

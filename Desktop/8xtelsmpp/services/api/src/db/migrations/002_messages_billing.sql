@@ -31,7 +31,7 @@ CREATE INDEX idx_messages_status_time ON messages (status, created_at DESC);
 CREATE INDEX idx_messages_route ON messages (route_id, created_at DESC);
 
 CREATE TABLE message_events (               -- per-attempt trail (failover hops)
-  id BIGGENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   message_id UUID REFERENCES messages(id) ON DELETE CASCADE,
   vendor_id UUID REFERENCES vendors(id),
   event TEXT NOT NULL,                      -- routed|sent|failed|failover|dlr
@@ -65,7 +65,7 @@ CREATE TABLE wallets (
 );
 
 CREATE TABLE transactions (
-  id BIGGENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   client_id UUID REFERENCES clients(id),
   message_id UUID REFERENCES messages(id),
   type TEXT NOT NULL,                       -- debit|credit|refund|adjustment
@@ -103,7 +103,7 @@ CREATE TABLE channel_connectors (
 
 -- ── Logs (§27, §31) ─────────────────────────────────────────────────────────
 CREATE TABLE smpp_logs (
-  id BIGGENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   kind TEXT NOT NULL,                       -- bind|submit|deliver|enquire|error|auth|ip_reject
   client_id UUID REFERENCES clients(id),
   vendor_id UUID REFERENCES vendors(id),
@@ -119,7 +119,7 @@ CREATE INDEX idx_smpp_logs_time ON smpp_logs (created_at DESC);
 CREATE INDEX idx_smpp_logs_kind ON smpp_logs (kind, created_at DESC);
 
 CREATE TABLE audit_logs (                   -- §31
-  id BIGGENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   actor_id UUID,
   actor_email TEXT,
   action TEXT NOT NULL,                     -- created_vendor, changed_rate, ...
@@ -133,7 +133,7 @@ CREATE TABLE audit_logs (                   -- §31
 CREATE INDEX idx_audit_time ON audit_logs (created_at DESC);
 
 CREATE TABLE system_logs (
-  id BIGGENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   service TEXT NOT NULL,
   level TEXT NOT NULL,
   message TEXT NOT NULL,
