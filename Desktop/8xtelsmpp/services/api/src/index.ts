@@ -3,7 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerUi from 'swagger-ui-express';
-import YAML from 'yamljs';
+import { parse as parseYaml } from 'yaml';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { requireAuth } from './middleware.js';
@@ -30,7 +31,7 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', service: '8xtelSMPP-a
 
 // OpenAPI (§33)
 try {
-  const doc = YAML.load(join(dirname(fileURLToPath(import.meta.url)), 'openapi.yaml'));
+  const doc = parseYaml(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'openapi.yaml'), 'utf8'));
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(doc));
   app.get('/openapi.yaml', (_req, res) => res.sendFile(join(dirname(fileURLToPath(import.meta.url)), 'openapi.yaml')));
 } catch (e) {

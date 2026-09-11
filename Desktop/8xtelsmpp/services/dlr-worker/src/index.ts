@@ -15,7 +15,7 @@ interface IncomingDlr {
 
 const FINAL = new Set(['delivered', 'undelivered', 'expired', 'rejected', 'failed']);
 
-async function process(job: { data: IncomingDlr }): Promise<void> {
+async function handleJob(job: { data: IncomingDlr }): Promise<void> {
   const { vendor_id, body } = job.data;
   const pool = getPool();
   const { vendor_msg_id, stat } = parseDlrBody(body);
@@ -125,7 +125,7 @@ async function processClientDlr(job: { data: Record<string, unknown> }): Promise
 }
 
 async function main(): Promise<void> {
-  createWorker(QUEUES.dlr, process, 30);
+  createWorker(QUEUES.dlr, handleJob, 30);
   createWorker(QUEUES.clientDlr, processClientDlr, 20);
   console.log('[8xtelSMPP dlr-worker] started');
 }

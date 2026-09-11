@@ -5,7 +5,8 @@
   "description": "8xtelSMPP — Enterprise SMPP & Multi-Channel Messaging Gateway",
   "workspaces": [
     "packages/*",
-    "services/*"
+    "services/*",
+    "frontend"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

@@ -96,7 +96,8 @@ export class VendorConnector {
           this.cfg.bind_type === 'transmitter' ? 'bind_transmitter'
           : this.cfg.bind_type === 'receiver' ? 'bind_receiver'
           : 'bind_transceiver';
-        (session as AnySession)[bindMethod](bindParams, (pdu: { command_status: number }) => {
+        const bind = (session as unknown as Record<string, (p: unknown, cb: (resp: { command_status: number }) => void) => void>)[bindMethod];
+        bind(bindParams, (pdu: { command_status: number }) => {
           if (pdu.command_status === 0) {
             this.session = session as unknown as AnySession;
             this.reconnects = 0;
