@@ -85,14 +85,44 @@ router.post(
         ]);
       }
       await client.query('COMMIT');
+
+      // ── Handoff pack (§5): everything the client needs to connect ─────────
+      // - their credentials (shown ONCE — never stored plain, never logged)
+      // - the IPs we whitelisted for them
+      // - OUR gateway IP:port they must whitelist on their firewall
+      const smppHost = process.env.SMPP_PUBLIC_HOST ?? 'smpp.8xtelsmpp.com';
+      const smppPort = Number(process.env.SMPP_PORT ?? 2775);
+      const gatewayIp = process.env.SMPP_GATEWAY_IP ?? smppHost;
       res.status(201).json({
         client: created,
-        // Shown ONCE — never stored in plain text, never logged (§32)
         credentials: {
           system_id: b.system_id,
           password: plainPassword,
-          host: process.env.SMPP_PUBLIC_HOST ?? 'smpp.8xtelsmpp.com',
-          port: Number(process.env.SMPP_PORT ?? 2775),
+          password_mode: req.body?.password ? 'manual' : 'generated',
+          host: smppHost,
+          port: smppPort,
+          bind_types: ['transceiver', 'transmitter', 'receiver'],
+          enquire_link_sec: 30,
+        },
+        handoff: {
+          whitelisted_for_client: b.allowed_ips,
+          whitelist_note:
+            b.allowed_ips.length > 0
+              ? `We have whitelisted your IP(s): ${b.allowed_ips.join(', ')}. Binds from any other IP will be rejected.`
+              : 'No IP restriction set — binds are accepted from any IP. Add IPs later to lock this down.',
+          our_gateway: {
+            ip: gatewayIp,
+            port: smppPort,
+            note: `Please whitelist our gateway IP ${gatewayIp} on port ${smppPort} (TCP outbound) on your firewall so our DLRs and enquire_links reach you.`,
+          },
+          message:
+            `Your SMPP account is ready.\n` +
+            `Host: ${smppHost}\nPort: ${smppPort}\n` +
+            `Username (system_id): ${b.system_id}\nPassword: ${plainPassword}\n` +
+            (b.allowed_ips.length > 0
+              ? `We have whitelisted your IP(s): ${b.allowed_ips.join(', ')}.\n`
+              : `No IP restriction applied.\n`) +
+            `Please whitelist our IP ${gatewayIp}:${smppPort} on your firewall.`,
         },
       });
     } catch (e) {
@@ -106,7 +136,7 @@ router.post(
 );
 
 router.get('/:id', async (req, res) => {
-  const row = await queryOne('SELECT * FROM clients WHERE id=$1', [req.params.id]);
+  const row = await queryOne<Record<string, unknown>>('SELECT * FROM clients WHERE id=$1', [req.params.id]);
   if (!row) {
     res.status(404).json({ error: 'not found' });
     return;
@@ -117,7 +147,64 @@ router.get('/:id', async (req, res) => {
      LEFT JOIN countries c ON c.id=cr.country_id WHERE cr.client_id=$1 ORDER BY cr.prefix NULLS LAST`,
     [req.params.id],
   );
-  res.json({ client: row, ips, rates });
+  // ── Overview stats: traffic today / all-time, balance in / out ──────────
+  const [traffic] = await query<{
+    today: string; all_time: string; delivered: string; failed: string;
+  }>(
+    `SELECT COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today,
+            COUNT(*) AS all_time,
+            COUNT(*) FILTER (WHERE status='delivered') AS delivered,
+            COUNT(*) FILTER (WHERE status IN ('failed','undelivered','expired','rejected')) AS failed
+     FROM messages WHERE client_id=$1`,
+    [req.params.id],
+  );
+  const [funds] = await query<{ topped_up: string; spent: string }>(
+    `SELECT COALESCE(SUM(amount) FILTER (WHERE type IN ('credit','topup')),0) AS topped_up,
+            COALESCE(SUM(-amount) FILTER (WHERE type='debit'),0) AS spent
+     FROM transactions WHERE client_id=$1`,
+    [req.params.id],
+  );
+  const delivered = Number(traffic.delivered);
+  const decided = delivered + Number(traffic.failed);
+  const { password_hash: _omit, ...safe } = row;
+  void _omit;
+  res.json({
+    client: safe,
+    ips,
+    rates,
+    stats: {
+      traffic_today: Number(traffic.today),
+      traffic_all_time: Number(traffic.all_time),
+      delivered,
+      delivery_pct: decided ? +(delivered / decided * 100).toFixed(1) : 100,
+      balance: Number((safe as Record<string, unknown>).balance ?? 0),
+      currency: (safe as Record<string, unknown>).currency ?? 'USD',
+      total_topped_up: Number(funds.topped_up),
+      total_spent: Number(funds.spent),
+    },
+  });
+});
+
+// ── Re-issue credentials: rotate + return plain password ONCE ───────────────
+// Passwords are stored as bcrypt hashes and cannot be retrieved — "showing"
+// the password means generating a new one. Requires explicit confirm on UI.
+router.post('/:id/credentials', requirePerm('clients.update'), audit('reissued_client_password', 'client'), async (req, res) => {
+  const row = await queryOne<{ system_id: string }>('SELECT system_id FROM clients WHERE id=$1', [req.params.id]);
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  const plain = crypto.randomBytes(12).toString('base64url');
+  await query('UPDATE clients SET password_hash=$1, updated_at=now() WHERE id=$2', [
+    await hashPassword(plain),
+    req.params.id,
+  ]);
+  res.json({
+    system_id: row.system_id,
+    password: plain, // shown ONCE
+    host: process.env.SMPP_PUBLIC_HOST ?? 'smpp.8xtelsmpp.com',
+    port: Number(process.env.SMPP_PORT ?? 2775),
+  });
 });
 
 router.patch('/:id', requirePerm('clients.update'), audit('updated_client', 'client'), async (req, res) => {
