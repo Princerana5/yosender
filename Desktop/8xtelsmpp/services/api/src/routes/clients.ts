@@ -37,7 +37,7 @@ const createSchema = z.object({
   password: z.string().min(8).optional(), // auto-generated if omitted
   status: z.enum(['active', 'suspended', 'blocked', 'pending']).default('pending'),
   credit_limit: z.number().nonnegative().default(0),
-  currency: z.string().length(3).default('USD'),
+  currency: z.enum(['USD', 'EUR', 'INR']).default('USD'),
   tps_limit: z.number().int().positive().default(10),
   daily_limit: z.number().int().positive().nullable().optional(),
   monthly_limit: z.number().int().positive().nullable().optional(),

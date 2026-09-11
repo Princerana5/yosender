@@ -6,12 +6,90 @@ import { requirePerm, audit } from '../middleware.js';
 const router = Router();
 router.use(requirePerm('billing.read'));
 
+export const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'INR'] as const;
+
+async function fxRate(code: string): Promise<number> {
+  const row = await query<{ rate_to_usd: string }>('SELECT rate_to_usd FROM fx_rates WHERE code=$1', [code]);
+  if (!row.length) throw new Error(`unsupported currency ${code}`);
+  return Number(row[0].rate_to_usd);
+}
+
+// ── Currencies + FX ──────────────────────────────────────────────────────────
+router.get('/currencies', async (_req, res) => {
+  res.json({ currencies: await query('SELECT * FROM fx_rates ORDER BY code') });
+});
+
+router.patch('/currencies/:code', requirePerm('billing.manage'), audit('updated_fx_rate', 'fx_rate'), async (req, res) => {
+  const code = req.params.code.toUpperCase();
+  if (!SUPPORTED_CURRENCIES.includes(code as (typeof SUPPORTED_CURRENCIES)[number])) {
+    res.status(400).json({ error: 'currency must be USD, EUR or INR' });
+    return;
+  }
+  const rate = Number(req.body?.rate_to_usd);
+  if (!rate || rate <= 0) {
+    res.status(400).json({ error: 'rate_to_usd must be positive' });
+    return;
+  }
+  const rows = await query('UPDATE fx_rates SET rate_to_usd=$1, updated_at=now() WHERE code=$2 RETURNING *', [rate, code]);
+  res.json({ currency: rows[0] });
+});
+
 router.get('/wallets', async (_req, res) => {
   const rows = await query(
     `SELECT w.*, c.name AS client_name, c.system_id FROM wallets w
      JOIN clients c ON c.id=w.client_id ORDER BY c.name`,
   );
   res.json({ wallets: rows });
+});
+
+// ── Change wallet currency (converts balance + credit at current FX) ─────────
+router.post('/wallets/:clientId/currency', requirePerm('billing.manage'), audit('changed_wallet_currency', 'wallet'), async (req, res) => {
+  const to = String(req.body?.currency ?? '').toUpperCase();
+  if (!SUPPORTED_CURRENCIES.includes(to as (typeof SUPPORTED_CURRENCIES)[number])) {
+    res.status(400).json({ error: 'currency must be USD, EUR or INR' });
+    return;
+  }
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const cur = await db.query('SELECT balance, credit_limit, currency FROM wallets WHERE client_id=$1', [req.params.clientId]);
+    if (!cur.rowCount) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'wallet not found' });
+      return;
+    }
+    const from = cur.rows[0].currency as string;
+    if (from === to) {
+      await db.query('ROLLBACK');
+      res.json({ wallet: cur.rows[0], converted: false });
+      return;
+    }
+    const fromRate = await fxRate(from);
+    const toRate = await fxRate(to);
+    // native → USD → target
+    const convert = (n: number): number => +(Number(n) * fromRate / toRate).toFixed(6);
+    const newBalance = convert(Number(cur.rows[0].balance));
+    const newCredit = convert(Number(cur.rows[0].credit_limit));
+    await db.query('UPDATE wallets SET balance=$1, credit_limit=$2, currency=$3, updated_at=now() WHERE client_id=$4', [
+      newBalance, newCredit, to, req.params.clientId,
+    ]);
+    await db.query('UPDATE clients SET balance=$1, credit_limit=$2, currency=$3 WHERE id=$4', [
+      newBalance, newCredit, to, req.params.clientId,
+    ]);
+    await db.query(
+      `INSERT INTO transactions (client_id, type, amount, balance_after, description, currency, created_by)
+       VALUES ($1,'adjustment',0,$2,$3,$4,$5)`,
+      [req.params.clientId, newBalance, `Currency change ${from} → ${to} @ FX`, to, (req.user as { id: string }).id],
+    );
+    await db.query('COMMIT');
+    res.json({ wallet: { balance: newBalance, credit_limit: newCredit, currency: to }, converted: true, from, to });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: 'currency change failed' });
+  } finally {
+    db.release();
+  }
 });
 
 // Top-up / adjustment (§28) — immutable ledger entry
