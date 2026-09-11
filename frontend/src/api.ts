@@ -26,8 +26,13 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const fmtMoney = (n: number | string | null | undefined): string =>
-  `$${Number(n ?? 0).toFixed(4)}`;
+export const CUR_SYM: Record<string, string> = { USD: '$', EUR: '€', INR: '₹' };
+
+export const fmtMoney = (
+  n: number | string | null | undefined,
+  currency = 'USD',
+  decimals = 2,
+): string => `${CUR_SYM[currency] ?? '$'}${Number(n ?? 0).toFixed(decimals)}`;
 
 export const statusColor = (s: string): string => {
   switch (s) {
