@@ -8,6 +8,7 @@ COPY packages/core/package.json ./packages/core/
 COPY services/api/package.json ./services/api/
 # Install with workspaces so @8xtel/core resolves; dev deps needed for tsc.
 RUN npm install --workspace=@8xtel/core --workspace=@8xtel/api --include-workspace-root=false
+COPY tsconfig.base.json ./
 COPY packages/core ./packages/core
 COPY services/api ./services/api
 RUN npm run build --workspace=@8xtel/core && npm run build --workspace=@8xtel/api
