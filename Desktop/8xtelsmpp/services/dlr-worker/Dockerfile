@@ -6,6 +6,7 @@ COPY package.json package-lock.json* ./
 COPY packages/core/package.json ./packages/core/
 COPY services/dlr-worker/package.json ./services/dlr-worker/
 RUN npm install --workspace=@8xtel/core --workspace=@8xtel/dlr-worker --include-workspace-root=false
+COPY tsconfig.base.json ./
 COPY packages/core ./packages/core
 COPY services/dlr-worker ./services/dlr-worker
 RUN npm run build --workspace=@8xtel/core && npm run build --workspace=@8xtel/dlr-worker
