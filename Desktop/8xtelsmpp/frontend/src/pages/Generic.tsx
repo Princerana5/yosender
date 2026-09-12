@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
-import { api, statusColor, fmtMoney } from '../api';
+import { api } from '../api';
+import { PageHeader, DataTable, StatusBadge, StatCard, Bars, Icon, Money } from '../components';
 
-// Generic JSON-table page for: traffic, dlr, connections, policies, rates,
-// reports, senders, countries, connectors, audit, users.
-export function TablePage({ title, endpoint, columns, refreshMs }: {
+// Generic JSON-table page for: policies, rates, senders, countries,
+// connectors, audit, users.
+export function TablePage({ title, sub, endpoint, columns, refreshMs }: {
   title: string;
+  sub?: string;
   endpoint: string;
-  columns: Array<{ key: string; label: string; render?: (row: Record<string, unknown>) => string }>;
+  columns: Array<{ key: string; label: string; render?: (row: Record<string, unknown>) => React.ReactNode; mono?: boolean; right?: boolean }>;
   refreshMs?: number;
 }): JSX.Element {
   const [rows, setRows] = useState<Record<string, unknown>[]>([]);
@@ -24,99 +26,252 @@ export function TablePage({ title, endpoint, columns, refreshMs }: {
   }, [endpoint]);
 
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold">{title}</h1>
-      <div className="card p-0 overflow-x-auto">
-        <table className="tbl w-full">
-          <thead><tr>{columns.map((c) => <th key={c.key}>{c.label}</th>)}</tr></thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                {columns.map((c) => (
-                  <td key={c.key} className="text-xs">
-                    {c.render ? c.render(r) : String(r[c.key] ?? '—')}
-                  </td>
-                ))}
-              </tr>
+    <div className="space-y-5">
+      <PageHeader title={title} sub={sub ?? `${rows.length} records`} />
+      <DataTable keyOf={(_, i) => String(i)} rows={rows} columns={columns} />
+    </div>
+  );
+}
+
+// Sender IDs page = TablePage + client request queue (approve/reject)
+interface SenderReq {
+  id: string; client_id: string; client_name: string; sender: string;
+  country_name: string | null; status: string; created_at: string;
+}
+
+export function SendersPage({ title, sub, endpoint, columns }: {
+  title: string;
+  sub?: string;
+  endpoint: string;
+  columns: Array<{ key: string; label: string; render?: (row: Record<string, unknown>) => React.ReactNode; mono?: boolean; right?: boolean }>;
+}): JSX.Element {
+  const [reqs, setReqs] = useState<SenderReq[]>([]);
+  const [showAll, setShowAll] = useState(false);
+  const [busy, setBusy] = useState('');
+
+  const loadReqs = (): void => {
+    api<{ requests: SenderReq[] }>(`/system/sender-requests${showAll ? '' : '?status=pending'}`)
+      .then((r) => setReqs(r.requests))
+      .catch(() => undefined);
+  };
+  useEffect(loadReqs, [showAll]);
+
+  async function decide(r: SenderReq, action: 'approve' | 'reject'): Promise<void> {
+    setBusy(`${r.id}:${action}`);
+    try {
+      await api(`/system/sender-requests/${r.id}/review`, { method: 'POST', body: JSON.stringify({ action }) });
+      loadReqs();
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const pending = reqs.filter((r) => r.status === 'pending');
+  return (
+    <div className="space-y-5">
+      <TablePage title={title} sub={sub} endpoint={endpoint} columns={columns} />
+      <div className="card card-pad">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="card-title">
+              Sender requests
+              {!!pending.length && (
+                <span className="ml-2 badge bg-warn/15 text-amber-300 border border-warn/25">{pending.length} pending</span>
+              )}
+            </div>
+            <div className="card-sub">Client asks → approve (activates sender) or reject</div>
+          </div>
+          <button className="btn-ghost !py-1.5 !text-xs" onClick={() => setShowAll((s) => !s)}>
+            {showAll ? 'Pending only' : 'Show all'}
+          </button>
+        </div>
+        {!reqs.length ? (
+          <div className="text-sm text-muted py-4 text-center">No {showAll ? '' : 'pending '}requests.</div>
+        ) : (
+          <div className="mt-3 space-y-1.5">
+            {reqs.slice(0, showAll ? 20 : 10).map((r) => (
+              <div key={r.id} className="flex items-center gap-2.5 text-sm bg-ink/50 border border-line/60 rounded-lg px-3 py-2">
+                <span className="font-semibold">{r.client_name}</span>
+                <span className="font-mono">{r.sender}</span>
+                {r.country_name && <span className="text-xs text-muted">{r.country_name}</span>}
+                <StatusBadge status={r.status === 'approved' ? 'delivered' : r.status === 'rejected' ? 'failed' : 'submitted'} />
+                <span className="text-[11px] text-muted ml-auto">{new Date(r.created_at).toLocaleString()}</span>
+                {r.status === 'pending' && (
+                  <span className="flex gap-1 shrink-0">
+                    <button className="btn !py-1 !px-2.5 !text-xs" disabled={!!busy}
+                      onClick={() => decide(r, 'approve')}>
+                      {busy === `${r.id}:approve` ? '…' : 'Approve'}
+                    </button>
+                    <button className="btn-ghost !py-1 !px-2.5 !text-xs hover:!border-danger/50 hover:!text-red-300"
+                      disabled={!!busy} onClick={() => decide(r, 'reject')}>
+                      {busy === `${r.id}:reject` ? '…' : 'Reject'}
+                    </button>
+                  </span>
+                )}
+              </div>
             ))}
-          </tbody>
-        </table>
-        {!rows.length && <div className="p-4 text-sm text-gray-500">No data.</div>}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-const badge = (v: unknown): string => `<span>${String(v)}</span>`;
-
 export function Connections(): JSX.Element {
   const [rows, setRows] = useState<Array<Record<string, string>>>([]);
+  const [acting, setActing] = useState('');
+  const load = (): void => {
+    api<{ connections: Array<Record<string, string>> }>('/system/health/smpp')
+      .then((r) => setRows(r.connections))
+      .catch(() => undefined);
+  };
   useEffect(() => {
-    api<{ connections: Array<Record<string, string>> }>('/system/health/smpp').then((r) => setRows(r.connections)).catch(() => undefined);
+    load();
+    const t = setInterval(load, 10_000);
+    return () => clearInterval(t);
   }, []);
+
   async function act(id: string, action: string): Promise<void> {
-    await api(`/system/connections/${id}/${action}`, { method: 'POST' });
+    setActing(`${id}:${action}`);
+    try {
+      await api(`/system/connections/${id}/${action}`, { method: 'POST' });
+      setTimeout(load, 1500);
+    } finally {
+      setActing('');
+    }
   }
+
+  const connected = rows.filter((r) => r.status === 'connected').length;
+
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold">SMPP connections</h1>
-      <div className="card p-0 overflow-x-auto">
-        <table className="tbl w-full">
-          <thead><tr><th>Vendor</th><th>Status</th><th>Sent</th><th>Recv</th><th>DLRs</th><th>Last error</th><th>Actions</th></tr></thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <tr key={i}>
-                <td>{r.vendor_name}</td>
-                <td><span className={`badge ${statusColor(r.status)}`}>{r.status}</span></td>
-                <td>{r.messages_sent}</td>
-                <td>{r.messages_received}</td>
-                <td>{r.dlr_count}</td>
-                <td className="text-red-400">{r.last_error ?? '—'}</td>
-                <td className="space-x-1">
-                  {['connect', 'disconnect', 'reconnect'].map((a) => (
-                    <button key={a} className="btn-ghost !px-2 !py-0.5" onClick={() => act(r.id, a)}>{a}</button>
-                  ))}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <div className="space-y-5">
+      <PageHeader
+        title="SMPP connections"
+        sub={`${connected}/${rows.length} binds up · control propagates to vendor workers via Redis`}
+        actions={<button className="btn-ghost" onClick={load}><Icon name="refresh" size={14} /> Refresh</button>}
+      />
+      <DataTable
+        keyOf={(r, i) => r.id ?? String(i)}
+        rows={rows}
+        empty="No vendor connections configured yet."
+        columns={[
+          { key: 'vendor_name', label: 'Vendor', render: (r) => <span className="font-semibold">{r.vendor_name}</span> },
+          { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
+          { key: 'messages_sent', label: 'Sent', right: true, render: (r) => <span className="tabular-nums">{Number(r.messages_sent).toLocaleString()}</span> },
+          { key: 'messages_received', label: 'Recv', right: true, render: (r) => <span className="tabular-nums">{Number(r.messages_received).toLocaleString()}</span> },
+          { key: 'dlr_count', label: 'DLRs', right: true, render: (r) => <span className="tabular-nums">{Number(r.dlr_count).toLocaleString()}</span> },
+          {
+            key: 'last_error', label: 'Last error',
+            render: (r) => r.last_error
+              ? <span className="text-xs text-red-300 font-mono truncate block max-w-[240px]" title={r.last_error}>{r.last_error}</span>
+              : <span className="text-muted">—</span>,
+          },
+          {
+            key: 'actions', label: 'Actions',
+            render: (r) => (
+              <span className="flex gap-1">
+                {['connect', 'reconnect', 'disconnect'].map((a) => (
+                  <button key={a} disabled={!!acting}
+                    className={`text-[11px] font-semibold px-2 py-1 rounded-md border transition ${a === 'disconnect'
+                      ? 'border-danger/30 text-red-300/80 hover:bg-danger/10'
+                      : 'border-line text-muted hover:text-white hover:border-brand/40'}`}
+                    onClick={() => act(r.id, a)}>
+                    {acting === `${r.id}:${a}` ? '…' : a}
+                  </button>
+                ))}
+              </span>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
 
 export function Reports(): JSX.Element {
   const [fin, setFin] = useState<Array<Record<string, string>>>([]);
-  const [del, setDel] = useState<{ by_country: Array<Record<string, string>>; by_vendor: Array<Record<string, string>> }>({ by_country: [], by_vendor: [] });
+  const [del, setDel] = useState<{ by_country: Array<Record<string, string>>; by_vendor: Array<Record<string, string>> }>({
+    by_country: [], by_vendor: [],
+  });
   useEffect(() => {
     api<{ financial: [] }>('/reports/financial').then((r) => setFin(r.financial)).catch(() => undefined);
     api<typeof del>('/reports/delivery').then(setDel).catch(() => undefined);
   }, []);
+
+  const totRev = fin.reduce((s, r) => s + Number(r.revenue ?? 0), 0);
+  const totCost = fin.reduce((s, r) => s + Number(r.cost ?? 0), 0);
+
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold">Reports</h1>
-      <div className="card">
-        <div className="font-medium mb-2">Daily revenue / cost / profit</div>
-        <table className="tbl w-full">
-          <thead><tr><th>Day</th><th>Revenue</th><th>Cost</th><th>Profit</th></tr></thead>
-          <tbody>{fin.map((r, i) => (
-            <tr key={i}><td>{String(r.day).slice(0, 10)}</td><td>{fmtMoney(r.revenue)}</td><td>{fmtMoney(r.cost)}</td><td className="text-brand">{fmtMoney(r.profit)}</td></tr>
-          ))}</tbody>
-        </table>
+    <div className="space-y-5">
+      <PageHeader title="Reports" sub="Revenue, cost and delivery · last 30 days" />
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <StatCard label="Revenue · 30d" value={`$${totRev.toFixed(2)}`} tone="brand" />
+        <StatCard label="Cost · 30d" value={`$${totCost.toFixed(2)}`} />
+        <StatCard label="Profit · 30d" value={`$${(totRev - totCost).toFixed(2)}`} tone="brand" />
+      </div>
+      <div className="card card-pad">
+        <div className="card-title">Daily P&L</div>
+        <div className="card-sub">Revenue vs cost per day</div>
+        <div className="mt-4">
+          <Bars
+            data={fin.map((r) => ({
+              label: String(r.day).slice(5, 10),
+              total: Math.round(Number(r.revenue ?? 0) * 100) / 100,
+              ok: Math.round(Number(r.profit ?? 0) * 100) / 100,
+            }))}
+          />
+        </div>
+        <div className="mt-4">
+          <DataTable
+            keyOf={(_, i) => String(i)}
+            rows={fin}
+            columns={[
+              { key: 'day', label: 'Day', mono: true, render: (r) => String(r.day).slice(0, 10) },
+              { key: 'revenue', label: 'Revenue', right: true, render: (r) => <Money value={r.revenue} /> },
+              { key: 'cost', label: 'Cost', right: true, render: (r) => <Money value={r.cost} /> },
+              { key: 'profit', label: 'Profit', right: true, render: (r) => <span className="text-emerald-300 font-semibold"><Money value={r.profit} /></span> },
+            ]}
+          />
+        </div>
       </div>
       <div className="grid md:grid-cols-2 gap-3">
-        <div className="card">
-          <div className="font-medium mb-2">Delivery by country (7d)</div>
-          {del.by_country.map((r, i) => (
-            <div key={i} className="text-sm flex justify-between"><span>{String(r.country ?? r.iso_code)}</span><span>{r.delivered}/{r.total}</span></div>
-          ))}
+        <div className="card card-pad">
+          <div className="card-title">Delivery by country</div>
+          <div className="card-sub">Last 7 days</div>
+          <div className="mt-3 space-y-2.5">
+            {del.by_country.map((r, i) => {
+              const pct = Number(r.total) ? (Number(r.delivered) / Number(r.total)) * 100 : 100;
+              return (
+                <div key={i}>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="font-medium">{String(r.country ?? r.iso_code ?? '—')}</span>
+                    <span className="text-muted tabular-nums">{r.delivered}/{r.total} · {pct.toFixed(0)}%</span>
+                  </div>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%` }} /></div>
+                </div>
+              );
+            })}
+            {!del.by_country.length && <div className="text-sm text-muted">No traffic yet.</div>}
+          </div>
         </div>
-        <div className="card">
-          <div className="font-medium mb-2">Delivery by vendor (7d)</div>
-          {del.by_vendor.map((r, i) => (
-            <div key={i} className="text-sm flex justify-between"><span>{String(r.vendor)}</span><span>{r.delivered}/{r.total}</span></div>
-          ))}
+        <div className="card card-pad">
+          <div className="card-title">Delivery by vendor</div>
+          <div className="card-sub">Last 7 days</div>
+          <div className="mt-3 space-y-2.5">
+            {del.by_vendor.map((r, i) => {
+              const pct = Number(r.total) ? (Number(r.delivered) / Number(r.total)) * 100 : 100;
+              return (
+                <div key={i}>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="font-medium">{String(r.vendor ?? '—')}</span>
+                    <span className="text-muted tabular-nums">{r.delivered}/{r.total} · {pct.toFixed(0)}%</span>
+                  </div>
+                  <div className="bar-track"><div className="bar-fill" style={{ width: `${pct}%` }} /></div>
+                </div>
+              );
+            })}
+            {!del.by_vendor.length && <div className="text-sm text-muted">No traffic yet.</div>}
+          </div>
         </div>
       </div>
     </div>
@@ -127,23 +282,49 @@ export function Traffic(): JSX.Element {
   const [d, setD] = useState<Record<string, string>>({});
   useEffect(() => {
     const load = (): void => {
-      api<{ realtime: Record<string, string> }>('/reports/dashboard').then((r) => setD(r.realtime ?? {})).catch(() => undefined);
+      api<{ realtime: Record<string, string> }>('/reports/dashboard')
+        .then((r) => setD(r.realtime ?? {}))
+        .catch(() => undefined);
     };
     load();
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
   }, []);
+
+  const entries = Object.entries(d);
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold">Live traffic</h1>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {Object.entries(d).map(([k, v]) => (
-          <div key={k} className="card"><div className="text-xs text-gray-400">{k}</div><div className="text-2xl font-bold text-brand">{v}</div></div>
-        ))}
-        {!Object.keys(d).length && <div className="text-gray-500">Waiting for traffic…</div>}
-      </div>
+    <div className="space-y-5">
+      <PageHeader
+        title="Live traffic"
+        sub="Redis real-time counters · 2s refresh"
+        actions={
+          <span className="flex items-center gap-2 text-xs text-muted border border-line rounded-lg px-3 py-1.5 bg-panel">
+            <span className="relative flex w-2 h-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              <span className="relative inline-flex rounded-full w-2 h-2 bg-emerald-400" />
+            </span>
+            LIVE
+          </span>
+        }
+      />
+      {entries.length ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {entries.map(([k, v]) => (
+            <div key={k} className="stat-card">
+              <div className="stat-label">{k.replace(/_/g, ' ')}</div>
+              <div className="stat-value text-emerald-300 tabular-nums">{v}</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="card card-pad text-center py-16">
+          <div className="mx-auto w-11 h-11 rounded-xl bg-panel2 border border-line flex items-center justify-center text-muted mb-3">
+            <Icon name="pulse" size={20} />
+          </div>
+          <div className="font-semibold">Waiting for traffic…</div>
+          <div className="text-sm text-muted mt-1">Counters appear here as soon as messages flow through the gateway.</div>
+        </div>
+      )}
     </div>
   );
 }
-
-void badge;

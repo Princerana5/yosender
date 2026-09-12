@@ -158,6 +158,8 @@ export default function Billing(): JSX.Element {
     <div className="space-y-5">
       <PageHeader title="Wallets & ledger" sub="Prepay / postpay · top-up & deduct with remarks · USD / EUR / INR" />
 
+      <TopupQueue onDone={load} />
+
       <div className="card card-pad">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -238,7 +240,9 @@ export default function Billing(): JSX.Element {
       </div>
 
       <div>
-        <div className="card-title mb-2 px-1">Ledger</div>
+        <div className="card-title mb-2 px-1">
+          Ledger <span className="text-muted font-normal">· top-ups, deducts & adjustments only — per-SMS charges live in message reports</span>
+        </div>
         <DataTable
           keyOf={(t) => String(t.id)}
           rows={txs}
@@ -374,6 +378,105 @@ export default function Billing(): JSX.Element {
                 {busy ? 'Converting…' : `Convert to ${newCur}`}
               </button>
               <button className="btn-ghost" onClick={() => setChanging(null)}>Cancel</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ── Client top-up request queue (approve = real topup) ───────────────────────
+interface TopupReq {
+  id: string; client_id: string; client_name: string; amount: string;
+  note: string | null; status: string; created_at: string;
+}
+
+function TopupQueue({ onDone }: { onDone: () => void }): JSX.Element {
+  const [reqs, setReqs] = useState<TopupReq[]>([]);
+  const [showAll, setShowAll] = useState(false);
+  const [review, setReview] = useState<TopupReq | null>(null);
+  const [remark, setRemark] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = (): void => {
+    api<{ requests: TopupReq[] }>(`/billing/topup-requests${showAll ? '' : '?status=pending'}`)
+      .then((r) => setReqs(r.requests))
+      .catch(() => undefined);
+  };
+  useEffect(load, [showAll]);
+
+  async function decide(action: 'approve' | 'reject'): Promise<void> {
+    if (!review || remark.trim().length < 3) return;
+    setBusy(true);
+    try {
+      await api(`/billing/topup-requests/${review.id}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ action, remark: remark.trim() }),
+      });
+      setReview(null);
+      setRemark('');
+      load();
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const pending = reqs.filter((r) => r.status === 'pending');
+  return (
+    <div className="card card-pad">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <div className="card-title">
+            Top-up requests
+            {!!pending.length && (
+              <span className="ml-2 badge bg-warn/15 text-amber-300 border border-warn/25">{pending.length} pending</span>
+            )}
+          </div>
+          <div className="card-sub">Client asks → you approve (credits wallet) or reject</div>
+        </div>
+        <button className="btn-ghost !py-1.5 !text-xs" onClick={() => setShowAll((s) => !s)}>
+          {showAll ? 'Pending only' : 'Show all'}
+        </button>
+      </div>
+      {!reqs.length ? (
+        <div className="text-sm text-muted py-4 text-center">No {showAll ? '' : 'pending '}requests.</div>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          {reqs.slice(0, showAll ? 20 : 10).map((r) => (
+            <div key={r.id} className="flex items-center gap-2.5 text-sm bg-ink/50 border border-line/60 rounded-lg px-3 py-2">
+              <span className="font-semibold">{r.client_name}</span>
+              <span className="font-mono">+{Number(r.amount).toFixed(2)}</span>
+              {r.note && <span className="text-xs text-muted truncate max-w-[220px]" title={r.note}>{r.note}</span>}
+              <StatusBadge status={r.status === 'approved' ? 'delivered' : r.status === 'rejected' ? 'failed' : 'submitted'} />
+              <span className="text-[11px] text-muted ml-auto">{new Date(r.created_at).toLocaleString()}</span>
+              {r.status === 'pending' && (
+                <button className="btn !py-1 !px-2.5 !text-xs shrink-0" onClick={() => { setReview(r); setRemark(''); }}>
+                  Review
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {review && (
+        <Modal title={`${review.client_name} · +${Number(review.amount).toFixed(2)}`} onClose={() => setReview(null)}>
+          <div className="space-y-3">
+            {review.note && <p className="text-xs text-muted">Client note: {review.note}</p>}
+            <div>
+              <label className="label">Remark * <span className="text-gray-600">(required — goes in the ledger)</span></label>
+              <input className="input" placeholder="e.g. Bank transfer ref HDFC-88231"
+                value={remark} onChange={(e) => setRemark(e.target.value)} />
+            </div>
+            <div className="flex gap-2">
+              <button className="btn flex-1" disabled={busy || remark.trim().length < 3} onClick={() => decide('approve')}>
+                {busy ? '…' : 'Approve & credit'}
+              </button>
+              <button className="btn-ghost flex-1 !border-danger/30 hover:!border-danger/60 hover:!text-red-300"
+                disabled={busy || remark.trim().length < 3} onClick={() => decide('reject')}>
+                Reject
+              </button>
             </div>
           </div>
         </Modal>

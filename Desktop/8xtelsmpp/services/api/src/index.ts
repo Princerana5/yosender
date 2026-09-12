@@ -50,6 +50,9 @@ app.use('/system', requireAuth, systemRoutes);
 // Channel connectors (§23)
 app.use('/connectors', requireAuth, (await import('./routes/connectors.js')).default);
 
+// Client self-service portal (§4) — own router, portal tokens only inside
+app.use('/portal', (await import('./routes/portal.js')).default);
+
 // 404 + error
 app.use((_req, res) => res.status(404).json({ error: 'not found' }));
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

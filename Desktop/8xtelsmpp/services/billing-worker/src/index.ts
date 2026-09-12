@@ -35,25 +35,48 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    // Debit client wallet (balance may go negative up to credit_limit — checked at bind/submit)
-    const { rows } = await db.query(
-      'UPDATE wallets SET balance = balance - $1, updated_at=now() WHERE client_id=$2 RETURNING balance',
-      [price, client_id],
-    );
-    const balanceAfter = rows[0]?.balance ?? 0;
-    await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [balanceAfter, client_id]);
-    await db.query(
-      `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description)
-       VALUES ($1,$2,'debit',$3,$4,$5)`,
-      [client_id, internal_id, -price, balanceAfter, `SMS ${internal_id.slice(0, 8)}`],
-    );
+    // Settle the submit-time hold: funds were already reserved at routing.
+    // If the hold covers the price, just convert it (no new debit). If the
+    // price differs (e.g. no hold was taken), debit/credit the difference.
+    const holdRow = await db.query('SELECT reserved_amount FROM messages WHERE id=$1 FOR UPDATE', [internal_id]);
+    const held = Number(holdRow.rows[0]?.reserved_amount ?? 0);
+    const diff = +(price - held).toFixed(6);
+    let balanceAfter: number;
+    if (diff === 0) {
+      const cur = await db.query('SELECT balance FROM wallets WHERE client_id=$1', [client_id]);
+      balanceAfter = Number(cur.rows[0]?.balance ?? 0);
+    } else if (diff > 0) {
+      const { rows } = await db.query(
+        'UPDATE wallets SET balance = balance - $1, updated_at=now() WHERE client_id=$2 RETURNING balance',
+        [diff, client_id],
+      );
+      balanceAfter = Number(rows[0]?.balance ?? 0);
+      await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [balanceAfter, client_id]);
+      await db.query(
+        `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description)
+         VALUES ($1,$2,'debit',$3,$4,$5)`,
+        [client_id, internal_id, -diff, balanceAfter, `SMS top-up charge ${internal_id.slice(0, 8)} (price ${price} > hold ${held})`],
+      );
+    } else {
+      const { rows } = await db.query(
+        'UPDATE wallets SET balance = balance + $1, updated_at=now() WHERE client_id=$2 RETURNING balance',
+        [-diff, client_id],
+      );
+      balanceAfter = Number(rows[0]?.balance ?? 0);
+      await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [balanceAfter, client_id]);
+      await db.query(
+        `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description)
+         VALUES ($1,$2,'refund',$3,$4,$5)`,
+        [client_id, internal_id, -diff, balanceAfter, `SMS over-hold release ${internal_id.slice(0, 8)} (price ${price} < hold ${held})`],
+      );
+    }
     await db.query(
       `INSERT INTO billing_records (message_id, client_id, vendor_id, client_price, vendor_cost)
        VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
       [internal_id, client_id, vendor_id, price, vendorCost],
     );
     await db.query(
-      'UPDATE messages SET vendor_cost=$1 WHERE id=$2', [vendorCost, internal_id],
+      'UPDATE messages SET vendor_cost=$1, reserved_amount=0 WHERE id=$2', [vendorCost, internal_id],
     );
     await db.query('COMMIT');
     await incrStat('revenue_x1000', Math.round(price * 1000));

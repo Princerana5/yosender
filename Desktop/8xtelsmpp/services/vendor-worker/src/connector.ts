@@ -21,6 +21,8 @@ interface VendorConfig {
 type AnySession = {
   on(e: string, fn: (...a: never[]) => void): void;
   submit_sm(p: unknown, cb: (pdu: { message_id?: string; command_status: number }) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  send(pdu: any): void;
   close(): void;
   [k: string]: unknown;
 };
@@ -41,6 +43,10 @@ export class VendorConnector {
   private reconnects = 0;
   private stopped = false;
   private enquireTimer: NodeJS.Timeout | null = null;
+  /** Guard: one dial at a time + never dial while a live session exists.
+      Without this, overlapping fail() timers open a socket per retry and
+      leak them (ENOBUFS outage under sustained vendor downtime). */
+  private dialing = false;
 
   constructor(private cfg: VendorConfig, private connIndex = 0) {}
 
@@ -59,6 +65,7 @@ export class VendorConnector {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.dialing = false;
     if (this.enquireTimer) clearInterval(this.enquireTimer);
     this.session?.close();
     this.session = null;
@@ -83,8 +90,14 @@ export class VendorConnector {
   }
 
   private async connect(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.dialing || this.session) return;
+    this.dialing = true;
     await this.setStatus('connecting');
+    let settled = false;
+    const done = (): void => {
+      settled = true;
+      this.dialing = false;
+    };
     const session = smpp.connect(
       { url: `smpp://${this.cfg.host}:${this.cfg.port}`, auto_enquire_link_period: 30000 },
       () => {
@@ -96,27 +109,44 @@ export class VendorConnector {
           this.cfg.bind_type === 'transmitter' ? 'bind_transmitter'
           : this.cfg.bind_type === 'receiver' ? 'bind_receiver'
           : 'bind_transceiver';
-        const bind = (session as unknown as Record<string, (p: unknown, cb: (resp: { command_status: number }) => void) => void>)[bindMethod];
-        bind(bindParams, (pdu: { command_status: number }) => {
-          if (pdu.command_status === 0) {
-            this.session = session as unknown as AnySession;
-            this.reconnects = 0;
-            void this.setStatus('connected', { connected_since: new Date().toISOString(), last_error: null });
-            console.log(`[vendor] ${this.cfg.name} connected`);
-            this.attachDeliverHandler(session as unknown as AnySession);
-          } else {
-            void this.fail(`bind failed status=${pdu.command_status}`);
-          }
-        });
+        // Call as session method to preserve `this` (smpp shortcut uses this.send)
+        (session as unknown as Record<string, (p: unknown, cb: (resp: { command_status: number }) => void) => void>)[bindMethod].call(
+          session,
+          bindParams,
+          (pdu: { command_status: number }) => {
+            done();
+            if (pdu.command_status === 0) {
+              this.session = session as unknown as AnySession;
+              this.reconnects = 0;
+              void this.setStatus('connected', { connected_since: new Date().toISOString(), last_error: null });
+              console.log(`[vendor] ${this.cfg.name} connected`);
+              this.attachDeliverHandler(session as unknown as AnySession);
+            } else {
+              try { session.close(); } catch { /* already dead */ }
+              void this.fail(`bind failed status=${pdu.command_status}`);
+            }
+          },
+        );
       },
     ) as unknown as AnySession;
 
     session.on('close', () => {
-      this.session = null;
+      if (this.session === (session as unknown as AnySession)) this.session = null;
+      else {
+        // Stale dial that never bound — just release the guard, no fail() storm.
+        if (!settled) done();
+        return;
+      }
       if (!this.stopped) void this.fail('connection closed');
     });
     session.on('error', (e: unknown) => {
-      if (!this.stopped) void this.fail(`error: ${(e as Error).message}`);
+      if (this.session === (session as unknown as AnySession)) {
+        if (!this.stopped) void this.fail(`error: ${(e as Error).message}`);
+      } else if (!settled) {
+        done();
+        try { session.close(); } catch { /* already dead */ }
+        if (!this.stopped) void this.fail(`error: ${(e as Error).message}`);
+      }
     });
   }
 
@@ -128,8 +158,15 @@ export class VendorConnector {
           short_message?: { message?: string } | string;
           data_coding?: number;
           source_addr?: string;
-          respond: (s: number) => void;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          response: (params?: Record<string, any>) => any;
         };
+        // ACK first so the vendor never retries
+        try {
+          session.send(p.response({ command_status: 0 }));
+        } catch (e) {
+          console.error('[vendor] deliver_sm ack failed', (e as Error).message);
+        }
         const body = typeof p.short_message === 'string' ? p.short_message : String(p.short_message?.message ?? '');
         const { getQueue, QUEUES } = await import('@8xtel/core');
         await getQueue(QUEUES.dlr).add('dlr', {
@@ -142,8 +179,7 @@ export class VendorConnector {
           'UPDATE vendor_connections SET messages_received = messages_received + 1 WHERE vendor_id=$1 AND conn_index=$2',
           [this.cfg.id, this.connIndex],
         );
-        p.respond(0);
-      })();
+      })().catch((e) => console.error('[vendor] deliver_sm handler failed', (e as Error).message));
     });
   }
 

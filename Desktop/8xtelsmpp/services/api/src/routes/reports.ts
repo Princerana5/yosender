@@ -119,7 +119,7 @@ router.get('/live', async (req, res) => {
   );
 
   const recent = await query(
-    `SELECT m.id, m.created_at, m.source, m.destination, m.status,
+    `SELECT m.id, m.created_at, m.source, m.destination, m.status, m.text,
             c.name AS client_name, co.name AS country_name, co.iso_code,
             v.name AS vendor_name, r.name AS route_name
      FROM messages m

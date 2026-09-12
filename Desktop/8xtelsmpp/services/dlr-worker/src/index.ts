@@ -73,6 +73,42 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     'UPDATE messages SET status=$1, dlr_time=now(), error_code=$2 WHERE id=$3',
     [clientStatus, vendorStatus === 'delivered' ? null : 'vendor:' + vendorStatus, msg.id],
   );
+
+  // ── Settlement: release the submit-time hold on non-delivered outcomes ────
+  // Delivered → hold stands (billing worker converts it to the real charge).
+  // Anything else → refund the hold so the client only pays for delivered SMS.
+  if (clientStatus !== 'delivered') {
+    const hold = await queryOne<{ reserved_amount: string; client_id: string }>(
+      'SELECT reserved_amount, client_id FROM messages WHERE id=$1', [msg.id],
+    );
+    const amount = Number(hold?.reserved_amount ?? 0);
+    if (amount > 0) {
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const w = await db.query(
+          'SELECT balance, currency FROM wallets WHERE client_id=$1 FOR UPDATE', [hold!.client_id],
+        );
+        const after = Number(w.rows[0].balance) + amount;
+        await db.query('UPDATE wallets SET balance=$1, updated_at=now() WHERE client_id=$2', [after, hold!.client_id]);
+        await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [after, hold!.client_id]);
+        await db.query(
+          `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description, remark, currency)
+           VALUES ($1,$2,'refund',$3,$4,$5,$6,$7)`,
+          [hold!.client_id, msg.id, amount, after,
+           `Release hold ${msg.id.slice(0, 8)} (${clientStatus})`,
+           `Hold released — outcome ${clientStatus}`, w.rows[0].currency],
+        );
+        await db.query('UPDATE messages SET reserved_amount=0 WHERE id=$1', [msg.id]);
+        await db.query('COMMIT');
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        db.release();
+      }
+    }
+  }
   await pool.query(
     'INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,$3,$4)',
     [msg.id, vendor_id, 'dlr', `vendor=${vendorStatus} client=${clientStatus}`],

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { query, getPool, getRedis } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
 import { hashPassword } from '../auth.js';
@@ -91,6 +92,52 @@ router.post('/senders', requirePerm('clients.update'), audit('managed_sender', '
     [client_id, sender, country_id ?? null, status ?? 'approved'],
   );
   res.status(201).json({ sender: rows[0] });
+});
+
+// ── Sender-ID requests: approve (= sender_ids row) or reject ────────────────
+router.get('/sender-requests', requirePerm('clients.update'), async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const rows = await query(
+    `SELECT sr.*, c.name AS client_name, co.name AS country_name FROM sender_requests sr
+     JOIN clients c ON c.id=sr.client_id LEFT JOIN countries co ON co.id=sr.country_id
+     WHERE ($1::text IS NULL OR sr.status=$1)
+     ORDER BY sr.created_at DESC LIMIT 200`,
+    [q.status ?? null],
+  );
+  res.json({ requests: rows });
+});
+
+router.post('/sender-requests/:id/review', requirePerm('clients.update'), audit('reviewed_sender_request', 'sender_request'), async (req, res) => {
+  const parsed = z.object({
+    action: z.enum(['approve', 'reject']),
+    remark: z.string().max(500).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload' });
+    return;
+  }
+  const rows = await query('SELECT * FROM sender_requests WHERE id=$1', [req.params.id]);
+  const sr = rows[0] as { id: string; client_id: string; sender: string; country_id: string | null; status: string } | undefined;
+  if (!sr) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (sr.status !== 'pending') {
+    res.status(409).json({ error: `already ${sr.status}` });
+    return;
+  }
+  if (parsed.data.action === 'approve') {
+    await query(
+      `INSERT INTO sender_ids (client_id, sender, country_id, status) VALUES ($1,$2,$3,'approved')
+       ON CONFLICT (client_id, sender, country_id) DO UPDATE SET status='approved'`,
+      [sr.client_id, sr.sender, sr.country_id],
+    );
+  }
+  await query(
+    `UPDATE sender_requests SET status=$1, reviewed_by=$2, reviewer_remark=$3, reviewed_at=now() WHERE id=$4`,
+    [parsed.data.action === 'approve' ? 'approved' : 'rejected', (req.user as { id: string }).id, parsed.data.remark ?? null, sr.id],
+  );
+  res.json({ ok: true, action: parsed.data.action });
 });
 
 // ── Users (§30) ─────────────────────────────────────────────────────────────

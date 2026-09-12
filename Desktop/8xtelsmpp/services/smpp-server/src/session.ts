@@ -1,14 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import {
   queryOne, getPool, getQueue, QUEUES, checkTps, incrStat,
-  COMMAND_STATUS, type MessageJob,
+  type MessageJob,
 } from '@8xtel/core';
 import { authenticateBind, BindPrincipal } from './auth.js';
 
-// Minimal typings over the `smpp` package session object.
+// Typings over the `smpp` package: responses are built via pdu.response().
+// See node_modules/smpp/README.md — session.send(pdu.response({...})).
 export interface SmppSession {
-  on(event: 'bind_transceiver' | 'bind_transmitter' | 'bind_receiver' | 'submit_sm' | 'enquire_link' | 'unbind' | 'close' | 'error', fn: (pdu: Pdu) => void): void;
-  send(pdu: Pdu): void;
+  on(event: string, fn: (pdu: Pdu) => void): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  send(pdu: any): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  deliver_sm(params: Record<string, any>, cb?: (pdu: any) => void): void;
   pause(): void;
   resume(): void;
   close(): void;
@@ -16,15 +20,16 @@ export interface SmppSession {
 
 export interface Pdu {
   command: string;
-  command_id?: number;
   sequence_number: number;
   system_id?: string;
   password?: string;
   source_addr?: string;
   destination_addr?: string;
-  short_message?: string | Buffer;
+  short_message?: { message?: string } | string | Buffer;
   data_coding?: number;
   registered_delivery?: number;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  response(params?: Record<string, any>): any;
   [k: string]: unknown;
 }
 
@@ -34,6 +39,17 @@ interface SessionState {
   remoteIp: string;
 }
 
+/** ESME status codes (SMPP v3.4 §5.1.3) */
+const ST = {
+  ROK: 0x00000000,
+  RINVBNDSTS: 0x00000004,
+  RINVSRCADR: 0x0000000a,
+  RINVDSTADR: 0x0000000b,
+  RMSGQFUL: 0x00000014,
+  RTHROTTLED: 0x00000058,
+  RINVPASWD: 0x0000000e,
+} as const;
+
 /** Handle one downstream TCP session: bind → submit_sm → enqueue → resp. */
 export function handleSession(
   session: SmppSession,
@@ -42,13 +58,9 @@ export function handleSession(
 ): void {
   const state: SessionState = { principal: null, bindType: null, remoteIp };
 
-  const respond = (pdu: Pdu, status: number, extra: Record<string, unknown> = {}): void => {
-    session.send({
-      command: `${pdu.command}_resp`,
-      sequence_number: pdu.sequence_number,
-      command_status: status,
-      ...extra,
-    } as Pdu);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const respond = (pdu: Pdu, command_status: number, extra: Record<string, any> = {}): void => {
+    session.send(pdu.response({ command_status, ...extra }));
   };
 
   session.on('bind_transceiver', onBind('transceiver'));
@@ -57,12 +69,13 @@ export function handleSession(
 
   function onBind(type: string) {
     return async (pdu: Pdu): Promise<void> => {
+      session.pause(); // hold PDUs until auth completes (per smpp README)
       const result = await authenticateBind(
         String(pdu.system_id ?? ''), String(pdu.password ?? ''), remoteIp, type,
       );
       if (!result.ok) {
-        respond(pdu, COMMAND_STATUS.ESME_RINVPASWD);
-        session.pause();
+        session.send(pdu.response({ command_status: ST.RINVPASWD }));
+        session.close();
         return;
       }
       state.principal = result.principal;
@@ -72,7 +85,8 @@ export function handleSession(
          VALUES ('bind',$1,$2,$3,'accept',$4)`,
         [state.principal.client_id, remoteIp, state.principal.system_id, `bind_${type}`],
       );
-      respond(pdu, COMMAND_STATUS.ESME_ROK, { system_id: process.env.SMPP_PUBLIC_HOST ?? '8xtelSMPP' });
+      session.send(pdu.response({ command_status: ST.ROK, system_id: '8xtelSMPP' }));
+      session.resume();
       hooks.onBind?.(state.principal.client_id, session);
       console.log(`[smpp] bind ${type} ${state.principal.system_id} from ${remoteIp}`);
     };
@@ -80,42 +94,45 @@ export function handleSession(
 
   session.on('submit_sm', async (pdu: Pdu) => {
     if (!state.principal || state.bindType === 'receiver') {
-      respond(pdu, COMMAND_STATUS.ESME_RINVBNDSTS);
+      respond(pdu, ST.RINVBNDSTS);
       return;
     }
     const principal = state.principal;
 
-    // TPS guard — queue instead of drop (§18)
+    // TPS guard — throttle instead of drop (§18)
     const tpsOk = await checkTps(`client:${principal.client_id}`, principal.tps_limit);
     if (!tpsOk) {
-      respond(pdu, COMMAND_STATUS.ESME_RTHROTTLED);
+      respond(pdu, ST.RTHROTTLED);
       return;
     }
 
     const destination = String(pdu.destination_addr ?? '');
     const source = String(pdu.source_addr ?? '');
     if (!destination) {
-      respond(pdu, COMMAND_STATUS.ESME_RINVDSTADR);
+      respond(pdu, ST.RINVDSTADR);
       return;
     }
 
     // Sender-ID permission (§21)
     const senderRule = await queryOne<{ status: string }>(
       `SELECT status FROM sender_ids WHERE client_id=$1 AND sender=$2
-       AND (country_id IS NULL OR TRUE) ORDER BY country_id NULLS LAST LIMIT 1`,
+       ORDER BY country_id NULLS LAST LIMIT 1`,
       [principal.client_id, source],
     );
     if (senderRule && senderRule.status === 'blocked') {
-      respond(pdu, COMMAND_STATUS.ESME_RINVSRCADR);
+      respond(pdu, ST.RINVSRCADR);
       return;
     }
 
     const internalId = randomUUID();
-    const text = Buffer.isBuffer(pdu.short_message)
-      ? pdu.short_message.toString('utf8')
-      : String(pdu.short_message ?? '');
+    const sm = pdu.short_message;
+    const text = Buffer.isBuffer(sm)
+      ? sm.toString('utf8')
+      : typeof sm === 'string'
+        ? sm
+        : String(sm?.message ?? '');
 
-    // Persist immediately (web restarts must not lose messages — §37)
+    // Persist immediately (restarts must not lose messages — §37)
     await getPool().query(
       `INSERT INTO messages (id, client_id, channel, client_msg_id, source, destination, text, data_coding, status)
        VALUES ($1,$2,'sms',$3,$4,$5,$6,$7,'submitted')`,
@@ -131,20 +148,22 @@ export function handleSession(
       destination,
       country_id: null, // resolved by routing-worker
       text,
-      data_coding: pdu.data_coding ?? 0,
+      data_coding: Number(pdu.data_coding ?? 0),
       route_id: null,
       attempts: 0,
     };
     await getQueue(QUEUES.submit).add('submit', job, { jobId: internalId });
     await incrStat('submitted');
 
-    respond(pdu, COMMAND_STATUS.ESME_ROK, { message_id: internalId });
+    respond(pdu, ST.ROK, { message_id: internalId });
   });
 
-  session.on('enquire_link', (pdu: Pdu) => respond(pdu, COMMAND_STATUS.ESME_ROK));
+  session.on('enquire_link', (pdu: Pdu) => {
+    session.send(pdu.response({ command_status: ST.ROK }));
+  });
 
   session.on('unbind', (pdu: Pdu) => {
-    respond(pdu, COMMAND_STATUS.ESME_ROK);
+    session.send(pdu.response({ command_status: ST.ROK }));
     session.close();
   });
 
@@ -156,6 +175,6 @@ export function handleSession(
   });
 
   session.on('error', (pdu: Pdu) => {
-    console.error('[smpp] session error', (pdu as { message?: string }).message ?? pdu);
+    console.error('[smpp] session error', (pdu as unknown as { message?: string }).message ?? 'unknown');
   });
 }

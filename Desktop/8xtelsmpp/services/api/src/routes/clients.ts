@@ -8,6 +8,89 @@ import { hashPassword } from '../auth.js';
 const router = Router();
 router.use(requirePerm('clients.read'));
 
+// ── Portal accounts: clients with portal login (excludes house) ─────────────
+router.get('/portal-accounts', async (req, res) => {
+  const { q } = req.query as { q?: string };
+  const params: unknown[] = [];
+  let where = `COALESCE(c.is_house,false)=false AND c.portal_email IS NOT NULL`;
+  if (q) {
+    params.push(`%${q}%`);
+    where += ` AND (c.name ILIKE $${params.length} OR c.company_name ILIKE $${params.length} OR c.portal_email ILIKE $${params.length} OR c.system_id ILIKE $${params.length})`;
+  }
+  const rows = await query(
+    `SELECT c.*,
+            (SELECT count(*) FROM routes r WHERE r.client_id=c.id) AS route_count,
+            (SELECT count(*) FROM sender_ids s WHERE s.client_id=c.id AND s.status='approved') AS sender_count
+     FROM clients c WHERE ${where} ORDER BY c.created_at DESC LIMIT 200`,
+    params,
+  );
+  res.json({ clients: rows.map((r) => ({ ...(r as object), password_hash: undefined, portal_password_hash: undefined })) });
+});
+
+// ── Create portal account in one step: client + wallet + portal login ────────
+const portalCreateSchema = z.object({
+  name: z.string().min(1),
+  company_name: z.string().optional(),
+  system_id: z.string().min(3).regex(/^[A-Za-z0-9_.-]+$/),
+  portal_email: z.string().email(),
+  password: z.string().min(8).optional(), // portal password, auto-generated if omitted
+  currency: z.enum(['USD', 'EUR', 'INR']).default('USD'),
+  credit_limit: z.number().nonnegative().default(0),
+  tps_limit: z.number().int().positive().default(10),
+});
+
+router.post('/portal-accounts', requirePerm('clients.create'), audit('created_portal_account', 'client'), async (req, res) => {
+  const parsed = portalCreateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const b = parsed.data;
+  const smppPassword = crypto.randomBytes(12).toString('base64url');
+  const portalPassword = b.password ?? crypto.randomBytes(12).toString('base64url');
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const emailTaken = await db.query('SELECT 1 FROM clients WHERE lower(portal_email)=lower($1)', [b.portal_email]);
+    if (emailTaken.rowCount) {
+      await db.query('ROLLBACK');
+      res.status(409).json({ error: 'portal email already in use' });
+      return;
+    }
+    const { rows } = await db.query(
+      `INSERT INTO clients (name, company_name, system_id, password_hash, status, credit_limit, currency,
+                            tps_limit, billing_mode, portal_email, portal_password_hash, portal_enabled)
+       VALUES ($1,$2,$3,$4,'active',$5,$6,$7,'postpay',$8,$9,true) RETURNING *`,
+      [
+        b.name, b.company_name ?? null, b.system_id, await hashPassword(smppPassword),
+        b.credit_limit, b.currency, b.tps_limit,
+        b.portal_email.toLowerCase(), await hashPassword(portalPassword),
+      ],
+    );
+    const created = rows[0];
+    await db.query(
+      'INSERT INTO wallets (client_id, balance, credit_limit, currency, billing_mode) VALUES ($1,0,$2,$3,$4)',
+      [created.id, b.credit_limit, b.currency, 'postpay'],
+    );
+    await db.query('COMMIT');
+    const { password_hash: _h1, portal_password_hash: _h2, ...safe } = created;
+    void _h1;
+    void _h2;
+    res.status(201).json({
+      client: safe,
+      portal: { portal_email: b.portal_email.toLowerCase(), password: portalPassword }, // shown ONCE
+      smpp_note: 'SMPP password auto-generated — re-issue from Client detail if they need SMPP binds.',
+    });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    const msg = (e as { code?: string }).code === '23505' ? 'system_id already exists' : 'create failed';
+    res.status(409).json({ error: msg });
+  } finally {
+    db.release();
+  }
+});
+
 // ── List / search ────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   const { status, q } = req.query as { status?: string; q?: string };
@@ -147,6 +230,23 @@ router.get('/:id', async (req, res) => {
      LEFT JOIN countries c ON c.id=cr.country_id WHERE cr.client_id=$1 ORDER BY cr.prefix NULLS LAST`,
     [req.params.id],
   );
+  // Active routes serving this client: dedicated + global fallback, sms only.
+  // Mirrors the routing engine's candidate set (minus vendor-chain expansion).
+  const routes = await query(
+    `SELECT r.id, r.name, r.strategy, r.status, r.prefix, r.sender_id,
+            r.price_per_segment, COALESCE(r.price_currency,'USD') AS price_currency,
+            r.min_margin_pct,
+            (r.client_id IS NOT NULL) AS dedicated,
+            co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code,
+            (SELECT count(*) FROM route_vendors rv WHERE rv.route_id=r.id) AS vendor_count,
+            (SELECT min(vr.cost) FROM vendor_rates vr JOIN route_vendors rv2 ON rv2.vendor_id=vr.vendor_id
+             WHERE rv2.route_id=r.id AND (vr.country_id IS NULL OR vr.country_id=r.country_id)) AS min_vendor_cost
+     FROM routes r LEFT JOIN countries co ON co.id=r.country_id
+     WHERE r.status='active' AND r.channel='sms'
+       AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+     ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
+    [req.params.id],
+  );
   // ── Overview stats: traffic today / all-time, balance in / out ──────────
   const [traffic] = await query<{
     today: string; all_time: string; delivered: string; failed: string;
@@ -172,6 +272,7 @@ router.get('/:id', async (req, res) => {
     client: safe,
     ips,
     rates,
+    routes,
     stats: {
       traffic_today: Number(traffic.today),
       traffic_all_time: Number(traffic.all_time),
@@ -207,10 +308,37 @@ router.post('/:id/credentials', requirePerm('clients.update'), audit('reissued_c
   });
 });
 
+// ── Portal login: set/reset client portal password (shown ONCE) ─────────────
+// Separate from SMPP credentials. House accounts can never get portal access.
+router.post('/:id/portal-password', requirePerm('clients.update'), audit('set_portal_password', 'client'), async (req, res) => {
+  const row = await queryOne<{ portal_email: string | null; is_house: boolean }>(
+    'SELECT portal_email, COALESCE(is_house,false) AS is_house FROM clients WHERE id=$1', [req.params.id],
+  );
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (row.is_house) {
+    res.status(422).json({ error: 'house accounts cannot have portal access' });
+    return;
+  }
+  if (!row.portal_email) {
+    res.status(422).json({ error: 'set a portal email first' });
+    return;
+  }
+  const plain = crypto.randomBytes(12).toString('base64url');
+  await query('UPDATE clients SET portal_password_hash=$1, portal_enabled=true, updated_at=now() WHERE id=$2', [
+    await hashPassword(plain),
+    req.params.id,
+  ]);
+  res.json({ portal_email: row.portal_email, password: plain }); // shown ONCE
+});
+
 router.patch('/:id', requirePerm('clients.update'), audit('updated_client', 'client'), async (req, res) => {
   const allowed = [
     'name', 'company_name', 'status', 'credit_limit', 'tps_limit', 'daily_limit',
     'monthly_limit', 'dlr_mode', 'dlr_callback_url', 'notes', 'default_route_id', 'pricing_profile_id',
+    'portal_email', 'portal_enabled',
   ] as const;
   const sets: string[] = [];
   const params: unknown[] = [];

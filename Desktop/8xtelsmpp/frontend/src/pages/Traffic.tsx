@@ -11,6 +11,7 @@ interface FlowRow {
 
 interface RecentMsg {
   id: string; created_at: string; source: string; destination: string; status: string;
+  text: string | null;
   client_name: string; country_name: string | null; iso_code: string | null;
   vendor_name: string | null; route_name: string | null;
 }
@@ -30,6 +31,8 @@ export default function Traffic(): JSX.Element {
   const [countries, setCountries] = useState<Opt[]>([]);
   const [f, setF] = useState({ client_id: '', country_id: '', vendor_id: '', minutes: '15' });
   const [paused, setPaused] = useState(false);
+  const [showContent, setShowContent] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     api<{ clients: Opt[] }>('/clients').then((r) => setClients(r.clients)).catch(() => undefined);
@@ -163,7 +166,16 @@ export default function Traffic(): JSX.Element {
 
       {/* live feed */}
       <div>
-        <div className="card-title mb-2 px-1">Live feed <span className="text-muted font-normal">· newest first</span></div>
+        <div className="flex items-center justify-between mb-2 px-1">
+          <div className="card-title">Live feed <span className="text-muted font-normal">· newest first</span></div>
+          <button
+            className="btn-ghost !py-1.5 !text-xs"
+            onClick={() => setShowContent((s) => !s)}
+            title="Message content may contain customer PII — keep hidden on shared screens"
+          >
+            {showContent ? '🙈 Hide content' : '👁 Show content'}
+          </button>
+        </div>
         <DataTable
           keyOf={(r) => r.id}
           rows={recent}
@@ -177,6 +189,26 @@ export default function Traffic(): JSX.Element {
             {
               key: 'route', label: 'From → To', mono: true,
               render: (r) => <span>{r.source} <span className="text-muted">→</span> {r.destination}</span>,
+            },
+            {
+              key: 'text', label: 'Content',
+              render: (r) => {
+                if (!showContent) return <span className="text-muted text-xs">hidden</span>;
+                if (!r.text) return <span className="text-muted">—</span>;
+                const isOpen = expanded[r.id];
+                const long = r.text.length > 80;
+                return (
+                  <span
+                    className={`text-xs ${long && !isOpen ? 'line-clamp-2' : 'whitespace-pre-wrap'} max-w-xs block`}
+                    title={long && !isOpen ? 'Click to expand' : undefined}
+                    onClick={long ? () => setExpanded((e) => ({ ...e, [r.id]: !e[r.id] })) : undefined}
+                    style={long ? { cursor: 'pointer' } : undefined}
+                  >
+                    {r.text}
+                    {long && !isOpen && <span className="text-muted"> …more</span>}
+                  </span>
+                );
+              },
             },
             { key: 'country_name', label: 'Country', render: (r) => r.country_name ?? <span className="text-muted">…</span> },
             { key: 'vendor_name', label: 'Vendor', render: (r) => r.vendor_name ?? <span className="text-muted">…</span> },

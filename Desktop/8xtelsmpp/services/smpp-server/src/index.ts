@@ -1,6 +1,6 @@
 import smpp from 'smpp';
 import { getRedis, QUEUES, type DlrEvent } from '@8xtel/core';
-import { handleSession, SmppSession } from './session.js';
+import { handleSession, type SmppSession } from './session.js';
 
 // ── 8xtelSMPP SMPP server — downstream client binds (§5, Phase 2) ───────────
 // Listens on SMPP_PORT (default 2775). submit_sm → persisted → sms:submit queue.
@@ -46,15 +46,14 @@ async function startClientDlrConsumer(): Promise<void> {
         console.warn(`[smpp] no bound session for client ${dlr.client_id}, DLR ${dlr.internal_id} deferred`);
         throw new Error('client not bound'); // retry with backoff (§37)
       }
-      session.send({
-        command: 'deliver_sm',
-        sequence_number: 0,
+      session.deliver_sm({
         source_addr: dlr.destination,
         destination_addr: dlr.source,
         short_message:
           `id:${dlr.internal_id} sub:001 dlvrd:001 submit date:${dateFmt()} done date:${dateFmt()} stat:${statusToken(dlr.status)} err:${dlr.error_code ?? '000'} text:`,
         esm_class: 4, // delivery receipt
-      } as never);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
     },
     { connection: redis, concurrency: 20 },
   );

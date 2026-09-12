@@ -33,14 +33,24 @@ paths:
     get: { summary: List clients, responses: { '200': { description: ok } } }
     post: { summary: Create client + SMPP credentials, responses: { '201': { description: created } } }
   /clients/{id}: { get: { summary: Client detail, responses: { '200': { description: ok } } } }
+  /clients/portal-accounts:
+    get: { summary: Portal accounts (excludes house), responses: { '200': { description: ok } } }
+    post: { summary: Create portal account (client + wallet + login), responses: { '201': { description: created } } }
   /vendors:
     get: { summary: List vendors, responses: { '200': { description: ok } } }
     post: { summary: Create vendor, responses: { '201': { description: created } } }
   /routes:
     get: { summary: List routes, responses: { '200': { description: ok } } }
     post: { summary: Create route, responses: { '201': { description: created } } }
+  /routes/{id}:
+    patch: { summary: Update route (perm routes.update), responses: { '200': { description: ok } } }
+    delete: { summary: Delete route (perm routes.delete, 409 if referenced by filters), responses: { '200': { description: deleted } } }
   /messages:
     get: { summary: Searchable message log, responses: { '200': { description: ok } } }
+  /messages/send:
+    post: { summary: Send test SMS as a client (perm messages.send), responses: { '202': { description: accepted } } }
+  /messages/{id}:
+    get: { summary: Message detail + events + DLR, responses: { '200': { description: ok } } }
   /billing/wallets:
     get: { summary: Client wallets, responses: { '200': { description: ok } } }
   /reports/dashboard:
@@ -53,3 +63,22 @@ paths:
     get: { summary: Health, responses: { '200': { description: ok } } }
   /connectors:
     get: { summary: Channel connectors, responses: { '200': { description: ok } } }
+  /portal/login:
+    post: { summary: Client portal login (portal token, /portal/* only), responses: { '200': { description: ok } } }
+  /portal/me:
+    get: { summary: Own account + traffic + recent, responses: { '200': { description: ok } } }
+  /portal/send:
+    post: { summary: Send SMS as self (normal routing), responses: { '202': { description: accepted } } }
+  /portal/messages:
+    get: { summary: Own message history, responses: { '200': { description: ok } } }
+  /portal/wallet:
+    get: { summary: Own wallet + ledger, responses: { '200': { description: ok } } }
+  /portal/topup-requests:
+    get: { summary: Own top-up requests, responses: { '200': { description: ok } } }
+    post: { summary: Request a top-up, responses: { '201': { description: created } } }
+  /portal/sender-requests:
+    post: { summary: Request a sender ID, responses: { '201': { description: created } } }
+  /billing/topup-requests:
+    get: { summary: All top-up requests (admin), responses: { '200': { description: ok } } }
+  /system/sender-requests:
+    get: { summary: All sender requests (admin), responses: { '200': { description: ok } } }
