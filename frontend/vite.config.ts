@@ -33,6 +33,7 @@ export default defineConfig({
       '/reports': apiProxy('/reports'),
       '/system': apiProxy('/system'),
       '/connectors': apiProxy('/connectors'),
+      '/portal': apiProxy('/portal'),
     },
   },
 });

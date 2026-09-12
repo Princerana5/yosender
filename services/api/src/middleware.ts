@@ -29,15 +29,25 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   next();
 }
 
-/** RBAC gate (§30) */
+/** RBAC gate (§30). Portal tokens are NEVER accepted on console routes —
+    clients get /portal/* only, even if they guess an admin URL. */
 export function requirePerm(permission: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (!req.user || !can(req.user.permissions, permission)) {
+    if (!req.user || req.user.kind === 'portal' || !can(req.user.permissions, permission)) {
       res.status(403).json({ error: 'forbidden' });
       return;
     }
     next();
   };
+}
+
+/** Portal gate (§4): accepts ONLY portal tokens, scopes to own client_id. */
+export function requirePortal(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user || req.user.kind !== 'portal' || !req.user.client_id) {
+    res.status(403).json({ error: 'portal login required' });
+    return;
+  }
+  next();
 }
 
 /** Audit every mutating admin action (§31) */

@@ -24,6 +24,7 @@ const P: Record<string, JSX.Element> = {
   refresh: <><path d="M20 12a8 8 0 1 1-2.3-5.6M20 3v4h-4" /></>,
   search: <><circle cx="11" cy="11" r="6.5" /><path d="m16 16 5 5" /></>,
   bolt: <><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" /></>,
+  trash: <><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 13h9l1-13" /><path d="M10 11v6M14 11v6" /></>,
 };
 
 export function Icon({ name, size = 16, className = '' }: { name: keyof typeof P; size?: number; className?: string }): JSX.Element {

@@ -1,19 +1,29 @@
+# 8xtelSMPP API — REST + admin backend + Swagger
+# Build: docker build -f services/api/Dockerfile .
+# Needs repo root as context (imports packages/core).
 FROM node:20-alpine AS build
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json* ./
+COPY packages/core/package.json ./packages/core/
+COPY services/api/package.json ./services/api/
+# Install with workspaces so @8xtel/core resolves; dev deps needed for tsc.
+RUN npm install --workspace=@8xtel/core --workspace=@8xtel/api --include-workspace-root=false
 COPY packages/core ./packages/core
 COPY services/api ./services/api
-RUN npm install --workspace=@8xtel/core --workspace=@8xtel/api --include-workspace-root=false 2>/dev/null || npm install -g npm@10 && npm install --prefix packages/core && npm install --prefix services/api
-RUN npm run build --prefix packages/core && npm run build --prefix services/api
+RUN npm run build --workspace=@8xtel/core && npm run build --workspace=@8xtel/api
 
 FROM node:20-alpine
 WORKDIR /app
+ENV NODE_ENV=production
+COPY package.json package-lock.json* ./
+COPY packages/core/package.json ./packages/core/
+COPY services/api/package.json ./services/api/
+RUN npm install --workspace=@8xtel/core --workspace=@8xtel/api --include-workspace-root=false --omit=dev \
+ && npm cache clean --force
 COPY --from=build /app/packages/core/dist ./packages/core/dist
-COPY --from=build /app/packages/core/package.json ./packages/core/
 COPY --from=build /app/services/api/dist ./dist
-COPY --from=build /app/services/api/package.json ./
+# Runtime assets resolved relative to dist/
 COPY services/api/src/openapi.yaml ./dist/
 COPY services/api/src/db/migrations ./dist/db/migrations
-RUN npm install --omit=dev --ignore-scripts express cors helmet express-rate-limit bcryptjs jsonwebtoken multer csv-parse swagger-ui-express yamljs zod pg ioredis bullmq
 EXPOSE 8080
 CMD ["node", "dist/index.js"]

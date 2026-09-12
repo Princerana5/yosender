@@ -123,6 +123,9 @@ export interface MessageJob {
   data_coding: number;
   route_id: string | null;
   attempts: number;
+  /** Test override (Send Test SMS page): skip route matching, force path */
+  force_route_id?: string | null;
+  force_vendor_id?: string | null;
 }
 
 export interface DlrEvent {
@@ -156,11 +159,11 @@ export type RoleName =
 export const ROLE_PERMISSIONS: Record<RoleName, string[]> = {
   super_admin: ['*'],
   admin: [
-    'clients.*', 'vendors.*', 'routes.*', 'messages.read', 'billing.*',
+    'clients.*', 'vendors.*', 'routes.*', 'messages.read', 'messages.send', 'billing.*',
     'reports.*', 'system.logs', 'users.manage',
   ],
   operations: [
-    'messages.read', 'routes.read', 'routes.update', 'vendors.read',
+    'messages.read', 'messages.send', 'routes.read', 'routes.update', 'vendors.read',
     'vendors.reconnect', 'system.logs', 'reports.traffic',
   ],
   finance: ['billing.*', 'rates.*', 'reports.revenue', 'reports.cost', 'reports.profit'],

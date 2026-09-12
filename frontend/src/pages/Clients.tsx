@@ -6,6 +6,7 @@ import { PageHeader, DataTable, StatusBadge, SearchInput, Modal, EmptyState, Ico
 interface Client {
   id: string; name: string; company_name: string | null; system_id: string;
   status: string; balance: string; credit_limit: string; tps_limit: number; ip_count: string;
+  is_house?: boolean;
 }
 
 interface Handoff {
@@ -179,6 +180,11 @@ export default function Clients(): JSX.Element {
                   <Link className="font-semibold text-sky-300 hover:text-sky-200 hover:underline" to={`/clients/${c.id}`}>
                     {c.name}
                   </Link>
+                  {c.is_house && (
+                    <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-warn/15 text-amber-300 border border-warn/30 align-middle">
+                      🏠 HOUSE
+                    </span>
+                  )}
                   <div className="text-[11px] text-muted">{c.company_name ?? '—'}</div>
                 </div>
               ),

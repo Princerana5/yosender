@@ -23,8 +23,8 @@ export async function authenticateBind(
 ): Promise<{ ok: true; principal: BindPrincipal } | { ok: false; reason: string }> {
   const client = await queryOne<{
     id: string; system_id: string; password_hash: string; status: string;
-    balance: string; credit_limit: string; tps_limit: number;
-  }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit FROM clients WHERE system_id=$1', [
+    balance: string; credit_limit: string; tps_limit: number; is_house: boolean;
+  }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house FROM clients WHERE system_id=$1', [
     systemId,
   ]);
 
@@ -38,6 +38,11 @@ export async function authenticateBind(
   if (!client) {
     log('reject', 'unknown_system_id');
     return { ok: false, reason: 'unknown system_id' };
+  }
+  // House accounts (console test sends) can never bind over SMPP
+  if (client.is_house) {
+    log('reject', 'house_account_bind', client.id);
+    return { ok: false, reason: 'house account cannot bind' };
   }
   const passOk = await bcrypt.compare(password, client.password_hash);
   if (!passOk) {

@@ -221,12 +221,79 @@ router.post('/wallets/:clientId/billing-mode', requirePerm('billing.manage'), au
   }
 });
 
+// ── Top-up requests: approve (= real topup) or reject ───────────────────────
+router.get('/topup-requests', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const rows = await query(
+    `SELECT tr.*, c.name AS client_name FROM topup_requests tr
+     JOIN clients c ON c.id=tr.client_id
+     WHERE ($1::text IS NULL OR tr.status=$1)
+     ORDER BY tr.created_at DESC LIMIT 200`,
+    [q.status ?? null],
+  );
+  res.json({ requests: rows });
+});
+
+router.post('/topup-requests/:id/review', requirePerm('billing.manage'), audit('reviewed_topup_request', 'topup_request'), async (req, res) => {
+  const parsed = z.object({
+    action: z.enum(['approve', 'reject']),
+    remark: z.string().trim().min(3, 'remark is required (min 3 chars)'),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const { rows } = await db.query('SELECT * FROM topup_requests WHERE id=$1 FOR UPDATE', [req.params.id]);
+    const tr = rows[0] as { id: string; client_id: string; amount: string; status: string } | undefined;
+    if (!tr) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    if (tr.status !== 'pending') {
+      await db.query('ROLLBACK');
+      res.status(409).json({ error: `already ${tr.status}` });
+      return;
+    }
+    if (parsed.data.action === 'approve') {
+      await db.query('UPDATE wallets SET balance = balance + $1, updated_at=now() WHERE client_id=$2', [tr.amount, tr.client_id]);
+      await db.query('UPDATE clients SET balance = balance + $1 WHERE id=$2', [tr.amount, tr.client_id]);
+      const bal = await db.query('SELECT balance, currency FROM wallets WHERE client_id=$1', [tr.client_id]);
+      await db.query(
+        `INSERT INTO transactions (client_id, type, amount, balance_after, description, remark, currency, created_by)
+         VALUES ($1,'credit',$2,$3,$4,$4,$5,$6)`,
+        [tr.client_id, tr.amount, bal.rows[0].balance, parsed.data.remark, bal.rows[0].currency, (req.user as { id: string }).id],
+      );
+    }
+    await db.query(
+      `UPDATE topup_requests SET status=$1, reviewed_by=$2, reviewer_remark=$3, reviewed_at=now() WHERE id=$4`,
+      [parsed.data.action === 'approve' ? 'approved' : 'rejected', (req.user as { id: string }).id, parsed.data.remark, tr.id],
+    );
+    await db.query('COMMIT');
+    res.json({ ok: true, action: parsed.data.action });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: 'review failed' });
+  } finally {
+    db.release();
+  }
+});
+
 router.get('/transactions', async (req, res) => {
   const q = req.query as Record<string, string>;
+  // Ledger shows financial movements only (top-ups, deducts, adjustments,
+  // refunds). Per-message SMS charges live in message reports, not here —
+  // filter them via message_id IS NULL. Pass ?include_sms=1 for audit.
+  const onlyFinancial = q.include_sms !== '1';
   const rows = await query(
     `SELECT t.*, c.name AS client_name FROM transactions t
      LEFT JOIN clients c ON c.id=t.client_id
      WHERE ($1::uuid IS NULL OR t.client_id=$1::uuid)
+       ${onlyFinancial ? 'AND t.message_id IS NULL' : ''}
      ORDER BY t.created_at DESC LIMIT 200`,
     [q.client_id ?? null],
   );

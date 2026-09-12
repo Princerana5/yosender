@@ -11,13 +11,21 @@ import Vendors from './pages/Vendors.js';
 import Messages from './pages/Messages.js';
 import RoutesPage from './pages/Routes.js';
 import Billing from './pages/Billing.js';
-import { TablePage, Connections, Reports } from './pages/Generic.js';
+import { TablePage, Connections, Reports, SendersPage } from './pages/Generic.js';
 import Traffic from './pages/Traffic.js';
+import SendSms from './pages/SendSms.js';
+import PortalAccounts from './pages/PortalAccounts.js';
 import { StatusBadge } from './components.js';
 import { token } from './api.js';
+import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
+import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage } from './portal-pages.js';
 
 function Guard({ children }: { children: JSX.Element }): JSX.Element {
   return token() ? children : <Navigate to="/login" replace />;
+}
+
+function PortalGuard({ children }: { children: JSX.Element }): JSX.Element {
+  return portalToken() ? children : <Navigate to="/portal/login" replace />;
 }
 
 const statusCol = {
@@ -46,6 +54,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="traffic" element={<Traffic />} />
           <Route path="clients" element={<Clients />} />
           <Route path="clients/:id" element={<ClientDetail />} />
+          <Route path="portal-accounts" element={<PortalAccounts />} />
           <Route path="vendors" element={<Vendors />} />
           <Route path="connections" element={<Connections />} />
           <Route path="routes" element={<RoutesPage />} />
@@ -65,6 +74,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             }
           />
           <Route path="messages" element={<Messages />} />
+          <Route path="send" element={<SendSms />} />
           <Route
             path="dlr"
             element={
@@ -108,7 +118,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route
             path="senders"
             element={
-              <TablePage
+              <SendersPage
                 title="Sender IDs"
                 sub="Per-client approved / blocked alphas"
                 endpoint="/system/senders"
@@ -186,6 +196,17 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               />
             }
           />
+        </Route>
+        {/* ── Client portal: separate login + token, no access to console ── */}
+        <Route path="/portal/login" element={<PortalLogin />} />
+        <Route path="/portal" element={<PortalGuard><PortalLayout /></PortalGuard>}>
+          <Route index element={<PortalOverview />} />
+          <Route path="send" element={<PortalSend />} />
+          <Route path="coverage" element={<PortalCoverage />} />
+          <Route path="history" element={<PortalHistory />} />
+          <Route path="reports" element={<PortalReports />} />
+          <Route path="reports/:id" element={<PortalReportDetail />} />
+          <Route path="wallet" element={<PortalWallet />} />
         </Route>
       </Routes>
     </BrowserRouter>

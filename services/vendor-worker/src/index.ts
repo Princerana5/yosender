@@ -39,16 +39,50 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
       [msg.internal_id],
     );
     await incrStat('failed');
-    // Signal billing to refund the reservation
-    await getQueue(QUEUES.billing).add('refund', { internal_id: msg.internal_id, client_id: msg.client_id });
+    // Release the submit-time hold (no vendor accepted → no charge)
+    const hold = await queryOne<{ reserved_amount: string }>(
+      'SELECT reserved_amount FROM messages WHERE id=$1', [msg.internal_id],
+    );
+    const amount = Number(hold?.reserved_amount ?? 0);
+    if (amount > 0) {
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const w = await db.query('SELECT balance, currency FROM wallets WHERE client_id=$1 FOR UPDATE', [msg.client_id]);
+        const after = Number(w.rows[0].balance) + amount;
+        await db.query('UPDATE wallets SET balance=$1, updated_at=now() WHERE client_id=$2', [after, msg.client_id]);
+        await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [after, msg.client_id]);
+        await db.query(
+          `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description, remark, currency)
+           VALUES ($1,$2,'refund',$3,$4,$5,$6,$7)`,
+          [msg.client_id, msg.internal_id, amount, after,
+           `Release hold ${msg.internal_id.slice(0, 8)} (all vendors failed)`,
+           'Hold released — no vendor accepted', w.rows[0].currency],
+        );
+        await db.query('UPDATE messages SET reserved_amount=0 WHERE id=$1', [msg.internal_id]);
+        await db.query('COMMIT');
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        db.release();
+      }
+    }
     return;
   }
 
   const conn = pick(vendorId);
   if (!conn) {
-    // Vendor down → immediate failover to next in chain (§11)
+    // Vendor temporarily down → wait + retry SAME vendor, don't burn the chain.
+    // Only fail over on real submit errors (handled below). Attempts cap the
+    // wait so a dead vendor eventually fails over instead of looping forever.
+    const attempts = msg.attempts ?? 0;
+    if (attempts < 120) {
+      await getQueue(QUEUES.vendorSend).add('send', { ...msg, attempts: attempts + 1 }, { delay: 2000 });
+      return;
+    }
     await pool.query(
-      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover','vendor not connected')`,
+      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover','vendor not connected after retries')`,
       [msg.internal_id, vendorId],
     );
     await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1 });
