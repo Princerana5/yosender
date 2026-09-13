@@ -140,12 +140,22 @@ interface ConnLog {
   created_at: string;
 }
 
+interface ConnDiagnosis {
+  vendor_name: string; host: string; port: number; system_id: string;
+  bind_type: string; vendor_status: string; conn_status: string;
+  last_error: string | null; reconnect_count: number;
+  connected_since: string | null; state_updated_at: string;
+  log_entries: number; why: string; next_step: string;
+  status_line?: string;
+}
+
 export function Connections(): JSX.Element {
   const [rows, setRows] = useState<SmppConn[]>([]);
   const [acting, setActing] = useState('');
   const [copied, setCopied] = useState('');
   const [logRow, setLogRow] = useState<SmppConn | null>(null);
   const [logs, setLogs] = useState<ConnLog[]>([]);
+  const [diagnosis, setDiagnosis] = useState<ConnDiagnosis | null>(null);
   const [logsBusy, setLogsBusy] = useState(false);
   const load = (): void => {
     api<{ connections: SmppConn[] }>('/system/health/smpp')
@@ -181,13 +191,17 @@ export function Connections(): JSX.Element {
   }
 
   function copyLogs(): void {
-    if (!logRow || !logs.length) return;
-    const msg =
-      `${logRow.status_line}\n` +
-      logs.map((l) =>
+    if (!logRow) return;
+    const lines = [
+      logRow.status_line,
+      diagnosis ? `Why: ${diagnosis.why}` : null,
+      diagnosis ? `Next: ${diagnosis.next_step}` : null,
+      ...logs.map((l) =>
         `[${new Date(l.created_at).toLocaleString()}] ${l.kind}${l.result ? ` → ${l.result}` : ''}${l.reason ? ` — ${l.reason}` : ''}`,
-      ).join('\n');
-    navigator.clipboard.writeText(msg).then(() => {
+      ),
+    ].filter(Boolean);
+    if (!logs.length) lines.push('(no dial-attempt log entries recorded for this vendor yet)');
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
       setCopied(`logs:${logRow.id}`);
       setTimeout(() => setCopied(''), 2000);
     }).catch(() => undefined);
@@ -196,12 +210,15 @@ export function Connections(): JSX.Element {
   async function openLogs(r: SmppConn): Promise<void> {
     setLogRow(r);
     setLogs([]);
+    setDiagnosis(null);
     setLogsBusy(true);
     try {
-      const res = await api<{ logs: ConnLog[] }>(`/system/connections/${r.id}/logs?limit=100`);
+      const res = await api<{ logs: ConnLog[]; diagnosis: ConnDiagnosis }>(`/system/connections/${r.id}/logs?limit=100`);
       setLogs(res.logs);
+      setDiagnosis(res.diagnosis);
     } catch {
       setLogs([]);
+      setDiagnosis(null);
     } finally {
       setLogsBusy(false);
     }
@@ -284,35 +301,67 @@ export function Connections(): JSX.Element {
       {logRow && (
         <Modal title={`Logs — ${logRow.vendor_name} · ${String(logRow.bind_type).toUpperCase()} #${logRow.conn_index}`} onClose={() => setLogRow(null)} wide>
           <div className="rounded-lg border border-line bg-ink/60 px-3 py-2.5 font-mono text-[12px] mb-3">
-            <span className="text-emerald-300">{logRow.status_line}</span>
+            <span className="text-emerald-300">{diagnosis?.status_line ?? logRow.status_line}</span>
           </div>
           {logsBusy ? (
             <div className="text-sm text-muted py-6 text-center animate-pulse">Loading logs…</div>
-          ) : logs.length ? (
-            <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
-              {logs.map((l) => (
-                <div key={l.id} className="rounded-lg border border-line/60 bg-ink/50 px-3 py-2 text-[12px]">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <StatusBadge status={l.kind === 'error' ? 'failed' : l.kind === 'bind' ? 'submitted' : 'unknown'} />
-                    <span className="font-mono text-gray-300">{l.kind}{l.result ? ` → ${l.result}` : ''}</span>
-                    <span className="text-[11px] text-muted ml-auto whitespace-nowrap">
-                      {new Date(l.created_at).toLocaleString()}
+          ) : (
+            <div className="space-y-3">
+              {/* ── Diagnosis: always present, even with zero log rows ── */}
+              {diagnosis && (
+                <div className="rounded-lg border border-brand/30 bg-brand/5 px-3.5 py-3">
+                  <div className="flex items-center gap-2 flex-wrap mb-2">
+                    <StatusBadge status={diagnosis.conn_status} />
+                    <span className="font-mono text-[12px] text-gray-200">
+                      {diagnosis.host}:{diagnosis.port} · {diagnosis.system_id} · {diagnosis.bind_type}
+                    </span>
+                    <span className="text-[11px] text-muted ml-auto">
+                      vendor {diagnosis.vendor_status} · retries {diagnosis.reconnect_count}
                     </span>
                   </div>
-                  {l.reason && <div className="font-mono text-[12px] text-amber-200/90 mt-1 break-words">{l.reason}</div>}
-                  {(l.ip || l.system_id) && (
-                    <div className="text-[11px] text-muted font-mono mt-0.5">
-                      {[l.system_id, l.ip, l.port].filter(Boolean).join(' · ')}
+                  <div className="text-[13px] leading-relaxed">
+                    <span className="text-muted font-semibold">Why: </span>{diagnosis.why}
+                  </div>
+                  <div className="text-[13px] leading-relaxed mt-1">
+                    <span className="text-emerald-300 font-semibold">Next: </span>{diagnosis.next_step}
+                  </div>
+                  {diagnosis.last_error && (
+                    <div className="font-mono text-[12px] text-red-300 mt-2 break-words">
+                      last error: {diagnosis.last_error}
                     </div>
                   )}
                 </div>
-              ))}
+              )}
+              {/* ── Dial-attempt trail ── */}
+              {logs.length ? (
+                <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
+                  {logs.map((l) => (
+                    <div key={l.id} className="rounded-lg border border-line/60 bg-ink/50 px-3 py-2 text-[12px]">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <StatusBadge status={l.kind === 'error' ? 'failed' : l.kind === 'bind' ? 'submitted' : 'unknown'} />
+                        <span className="font-mono text-gray-300">{l.kind}{l.result ? ` → ${l.result}` : ''}</span>
+                        <span className="text-[11px] text-muted ml-auto whitespace-nowrap">
+                          {new Date(l.created_at).toLocaleString()}
+                        </span>
+                      </div>
+                      {l.reason && <div className="font-mono text-[12px] text-amber-200/90 mt-1 break-words">{l.reason}</div>}
+                      {(l.ip || l.system_id) && (
+                        <div className="text-[11px] text-muted font-mono mt-0.5">
+                          {[l.system_id, l.ip, l.port].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-[12px] text-muted border border-dashed border-line rounded-lg px-3 py-3 text-center">
+                  No dial-attempt log entries recorded for this vendor yet — the diagnosis above still explains the current state.
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="text-sm text-muted py-6 text-center">No log entries for this vendor yet.</div>
           )}
           <div className="flex gap-2 mt-4">
-            <button className="btn flex-1 !py-1.5 !text-xs" disabled={!logs.length} onClick={copyLogs}>
+            <button className="btn flex-1 !py-1.5 !text-xs" disabled={logsBusy || !diagnosis} onClick={copyLogs}>
               {copied === `logs:${logRow.id}` ? 'Copied ✓' : 'Copy status + logs to share'}
             </button>
             <button className="btn-ghost !py-1.5 !text-xs" onClick={() => setLogRow(null)}>Close</button>

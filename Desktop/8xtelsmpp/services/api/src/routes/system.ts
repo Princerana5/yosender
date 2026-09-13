@@ -60,9 +60,22 @@ router.get('/health/smpp', requirePerm('system.logs'), async (_req, res) => {
 });
 
 // ── Per-connection log trail: why did THIS bind get here? ───────────────────
+// Always returns a `diagnosis` built from the vendor + connection row itself,
+// so the modal explains the state even when smpp_logs has zero rows for this
+// vendor (e.g. disabled, or never dialed yet).
 router.get('/connections/:id/logs', requirePerm('system.logs'), async (req, res) => {
-  const conn = await queryOne<{ vendor_id: string; conn_index: number }>(
-    'SELECT vendor_id, conn_index FROM vendor_connections WHERE id=$1', [req.params.id],
+  const conn = await queryOne<{
+    vendor_id: string; conn_index: number; status: string;
+    last_error: string | null; reconnect_count: number;
+    connected_since: string | null; updated_at: string;
+    vendor_name: string; host: string; port: number; system_id: string;
+    bind_type: string; vendor_status: string;
+  }>(
+    `SELECT vc.vendor_id, vc.conn_index, vc.status, vc.last_error, vc.reconnect_count,
+            vc.connected_since, vc.updated_at,
+            v.name AS vendor_name, v.host, v.port, v.system_id, v.bind_type, v.status AS vendor_status
+     FROM vendor_connections vc JOIN vendors v ON v.id=vc.vendor_id WHERE vc.id=$1`,
+    [req.params.id],
   );
   if (!conn) {
     res.status(404).json({ error: 'connection not found' });
@@ -75,7 +88,52 @@ router.get('/connections/:id/logs', requirePerm('system.logs'), async (req, res)
      WHERE vendor_id=$1 ORDER BY created_at DESC LIMIT $2`,
     [conn.vendor_id, limit],
   );
-  res.json({ connection_id: req.params.id, vendor_id: conn.vendor_id, conn_index: conn.conn_index, logs: rows });
+
+  // ── Diagnosis: plain-language why + next step, derived from live state ──
+  const status = conn.status ?? 'disconnected';
+  let why: string;
+  let next_step: string;
+  if (conn.vendor_status !== 'enabled') {
+    why = `Vendor "${conn.vendor_name}" is ${conn.vendor_status.toUpperCase()} — the worker never dials disabled vendors, so no bind was ever attempted.`;
+    next_step = 'Enable the vendor (Vendors → Enable), the bind starts automatically within seconds.';
+  } else if (status === 'connected') {
+    why = `Bind #${conn.conn_index} (${conn.bind_type}) to ${conn.host}:${conn.port} is UP${conn.connected_since ? ` since ${new Date(conn.connected_since).toLocaleString()}` : ''}.`;
+    next_step = 'No action needed. If traffic is not flowing, check routes and vendor TPS.';
+  } else if (conn.last_error) {
+    why = `Last dial to ${conn.host}:${conn.port} as "${conn.system_id}" failed: ${conn.last_error}. Retried ${conn.reconnect_count ?? 0} time(s) with backoff.`;
+    next_step = 'Verify host/port reachable, credentials correct, and your IP is whitelisted by the vendor. Then press reconnect.';
+  } else if ((conn.reconnect_count ?? 0) > 0) {
+    why = `Bind attempted ${conn.reconnect_count} time(s) but dropped without a recorded error (socket closed / timeout).`;
+    next_step = 'Check firewall + vendor reachability, then press reconnect and watch this log trail.';
+  } else {
+    why = `No dial attempt recorded yet for ${conn.host}:${conn.port}. The worker picks up new vendors automatically; if this persists the worker may have missed the sync signal.`;
+    next_step = 'Press reconnect on this row. If it stays silent, restart the vendor-worker once.';
+  }
+
+  res.json({
+    connection_id: req.params.id,
+    vendor_id: conn.vendor_id,
+    conn_index: conn.conn_index,
+    status,
+    status_line: `${conn.vendor_name} #${conn.conn_index} — ${status.toUpperCase()}${conn.last_error ? ` (${conn.last_error})` : ''}`,
+    diagnosis: {
+      vendor_name: conn.vendor_name,
+      host: conn.host,
+      port: conn.port,
+      system_id: conn.system_id,
+      bind_type: conn.bind_type,
+      vendor_status: conn.vendor_status,
+      conn_status: status,
+      last_error: conn.last_error,
+      reconnect_count: conn.reconnect_count ?? 0,
+      connected_since: conn.connected_since,
+      state_updated_at: conn.updated_at,
+      log_entries: rows.length,
+      why,
+      next_step,
+    },
+    logs: rows,
+  });
 });
 
 // ── SMPP connection control (§9) — signals vendor-worker via Redis ──────────
