@@ -1,11 +1,18 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import { query, queryOne, getPool } from '@8xtel/core';
+import { query, queryOne, getPool, getRedis } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
 
 const router = Router();
 router.use(requirePerm('vendors.read'));
+
+/** Tell vendor-workers to reconcile binds with the vendors table (no restart).
+    Fire-and-forget: a 60s periodic sync in the worker covers missed signals. */
+function signalVendorSync(vendorId: string): void {
+  getRedis().publish('smpp:control', JSON.stringify({ action: 'sync', vendor_id: vendorId, at: Date.now() }))
+    .catch((e) => console.error('[vendors] sync signal failed', (e as Error).message));
+}
 
 // Vendor passwords are encrypted at rest (AES-256-GCM, §32). Key from env.
 function encKey(): Buffer {
@@ -76,6 +83,7 @@ router.post('/', requirePerm('vendors.create'), audit('created_vendor', 'vendor'
         [vendor.id, i],
       );
     }
+    signalVendorSync(vendor.id); // worker picks up the new binds live
     res.status(201).json({ vendor: { ...vendor, password_enc: undefined } });
   } catch {
     res.status(409).json({ error: 'vendor name already exists' });
@@ -142,6 +150,7 @@ router.patch('/:id', requirePerm('vendors.update'), audit('updated_vendor', 'ven
     }
     await pool.query('DELETE FROM vendor_connections WHERE vendor_id=$1 AND conn_index >= $2', [req.params.id, n]);
   }
+  signalVendorSync(req.params.id); // worker hot-reloads config / stops binds live
   const { password_enc: _o, ...safe } = rows[0] as Record<string, unknown>;
   void _o;
   res.json({ vendor: safe });
@@ -167,6 +176,7 @@ router.delete('/:id', requirePerm('vendors.delete'), audit('deleted_vendor', 've
       res.status(404).json({ error: 'not found' });
       return;
     }
+    signalVendorSync(req.params.id); // worker drops the binds live
     res.json({ ok: true });
   } catch (e) {
     await db.query('ROLLBACK');

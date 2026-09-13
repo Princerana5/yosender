@@ -50,12 +50,40 @@ export class VendorConnector {
 
   constructor(private cfg: VendorConfig, private connIndex = 0) {}
 
+  /** Fingerprint of everything that affects the bind — used to skip
+      reloads when a sync carries no actual change. */
+  fingerprint(): string {
+    const c = this.cfg;
+    return [c.host, c.port, c.system_id, c.password_enc, c.bind_type, c.tps, c.reconnect_interval_sec].join('|');
+  }
+
+  matches(cfg: VendorConfig): boolean {
+    const c = this.cfg;
+    return c.host === cfg.host && c.port === cfg.port && c.system_id === cfg.system_id
+      && c.password_enc === cfg.password_enc && c.bind_type === cfg.bind_type
+      && c.tps === cfg.tps && c.reconnect_interval_sec === cfg.reconnect_interval_sec;
+  }
+
   get vendorId(): string {
     return this.cfg.id;
   }
 
+  get index(): number {
+    return this.connIndex;
+  }
+
   get connected(): boolean {
     return this.session !== null;
+  }
+
+  /** Hot-swap config (host/port/creds/TPS…) then reconnect with the new values.
+      Only called for enabled vendors — disabled ones are stopped, not reloaded. */
+  async reload(cfg: VendorConfig): Promise<void> {
+    await this.stop();
+    this.cfg = cfg;
+    this.reconnects = 0;
+    this.stopped = false;
+    await this.connect();
   }
 
   async start(): Promise<void> {
@@ -238,24 +266,88 @@ export async function loadConnectors(): Promise<VendorConnector[]> {
   return out;
 }
 
-/** Listen for connect/disconnect/reconnect commands from the API (§9). */
-export async function listenControl(connectors: VendorConnector[]): Promise<void> {
+export type ConnectorRegistry = Map<string, VendorConnector[]>;
+
+function register(reg: ConnectorRegistry, c: VendorConnector): void {
+  const list = reg.get(c.vendorId) ?? [];
+  list.push(c);
+  reg.set(c.vendorId, list);
+}
+
+/** Reconcile live connectors with the vendors table — no restart needed.
+    - new enabled vendor → build + start its binds
+    - edited vendor (host/port/creds/bind_type/…) → hot-reload + reconnect
+    - disabled/deleted vendor → stop + drop its binds
+    - connection_count change → add or remove binds to match */
+export async function syncConnectors(reg: ConnectorRegistry): Promise<void> {
+  const rows = await query<VendorConfig & { connection_count: number; status: string }>(
+    'SELECT * FROM vendors',
+  );
+  const seen = new Set<string>();
+  for (const v of rows) {
+    seen.add(v.id);
+    const want = v.status === 'enabled' ? Math.min(8, Math.max(1, v.connection_count || 1)) : 0;
+    let list = reg.get(v.id) ?? [];
+    // shrink: stop + drop extras
+    while (list.length > want) {
+      const extra = list.pop();
+      if (extra) await extra.stop();
+    }
+    if (!list.length && want === 0) {
+      reg.delete(v.id);
+      continue;
+    }
+    // grow: add missing binds
+    for (let i = list.length; i < want; i++) {
+      const c = new VendorConnector(v, i);
+      list.push(c);
+      await c.start();
+    }
+    if (list.length) reg.set(v.id, list);
+    // reload only binds whose config actually changed — untouched binds stay up
+    let reloaded = 0;
+    for (const c of list) {
+      if (!c.matches(v)) {
+        await c.reload(v);
+        reloaded++;
+      }
+    }
+    console.log(`[vendor] synced ${v.name}: ${list.length} bind(s)${reloaded ? `, ${reloaded} reloaded` : ''}`);
+  }
+  // deleted vendors: stop + drop everything we still hold
+  for (const [id, list] of [...reg.entries()]) {
+    if (!seen.has(id)) {
+      for (const c of list) await c.stop();
+      reg.delete(id);
+      console.log(`[vendor] removed deleted vendor ${id.slice(0, 8)}`);
+    }
+  }
+}
+
+/** Listen for connect/disconnect/reconnect commands from the API (§9),
+    plus vendor sync signals (created/updated/deleted/disabled). */
+export async function listenControl(reg: ConnectorRegistry): Promise<void> {
   const sub = getRedis().duplicate();
   await sub.subscribe('smpp:control');
   sub.on('message', (_ch, raw) => {
     try {
-      const { connection_id, action } = JSON.parse(raw) as { connection_id: string; action: string };
+      const msg = JSON.parse(raw) as { connection_id?: string; action: string; vendor_id?: string };
       void (async () => {
+        // Vendor-level sync: re-read the vendors table, reconcile binds
+        if (msg.action === 'sync' || msg.action === 'vendor-sync') {
+          await syncConnectors(reg);
+          return;
+        }
+        if (!msg.connection_id) return;
         const row = await query<{ vendor_id: string; conn_index: number }>(
-          'SELECT vendor_id, conn_index FROM vendor_connections WHERE id=$1', [connection_id],
+          'SELECT vendor_id, conn_index FROM vendor_connections WHERE id=$1', [msg.connection_id],
         ).then((r) => r[0]);
         if (!row) return;
-        const conn = connectors.find(
-          (c) => c.vendorId === row.vendor_id,
-        );
+        const list = reg.get(row.vendor_id) ?? [];
+        const conn = list.find((c) => c.index === row.conn_index) ?? list[0];
         if (!conn) return;
-        if (action === 'disconnect') await conn.stop();
-        if (action === 'connect' || action === 'reconnect' || action === 'restart') {
+        if (msg.action === 'disconnect') await conn.stop();
+        if (msg.action === 'connect' || msg.action === 'reconnect' || msg.action === 'restart') {
           await conn.stop();
           await conn.start();
         }

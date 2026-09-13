@@ -2,7 +2,7 @@ import {
   createWorker, getQueue, QUEUES, getPool, queryOne,
   checkTps, incrStat, type MessageJob,
 } from '@8xtel/core';
-import { loadConnectors, listenControl, VendorConnector } from './connector.js';
+import { loadConnectors, listenControl, syncConnectors, type ConnectorRegistry, VendorConnector } from './connector.js';
 
 // ── Vendor worker: sms:vendor-send → upstream submit_sm (§15, §37) ───────────
 // Walks the vendor_chain; on failure records the hop and tries the next vendor
@@ -14,8 +14,7 @@ interface SendJob extends MessageJob {
   client_price: string | null;
 }
 
-let connectors: VendorConnector[] = [];
-const byVendor = new Map<string, VendorConnector[]>();
+const byVendor: ConnectorRegistry = new Map<string, VendorConnector[]>();
 
 function pick(vendorId: string): VendorConnector | undefined {
   const list = (byVendor.get(vendorId) ?? []).filter((c) => c.connected);
@@ -144,16 +143,24 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  connectors = await loadConnectors();
-  for (const c of connectors) {
+  const initial = await loadConnectors();
+  let n = 0;
+  for (const c of initial) {
     const list = byVendor.get(c.vendorId) ?? [];
     list.push(c);
     byVendor.set(c.vendorId, list);
     await c.start();
+    n++;
   }
-  await listenControl(connectors);
+  await listenControl(byVendor);
+  // Safety net: periodic reconcile in case a sync signal is ever missed
+  // (e.g. worker was down when the vendor was created). Cheap + idempotent —
+  // untouched binds are left alone.
+  setInterval(() => {
+    syncConnectors(byVendor).catch((e) => console.error('[vendor] periodic sync failed', (e as Error).message));
+  }, 60_000).unref();
   createWorker(QUEUES.vendorSend, handleJob, 30);
-  console.log(`[8xtelSMPP vendor-worker] started with ${connectors.length} connector(s)`);
+  console.log(`[8xtelSMPP vendor-worker] started with ${n} connector(s)`);
 }
 
 main().catch((e) => {
