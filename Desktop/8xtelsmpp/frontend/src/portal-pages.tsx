@@ -734,7 +734,7 @@ export function PortalCoverage(): JSX.Element {
     <div className="space-y-5">
       <PageHeader
         title="Coverage & rates"
-        sub={`Routes opened for your account · prices per segment in ${currency}`}
+        sub={`Routes you can send on (yours + shared) · prices per segment in ${currency}`}
       />
       <div className="card card-pad flex gap-2 items-center">
         <input className="input max-w-sm" placeholder="Search route, country, ISO, code…"
@@ -744,14 +744,25 @@ export function PortalCoverage(): JSX.Element {
       <DataTable
         keyOf={(r) => r.id}
         rows={filt}
-        empty="No routes opened for your account yet — contact support."
+        empty="No routes available for your account yet — contact support."
         columns={[
           {
             key: 'route', label: 'Route',
             render: (r) => (
               <div>
-                <div className="font-semibold">{r.name}</div>
-                <div className="text-[11px] text-muted font-mono">{r.strategy}{r.prefix ? ` · prefix ${r.prefix}` : ''}</div>
+                <div className="font-semibold">
+                  {r.name}
+                  {r.dedicated ? (
+                    <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25 align-middle">
+                      YOURS
+                    </span>
+                  ) : (
+                    <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line align-middle">
+                      SHARED
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-muted font-mono">{r.strategy}{r.prefix ? ` · prefix ${r.prefix}` : ''}{r.sender_id ? ` · sender ${r.sender_id}` : ''}</div>
               </div>
             ),
           },

@@ -490,18 +490,18 @@ router.get('/coverage', async (req, res) => {
     const rTo = toUsd[walletCurrency] ?? 1;
     return rTo ? +(amount * rFrom / rTo).toFixed(6) : amount;
   };
-  // Routes allotted to this client ONLY: dedicated rows (client_id = me).
-  // Global routes are hidden here even though the engine may still use them
-  // as fallback at send time — Coverage shows what was opened for this account.
+  // Routes serving this client: dedicated rows (client_id = me) PLUS global
+  // fallback rows (client_id NULL) — mirrors the routing engine's candidate
+  // set, so Coverage shows every route the client can actually send on.
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.prefix, r.sender_id,
             r.price_per_segment, COALESCE(r.price_currency,'USD') AS price_currency,
-            true AS dedicated,
+            (r.client_id IS NOT NULL) AS dedicated,
             co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
      WHERE r.status='active' AND r.channel='sms'
-       AND r.client_id=$1::uuid
-     ORDER BY co.name NULLS LAST, r.name`,
+       AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+     ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
     [cid(req)],
   );
   // Client rate-card fallback rows (cheapest per country/prefix)
