@@ -1,5 +1,5 @@
 import smpp from 'smpp';
-import { getRedis, QUEUES, type DlrEvent } from '@8xtel/core';
+import { getPool, getRedis, QUEUES, type DlrEvent } from '@8xtel/core';
 import { handleSession, type SmppSession } from './session.js';
 
 // ── 8xtelSMPP SMPP server — downstream client binds (§5, Phase 2) ───────────
@@ -31,6 +31,11 @@ const server = smpp.createServer((session: SmppSession) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[8xtelSMPP smpp-server] listening on ${HOST}:${PORT}`);
+  // All TCP binds died with the old process — wipe the live mirror so the
+  // panel never shows a ghost "connected" after a restart/redeploy.
+  getPool().query('DELETE FROM client_binds')
+    .then((r) => console.log(`[8xtelSMPP smpp-server] cleared ${r.rowCount} stale client_binds`))
+    .catch((e: Error) => console.error('[smpp] client_binds boot wipe failed', e.message));
 });
 
 // ── Client DLR fan-out (§17): deliver_sm over the bound session ─────────────

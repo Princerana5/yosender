@@ -33,6 +33,8 @@ paths:
     get: { summary: List clients, responses: { '200': { description: ok } } }
     post: { summary: Create client + SMPP credentials, responses: { '201': { description: created } } }
   /clients/{id}: { get: { summary: Client detail, responses: { '200': { description: ok } } } }
+  /clients/{id}/bind-status:
+    get: { summary: Live downstream SMPP bind status + diagnosis, responses: { '200': { description: ok } } }
   /clients/portal-accounts:
     get: { summary: Portal accounts (excludes house), responses: { '200': { description: ok } } }
     post: { summary: Create portal account (client + wallet + login), responses: { '201': { description: created } } }

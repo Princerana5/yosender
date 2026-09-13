@@ -105,7 +105,11 @@ router.get('/', async (req, res) => {
     where.push(`(c.name ILIKE $${params.length} OR c.system_id ILIKE $${params.length} OR c.company_name ILIKE $${params.length})`);
   }
   const rows = await query(
-    `SELECT c.*, (SELECT count(*) FROM client_ips i WHERE i.client_id=c.id AND i.enabled) AS ip_count
+    `SELECT c.*,
+            (SELECT count(*) FROM client_ips i WHERE i.client_id=c.id AND i.enabled) AS ip_count,
+            (SELECT count(*) FROM client_binds b WHERE b.client_id=c.id) AS bind_count,
+            (SELECT max(b.last_activity_at) FROM client_binds b WHERE b.client_id=c.id) AS bind_last_activity,
+            (SELECT max(l.created_at) FROM smpp_logs l WHERE l.client_id=c.id) AS last_seen_at
      FROM clients c ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.created_at DESC LIMIT 200`,
     params,
   );
@@ -266,6 +270,17 @@ router.get('/:id', async (req, res) => {
   );
   const delivered = Number(traffic.delivered);
   const decided = delivered + Number(traffic.failed);
+  // ── Live bind state: current sessions + last-seen fallback ─────────────
+  const binds = await query(
+    `SELECT id, bind_type, remote_ip, connected_since, last_activity_at, submit_count
+     FROM client_binds WHERE client_id=$1 ORDER BY connected_since`,
+    [req.params.id],
+  );
+  const lastLog = await queryOne<{ kind: string | null; result: string | null; reason: string | null; ip: string | null; created_at: string | null }>(
+    `SELECT kind, result, reason, ip, created_at FROM smpp_logs
+     WHERE client_id=$1 ORDER BY created_at DESC LIMIT 1`,
+    [req.params.id],
+  );
   const { password_hash: _omit, ...safe } = row;
   void _omit;
   res.json({
@@ -273,6 +288,8 @@ router.get('/:id', async (req, res) => {
     ips,
     rates,
     routes,
+    binds,
+    last_log: lastLog ?? null,
     stats: {
       traffic_today: Number(traffic.today),
       traffic_all_time: Number(traffic.all_time),
@@ -283,6 +300,102 @@ router.get('/:id', async (req, res) => {
       total_topped_up: Number(funds.topped_up),
       total_spent: Number(funds.spent),
     },
+  });
+});
+
+// ── Bind status + diagnosis: why is this client (not) connected? ────────────
+// Live rows in client_binds = currently bound. No rows = offline, and the
+// diagnosis is built from account state + the latest smpp_logs line so the
+// panel explains the state even when the client never reached us (e.g. their
+// firewall blocks :2775 — no log row exists at all).
+router.get('/:id/bind-status', async (req, res) => {
+  const row = await queryOne<{
+    id: string; name: string; system_id: string; status: string;
+    balance: string; credit_limit: string; tps_limit: number;
+  }>(
+    'SELECT id, name, system_id, status, balance, credit_limit, tps_limit FROM clients WHERE id=$1',
+    [req.params.id],
+  );
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  const binds = await query(
+    `SELECT id, bind_type, remote_ip, connected_since, last_activity_at, submit_count
+     FROM client_binds WHERE client_id=$1 ORDER BY connected_since`,
+    [req.params.id],
+  );
+  const ips = await query<{ ip: string }>(
+    'SELECT ip FROM client_ips WHERE client_id=$1 AND enabled=true', [req.params.id],
+  );
+  const logs = await query(
+    `SELECT kind, ip, system_id, result, reason, created_at FROM smpp_logs
+     WHERE client_id=$1 ORDER BY created_at DESC LIMIT 20`,
+    [req.params.id],
+  );
+
+  const online = binds.length > 0;
+  let status: string;
+  let why: string;
+  let next_step: string;
+  if (online) {
+    const types = [...new Set(binds.map((b) => String((b as Record<string, unknown>).bind_type)))].join(', ');
+    const from = [...new Set(binds.map((b) => String((b as Record<string, unknown>).remote_ip)))].join(', ');
+    status = 'connected';
+    why = `"${row.system_id}" has ${binds.length} live bind(s) (${types}) from ${from}.`;
+    next_step = 'No action needed. If traffic is not flowing, check routes and client TPS/balance.';
+  } else if (row.status !== 'active') {
+    status = 'offline';
+    why = `Account is ${row.status.toUpperCase()} — binds are rejected at auth even if the client dials correctly.`;
+    next_step = `Set the account back to active (Client detail → Account actions)${row.status === 'pending' ? '; pending accounts are usually brand-new and not handed off yet' : ''}.`;
+  } else if (Number(row.balance) + Number(row.credit_limit) <= 0) {
+    status = 'offline';
+    why = 'Wallet is empty (balance + credit ≤ 0) — binds are rejected at auth with "insufficient balance".';
+    next_step = 'Top up the wallet (Billing → Top up), then ask the client to re-bind.';
+  } else {
+    const last = logs[0] as { kind?: string; result?: string; reason?: string; ip?: string; system_id?: string; created_at?: string } | undefined;
+    if (!last) {
+      status = 'offline';
+      why = `No bind attempt ever reached us for "${row.system_id}" — the client's TCP packets are not arriving at :2775. This is a network/firewall issue, not credentials or whitelist.`;
+      next_step = 'Check: 1) server firewall + cloud security group allow TCP 2775, 2) the host IP you gave them is correct, 3) THEY allow outbound TCP 2775 on their firewall (ask them to try telnet <host> 2775).';
+    } else if (last.reason === 'ip_not_whitelisted') {
+      status = 'blocked';
+      why = `Last attempt from ${last.ip ?? 'unknown IP'} was rejected: IP not whitelisted${ips.length ? ` (allowed: ${ips.map((r) => r.ip).join(', ')})` : ''}.`;
+      next_step = `Add ${last.ip} to the IP whitelist below, or fix their egress IP if it changed.`;
+    } else if (last.reason === 'bad_password') {
+      status = 'blocked';
+      why = `Last attempt from ${last.ip ?? 'unknown IP'} used a wrong password.`;
+      next_step = 'Re-issue credentials (Show / re-issue password) and send them the new handoff.';
+    } else if (last.reason === 'unknown_system_id') {
+      status = 'blocked';
+      why = `Last attempt used an unknown system_id ("${last.system_id ?? '?'}").`;
+      next_step = `Confirm they bind with exactly "${row.system_id}" (case-sensitive).`;
+    } else if (last.kind === 'bind' && last.result === 'accept') {
+      status = 'offline';
+      why = `Last bind from ${last.ip ?? 'unknown IP'} was ACCEPTED${last.created_at ? ` at ${new Date(last.created_at).toLocaleString()}` : ''} but the session is now gone — the client disconnected or their link dropped.`;
+      next_step = 'Ask the client to re-bind. If binds flap repeatedly, check their enquire_link interval (30s) and NAT timeouts.';
+    } else {
+      status = 'offline';
+      why = `Last attempt: ${last.kind ?? '?'} / ${last.result ?? '?'}${last.reason ? ` (${last.reason})` : ''}${last.ip ? ` from ${last.ip}` : ''}.`;
+      next_step = 'Check the log trail below, then verify credentials + whitelist with the client.';
+    }
+  }
+
+  res.json({
+    client_id: row.id,
+    system_id: row.system_id,
+    status,
+    binds,
+    whitelist: ips.map((r) => r.ip),
+    last_seen_at: (logs[0] as { created_at?: string } | undefined)?.created_at ?? null,
+    diagnosis: {
+      account_status: row.status,
+      bind_count: binds.length,
+      log_entries: logs.length,
+      why,
+      next_step,
+    },
+    logs,
   });
 });
 

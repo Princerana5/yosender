@@ -27,6 +27,33 @@ interface Issued {
   port: number;
 }
 
+interface ClientBind {
+  id: string;
+  bind_type: string;
+  remote_ip: string;
+  connected_since: string;
+  last_activity_at: string;
+  submit_count: string;
+}
+
+interface BindStatus {
+  status: string;
+  binds: ClientBind[];
+  whitelist: string[];
+  last_seen_at: string | null;
+  diagnosis: { account_status: string; bind_count: number; log_entries: number; why: string; next_step: string };
+  logs: Array<{ kind: string; ip: string | null; system_id: string | null; result: string | null; reason: string | null; created_at: string }>;
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
 function curSym(c: string): string {
   if (c === 'EUR') return '€';
   if (c === 'INR') return '₹';
@@ -58,7 +85,10 @@ export default function ClientDetail(): JSX.Element {
     rates: Array<Record<string, string>>;
     routes: ClientRoute[];
     stats: Stats;
+    binds?: ClientBind[];
+    last_log?: { kind: string; result: string | null; reason: string | null; ip: string | null; created_at: string } | null;
   } | null>(null);
+  const [bind, setBind] = useState<BindStatus | null>(null);
   const [ip, setIp] = useState('');
   const [busy, setBusy] = useState(false);
   const [issued, setIssued] = useState<Issued | null>(null);
@@ -68,8 +98,15 @@ export default function ClientDetail(): JSX.Element {
 
   const load = (): void => {
     api<NonNullable<typeof data>>(`/clients/${id}`).then(setData).catch(() => undefined);
+    api<BindStatus>(`/clients/${id}/bind-status`).then(setBind).catch(() => undefined);
   };
-  useEffect(load, [id]);
+  useEffect(() => {
+    load();
+    const t = setInterval(() => {
+      api<BindStatus>(`/clients/${id}/bind-status`).then(setBind).catch(() => undefined);
+    }, 10_000); // live bind state, like Vendors
+    return () => clearInterval(t);
+  }, [id]);
 
   async function patch(body: object): Promise<void> {
     setBusy(true);
@@ -175,6 +212,67 @@ export default function ClientDetail(): JSX.Element {
       <div className="flex items-center gap-2 -mt-3 text-[13px] text-muted">
         <span className="font-mono bg-panel border border-line rounded px-2 py-0.5">{c.system_id}</span>
         <StatusBadge status={c.status} />
+        {bind && <StatusBadge status={bind.status} />}
+      </div>
+
+      {/* ── Live SMPP bind status (downstream, non-portal binds) ── */}
+      <div className={`card card-pad ${bind && bind.status === 'connected' ? 'border-brand/30' : 'border-line'}`}>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="card-title">SMPP bind status</div>
+            <div className="card-sub">
+              {bind
+                ? bind.status === 'connected'
+                  ? `${bind.binds.length} live session(s) · updates every 10s`
+                  : `Offline · last seen ${timeAgo(bind.last_seen_at)}`
+                : 'Loading…'}
+            </div>
+          </div>
+          {bind && <StatusBadge status={bind.status} />}
+        </div>
+        {bind && (
+          <>
+            {bind.binds.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {bind.binds.map((b) => (
+                  <div key={b.id} className="flex items-center gap-2.5 text-sm bg-ink/50 border border-brand/25 rounded-lg px-3 py-2">
+                    <span className="relative flex w-1.5 h-1.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 bg-emerald-400" />
+                      <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-400" />
+                    </span>
+                    <span className="font-mono text-[13px]">{b.remote_ip}</span>
+                    <span className="text-[11px] text-muted font-mono">{b.bind_type}</span>
+                    <span className="ml-auto text-[11px] text-muted">
+                      since {new Date(b.connected_since).toLocaleString()} · active {timeAgo(b.last_activity_at)} · {Number(b.submit_count).toLocaleString()} submits
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="mt-3 rounded-lg bg-ink/60 border border-line px-3 py-2.5 text-[13px] leading-relaxed">
+              <div><span className="text-muted font-semibold">Why: </span>{bind.diagnosis.why}</div>
+              <div className="mt-1"><span className="text-muted font-semibold">Next: </span>{bind.diagnosis.next_step}</div>
+            </div>
+            {bind.logs.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1.5">
+                  Recent bind trail · {bind.diagnosis.log_entries} entr{bind.diagnosis.log_entries === 1 ? 'y' : 'ies'}
+                </div>
+                <div className="space-y-1 max-h-48 overflow-y-auto">
+                  {bind.logs.slice(0, 8).map((l, i) => (
+                    <div key={i} className="flex items-center gap-2 text-[12px] font-mono bg-ink/40 border border-line/60 rounded px-2.5 py-1.5">
+                      <span className="text-muted shrink-0">{new Date(l.created_at).toLocaleString()}</span>
+                      <span className="text-sky-300 shrink-0">{l.kind}</span>
+                      <span className={l.result === 'accept' ? 'text-emerald-300' : 'text-red-300'}>{l.result ?? '—'}</span>
+                      <span className="text-gray-300 truncate">{l.reason ?? ''}</span>
+                      <span className="ml-auto text-muted shrink-0">{l.ip ?? ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div className="card card-pad border-brand/30">

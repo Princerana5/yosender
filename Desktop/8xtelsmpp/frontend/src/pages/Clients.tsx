@@ -6,7 +6,17 @@ import { PageHeader, DataTable, StatusBadge, SearchInput, Modal, EmptyState, Ico
 interface Client {
   id: string; name: string; company_name: string | null; system_id: string;
   status: string; balance: string; credit_limit: string; tps_limit: number; ip_count: string;
+  bind_count: string; bind_last_activity: string | null; last_seen_at: string | null;
   is_house?: boolean;
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return 'never';
+  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 interface Handoff {
@@ -52,7 +62,11 @@ export default function Clients(): JSX.Element {
       .then((r) => setClients(r.clients))
       .catch(() => undefined);
   };
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 10_000); // live bind badges, like Vendors
+    return () => clearInterval(t);
+  }, []);
 
   function openModal(): void {
     setForm({ name: '', system_id: '', password: randomPassword(), passwordMode: 'generate', showPw: false, allowed_ips: '', currency: 'USD', tps_limit: '50' });
@@ -211,6 +225,22 @@ export default function Clients(): JSX.Element {
             },
             { key: 'system_id', label: 'System ID', mono: true },
             { key: 'status', label: 'Status', render: (c) => <StatusBadge status={c.status} /> },
+            {
+              key: 'bind', label: 'SMPP bind',
+              render: (c) => {
+                const n = Number(c.bind_count ?? 0);
+                if (c.is_house) return <span className="text-[11px] text-muted">—</span>;
+                return n > 0 ? (
+                  <span title={`${n} live bind(s) · active ${timeAgo(c.bind_last_activity)}`}>
+                    <StatusBadge status="connected" />
+                  </span>
+                ) : (
+                  <span title={`Last seen ${timeAgo(c.last_seen_at)}`}>
+                    <StatusBadge status="disconnected" />
+                  </span>
+                );
+              },
+            },
             { key: 'balance', label: 'Balance', right: true, render: (c) => <Money value={c.balance} /> },
             { key: 'credit_limit', label: 'Credit', right: true, render: (c) => <Money value={c.credit_limit} /> },
             { key: 'tps_limit', label: 'TPS', right: true, render: (c) => <span className="tabular-nums">{c.tps_limit}</span> },

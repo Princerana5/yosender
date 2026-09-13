@@ -37,6 +37,8 @@ interface SessionState {
   principal: BindPrincipal | null;
   bindType: string | null;
   remoteIp: string;
+  /** client_binds row for this session (null until a bind is accepted) */
+  bindRowId: string | null;
 }
 
 /** ESME status codes (SMPP v3.4 §5.1.3) */
@@ -56,7 +58,7 @@ export function handleSession(
   remoteIp: string,
   hooks: { onBind?: (clientId: string, s: SmppSession) => void; onClose?: (clientId: string) => void } = {},
 ): void {
-  const state: SessionState = { principal: null, bindType: null, remoteIp };
+  const state: SessionState = { principal: null, bindType: null, remoteIp, bindRowId: null };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const respond = (pdu: Pdu, command_status: number, extra: Record<string, any> = {}): void => {
@@ -85,6 +87,18 @@ export function handleSession(
          VALUES ('bind',$1,$2,$3,'accept',$4)`,
         [state.principal.client_id, remoteIp, state.principal.system_id, `bind_${type}`],
       );
+      // ── Live bind mirror: one row per accepted session, read by the API ──
+      // Best-effort: a mirror failure must never fail the bind itself.
+      try {
+        const { rows } = await getPool().query(
+          `INSERT INTO client_binds (client_id, system_id, bind_type, remote_ip)
+           VALUES ($1,$2,$3,$4) RETURNING id`,
+          [state.principal.client_id, state.principal.system_id, type, remoteIp],
+        );
+        state.bindRowId = (rows[0] as { id: string }).id;
+      } catch (e) {
+        console.error('[smpp] client_binds insert failed', (e as Error).message);
+      }
       session.send(pdu.response({ command_status: ST.ROK, system_id: '8xtelSMPP' }));
       session.resume();
       hooks.onBind?.(state.principal.client_id, session);
@@ -154,12 +168,23 @@ export function handleSession(
     };
     await getQueue(QUEUES.submit).add('submit', job, { jobId: internalId });
     await incrStat('submitted');
+    if (state.bindRowId) {
+      void getPool().query(
+        'UPDATE client_binds SET submit_count = submit_count + 1, last_activity_at=now() WHERE id=$1',
+        [state.bindRowId],
+      ).catch((e: Error) => console.error('[smpp] client_binds touch failed', e.message));
+    }
 
     respond(pdu, ST.ROK, { message_id: internalId });
   });
 
   session.on('enquire_link', (pdu: Pdu) => {
     session.send(pdu.response({ command_status: ST.ROK }));
+    if (state.bindRowId) {
+      void getPool().query('UPDATE client_binds SET last_activity_at=now() WHERE id=$1', [
+        state.bindRowId,
+      ]).catch((e: Error) => console.error('[smpp] client_binds touch failed', e.message));
+    }
   });
 
   session.on('unbind', (pdu: Pdu) => {
@@ -168,6 +193,12 @@ export function handleSession(
   });
 
   session.on('close', () => {
+    if (state.bindRowId) {
+      const id = state.bindRowId;
+      state.bindRowId = null;
+      void getPool().query('DELETE FROM client_binds WHERE id=$1', [id])
+        .catch((e: Error) => console.error('[smpp] client_binds delete failed', e.message));
+    }
     if (state.principal) {
       console.log(`[smpp] unbind ${state.principal.system_id}`);
       hooks.onClose?.(state.principal.client_id);
