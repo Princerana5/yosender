@@ -42,7 +42,7 @@ export default function Clients(): JSX.Element {
   const [formErr, setFormErr] = useState('');
   const [form, setForm] = useState({
     name: '', system_id: '', password: '', passwordMode: 'generate' as 'generate' | 'manual',
-    showPw: false, allowed_ips: '', currency: 'USD',
+    showPw: false, allowed_ips: '', currency: 'USD', tps_limit: '50',
   });
   const [created, setCreated] = useState<Handoff | null>(null);
   const [copied, setCopied] = useState(false);
@@ -55,7 +55,7 @@ export default function Clients(): JSX.Element {
   useEffect(load, []);
 
   function openModal(): void {
-    setForm({ name: '', system_id: '', password: randomPassword(), passwordMode: 'generate', showPw: false, allowed_ips: '', currency: 'USD' });
+    setForm({ name: '', system_id: '', password: randomPassword(), passwordMode: 'generate', showPw: false, allowed_ips: '', currency: 'USD', tps_limit: '50' });
     setFormErr('');
     setShow(true);
   }
@@ -73,6 +73,7 @@ export default function Clients(): JSX.Element {
           ...(form.passwordMode === 'manual' ? { password: form.password } : {}),
           status: 'active',
           currency: form.currency,
+          tps_limit: Math.max(1, Number(form.tps_limit) || 50),
           allowed_ips: form.allowed_ips.split(',').map((s) => s.trim()).filter(Boolean),
         }),
       });
@@ -92,6 +93,25 @@ export default function Clients(): JSX.Element {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }).catch(() => undefined);
+  }
+
+  async function removeClient(c: Client): Promise<void> {
+    if (c.is_house) {
+      window.alert('House accounts cannot be deleted.');
+      return;
+    }
+    const ok = window.confirm(
+      `Delete client "${c.name}" (${c.system_id})?\n\nWallet, ledger, IPs, rates and sender IDs are removed. Message history is kept (detached). This cannot be undone.\n\nType DELETE in the next prompt to confirm.`,
+    );
+    if (!ok) return;
+    const typed = window.prompt(`Confirm delete — type DELETE to remove "${c.system_id}":`);
+    if (typed !== 'DELETE') return;
+    try {
+      await api(`/clients/${c.id}`, { method: 'DELETE' });
+      load();
+    } catch (e) {
+      window.alert(`Could not delete client: ${(e as Error).message}`);
+    }
   }
 
   return (
@@ -195,6 +215,18 @@ export default function Clients(): JSX.Element {
             { key: 'credit_limit', label: 'Credit', right: true, render: (c) => <Money value={c.credit_limit} /> },
             { key: 'tps_limit', label: 'TPS', right: true, render: (c) => <span className="tabular-nums">{c.tps_limit}</span> },
             { key: 'ip_count', label: 'IPs', right: true, render: (c) => <span className="tabular-nums">{c.ip_count}</span> },
+            {
+              key: 'actions', label: '',
+              render: (c) => (
+                c.is_house ? <span className="text-[11px] text-muted">—</span> : (
+                  <button className="btn-ghost !px-2 !py-1 text-red-300 hover:text-red-200"
+                    title={`Delete client "${c.name}"`}
+                    onClick={() => removeClient(c)}>
+                    <Icon name="trash" size={14} />
+                  </button>
+                )
+              ),
+            },
           ]}
         />
       ) : (
@@ -268,6 +300,20 @@ export default function Clients(): JSX.Element {
                     {cur === 'USD' ? '$ USD' : cur === 'EUR' ? '€ EUR' : '₹ INR'}
                   </button>
                 ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="label">TPS limit <span className="text-gray-600">(msgs/sec · default 50)</span></label>
+                <input className="input font-mono" value={form.tps_limit}
+                  onChange={(e) => setForm({ ...form, tps_limit: e.target.value })} inputMode="numeric" />
+              </div>
+              <div>
+                <label className="label">Status</label>
+                <div className="rounded-lg border border-line bg-ink/50 px-3 py-2.5 text-sm text-emerald-300 font-semibold">
+                  active <span className="text-muted font-normal text-xs">· created ready to bind</span>
+                </div>
               </div>
             </div>
 

@@ -12,6 +12,7 @@ import Messages from './pages/Messages.js';
 import RoutesPage from './pages/Routes.js';
 import Billing from './pages/Billing.js';
 import { TablePage, Connections, Reports, SendersPage } from './pages/Generic.js';
+import UsersPage from './pages/Users.js';
 import Traffic from './pages/Traffic.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
@@ -178,24 +179,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               />
             }
           />
-          <Route
-            path="users"
-            element={
-              <TablePage
-                title="Users & roles"
-                sub="RBAC: super_admin → read_only"
-                endpoint="/system/users"
-                columns={[
-                  { key: 'email', label: 'Email' },
-                  { key: 'role', label: 'Role', mono: true },
-                  {
-                    key: 'is_active', label: 'Active',
-                    render: (r) => <StatusBadge status={r.is_active ? 'active' : 'disabled'} />,
-                  },
-                ]}
-              />
-            }
-          />
+          <Route path="users" element={<UsersPage />} />
         </Route>
         {/* ── Client portal: separate login + token, no access to console ── */}
         <Route path="/portal/login" element={<PortalLogin />} />

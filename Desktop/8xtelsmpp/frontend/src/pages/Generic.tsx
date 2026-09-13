@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
-import { PageHeader, DataTable, StatusBadge, StatCard, Bars, Icon, Money } from '../components';
+import { PageHeader, DataTable, StatusBadge, StatCard, Bars, Icon, Money, Modal } from '../components';
 
 // Generic JSON-table page for: policies, rates, senders, countries,
 // connectors, audit, users.
@@ -117,11 +117,38 @@ export function SendersPage({ title, sub, endpoint, columns }: {
   );
 }
 
+interface SmppConn extends Record<string, string> {
+  id: string;
+  vendor_name: string;
+  host: string;
+  port: string;
+  system_id: string;
+  bind_type: string;
+  conn_index: string;
+  status: string;
+  status_line: string;
+  last_error: string;
+  last_log_kind: string;
+  last_log_at: string;
+  connected_since: string;
+  reconnect_count: string;
+}
+
+interface ConnLog {
+  id: number; kind: string; ip: string | null; port: number | null;
+  system_id: string | null; result: string | null; reason: string | null;
+  created_at: string;
+}
+
 export function Connections(): JSX.Element {
-  const [rows, setRows] = useState<Array<Record<string, string>>>([]);
+  const [rows, setRows] = useState<SmppConn[]>([]);
   const [acting, setActing] = useState('');
+  const [copied, setCopied] = useState('');
+  const [logRow, setLogRow] = useState<SmppConn | null>(null);
+  const [logs, setLogs] = useState<ConnLog[]>([]);
+  const [logsBusy, setLogsBusy] = useState(false);
   const load = (): void => {
-    api<{ connections: Array<Record<string, string>> }>('/system/health/smpp')
+    api<{ connections: SmppConn[] }>('/system/health/smpp')
       .then((r) => setRows(r.connections))
       .catch(() => undefined);
   };
@@ -141,6 +168,45 @@ export function Connections(): JSX.Element {
     }
   }
 
+  function copyStatus(r: SmppConn): void {
+    const msg =
+      `${r.status_line}\n` +
+      `Vendor: ${r.vendor_name} (${r.host}:${r.port} · ${r.system_id} · bind ${r.bind_type} #${r.conn_index})\n` +
+      `Connected since: ${r.connected_since || '—'} · reconnects: ${r.reconnect_count || '0'}\n` +
+      `Last event: ${r.last_log_kind || '—'}${r.last_log_at ? ` at ${new Date(r.last_log_at).toLocaleString()}` : ''}`;
+    navigator.clipboard.writeText(msg).then(() => {
+      setCopied(r.id);
+      setTimeout(() => setCopied(''), 2000);
+    }).catch(() => undefined);
+  }
+
+  function copyLogs(): void {
+    if (!logRow || !logs.length) return;
+    const msg =
+      `${logRow.status_line}\n` +
+      logs.map((l) =>
+        `[${new Date(l.created_at).toLocaleString()}] ${l.kind}${l.result ? ` → ${l.result}` : ''}${l.reason ? ` — ${l.reason}` : ''}`,
+      ).join('\n');
+    navigator.clipboard.writeText(msg).then(() => {
+      setCopied(`logs:${logRow.id}`);
+      setTimeout(() => setCopied(''), 2000);
+    }).catch(() => undefined);
+  }
+
+  async function openLogs(r: SmppConn): Promise<void> {
+    setLogRow(r);
+    setLogs([]);
+    setLogsBusy(true);
+    try {
+      const res = await api<{ logs: ConnLog[] }>(`/system/connections/${r.id}/logs?limit=100`);
+      setLogs(res.logs);
+    } catch {
+      setLogs([]);
+    } finally {
+      setLogsBusy(false);
+    }
+  }
+
   const connected = rows.filter((r) => r.status === 'connected').length;
 
   return (
@@ -155,21 +221,43 @@ export function Connections(): JSX.Element {
         rows={rows}
         empty="No vendor connections configured yet."
         columns={[
-          { key: 'vendor_name', label: 'Vendor', render: (r) => <span className="font-semibold">{r.vendor_name}</span> },
+          {
+            key: 'vendor_name', label: 'Vendor / bind',
+            render: (r) => (
+              <div>
+                <span className="font-semibold">{r.vendor_name}</span>
+                <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line align-middle font-mono">
+                  {(r.bind_type ?? 'transceiver').toUpperCase()} #{r.conn_index ?? 0}
+                </span>
+                <div className="text-[11px] text-muted font-mono">{r.host}:{r.port} · {r.system_id}</div>
+              </div>
+            ),
+          },
           { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
+          {
+            key: 'reason', label: 'Reason',
+            render: (r) => (r.last_error || r.status_line)
+              ? (
+                <span className="block max-w-[260px]">
+                  <span className="text-xs font-mono truncate block" title={r.last_error || r.status_line}>
+                    {r.last_error || r.status_line}
+                  </span>
+                  {r.last_log_at && (
+                    <span className="text-[10px] text-muted">
+                      {r.last_log_kind ?? 'event'} · {new Date(r.last_log_at).toLocaleString()}
+                    </span>
+                  )}
+                </span>
+              )
+              : <span className="text-muted">—</span>,
+          },
           { key: 'messages_sent', label: 'Sent', right: true, render: (r) => <span className="tabular-nums">{Number(r.messages_sent).toLocaleString()}</span> },
           { key: 'messages_received', label: 'Recv', right: true, render: (r) => <span className="tabular-nums">{Number(r.messages_received).toLocaleString()}</span> },
           { key: 'dlr_count', label: 'DLRs', right: true, render: (r) => <span className="tabular-nums">{Number(r.dlr_count).toLocaleString()}</span> },
           {
-            key: 'last_error', label: 'Last error',
-            render: (r) => r.last_error
-              ? <span className="text-xs text-red-300 font-mono truncate block max-w-[240px]" title={r.last_error}>{r.last_error}</span>
-              : <span className="text-muted">—</span>,
-          },
-          {
             key: 'actions', label: 'Actions',
             render: (r) => (
-              <span className="flex gap-1">
+              <span className="flex gap-1 flex-wrap">
                 {['connect', 'reconnect', 'disconnect'].map((a) => (
                   <button key={a} disabled={!!acting}
                     className={`text-[11px] font-semibold px-2 py-1 rounded-md border transition ${a === 'disconnect'
@@ -179,11 +267,58 @@ export function Connections(): JSX.Element {
                     {acting === `${r.id}:${a}` ? '…' : a}
                   </button>
                 ))}
+                <button className="text-[11px] font-semibold px-2 py-1 rounded-md border border-line text-muted hover:text-white hover:border-brand/40"
+                  onClick={() => openLogs(r)}>
+                  logs
+                </button>
+                <button className="text-[11px] font-semibold px-2 py-1 rounded-md border border-line text-muted hover:text-white hover:border-brand/40"
+                  onClick={() => copyStatus(r)}>
+                  {copied === r.id ? 'copied ✓' : 'copy'}
+                </button>
               </span>
             ),
           },
         ]}
       />
+
+      {logRow && (
+        <Modal title={`Logs — ${logRow.vendor_name} · ${String(logRow.bind_type).toUpperCase()} #${logRow.conn_index}`} onClose={() => setLogRow(null)} wide>
+          <div className="rounded-lg border border-line bg-ink/60 px-3 py-2.5 font-mono text-[12px] mb-3">
+            <span className="text-emerald-300">{logRow.status_line}</span>
+          </div>
+          {logsBusy ? (
+            <div className="text-sm text-muted py-6 text-center animate-pulse">Loading logs…</div>
+          ) : logs.length ? (
+            <div className="space-y-1.5 max-h-[50vh] overflow-y-auto">
+              {logs.map((l) => (
+                <div key={l.id} className="rounded-lg border border-line/60 bg-ink/50 px-3 py-2 text-[12px]">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <StatusBadge status={l.kind === 'error' ? 'failed' : l.kind === 'bind' ? 'submitted' : 'unknown'} />
+                    <span className="font-mono text-gray-300">{l.kind}{l.result ? ` → ${l.result}` : ''}</span>
+                    <span className="text-[11px] text-muted ml-auto whitespace-nowrap">
+                      {new Date(l.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                  {l.reason && <div className="font-mono text-[12px] text-amber-200/90 mt-1 break-words">{l.reason}</div>}
+                  {(l.ip || l.system_id) && (
+                    <div className="text-[11px] text-muted font-mono mt-0.5">
+                      {[l.system_id, l.ip, l.port].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-muted py-6 text-center">No log entries for this vendor yet.</div>
+          )}
+          <div className="flex gap-2 mt-4">
+            <button className="btn flex-1 !py-1.5 !text-xs" disabled={!logs.length} onClick={copyLogs}>
+              {copied === `logs:${logRow.id}` ? 'Copied ✓' : 'Copy status + logs to share'}
+            </button>
+            <button className="btn-ghost !py-1.5 !text-xs" onClick={() => setLogRow(null)}>Close</button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

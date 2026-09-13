@@ -36,7 +36,7 @@ const portalCreateSchema = z.object({
   password: z.string().min(8).optional(), // portal password, auto-generated if omitted
   currency: z.enum(['USD', 'EUR', 'INR']).default('USD'),
   credit_limit: z.number().nonnegative().default(0),
-  tps_limit: z.number().int().positive().default(10),
+  tps_limit: z.number().int().positive().default(50),
 });
 
 router.post('/portal-accounts', requirePerm('clients.create'), audit('created_portal_account', 'client'), async (req, res) => {
@@ -121,7 +121,7 @@ const createSchema = z.object({
   status: z.enum(['active', 'suspended', 'blocked', 'pending']).default('pending'),
   credit_limit: z.number().nonnegative().default(0),
   currency: z.enum(['USD', 'EUR', 'INR']).default('USD'),
-  tps_limit: z.number().int().positive().default(10),
+  tps_limit: z.number().int().positive().default(50),
   daily_limit: z.number().int().positive().nullable().optional(),
   monthly_limit: z.number().int().positive().nullable().optional(),
   allowed_ips: z.array(z.string()).default([]),
@@ -389,6 +389,51 @@ router.patch('/:id/ips/:ipId', requirePerm('clients.update'), audit('toggled_cli
     [req.body.enabled !== false, req.params.ipId, req.params.id],
   );
   res.json({ ip: rows[0] ?? null });
+});
+
+// ── Delete client (§4) ───────────────────────────────────────────────────────
+// House accounts can never be deleted. Clients with traffic keep their
+// message history (messages.client_id is nulled); wallet + ledger rows are
+// removed with the account.
+router.delete('/:id', requirePerm('clients.delete'), audit('deleted_client', 'client'), async (req, res) => {
+  const row = await queryOne<{ id: string; name: string; system_id: string; is_house: boolean }>(
+    'SELECT id, name, system_id, COALESCE(is_house,false) AS is_house FROM clients WHERE id=$1',
+    [req.params.id],
+  );
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (row.is_house) {
+    res.status(422).json({ error: 'house accounts cannot be deleted' });
+    return;
+  }
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    // Detach history so message/DLR reports survive the delete
+    await db.query('UPDATE billing_records SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    await db.query('UPDATE messages SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    await db.query('UPDATE campaigns SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    await db.query('UPDATE routes SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM transactions WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM wallets WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM sender_requests WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM topup_requests WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM sender_ids WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM client_rates WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM client_ips WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM smpp_logs WHERE client_id=$1', [req.params.id]);
+    const r = await db.query('DELETE FROM clients WHERE id=$1', [req.params.id]);
+    await db.query('COMMIT');
+    res.json({ ok: true, deleted: r.rowCount });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: `delete failed: ${(e as Error).message}` });
+  } finally {
+    db.release();
+  }
 });
 
 // ── Regenerate SMPP password (§5, §32 rotation) ─────────────────────────────

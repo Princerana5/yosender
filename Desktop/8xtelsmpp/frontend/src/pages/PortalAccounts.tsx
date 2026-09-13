@@ -38,7 +38,7 @@ export default function PortalAccounts(): JSX.Element {
   const [form, setForm] = useState({
     name: '', company_name: '', system_id: '', portal_email: '',
     password: '', passwordMode: 'generate' as 'generate' | 'manual',
-    showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '10',
+    showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '50',
   });
   const [issued, setIssued] = useState<(Issued & { name: string }) | null>(null);
   const [copied, setCopied] = useState(false);
@@ -61,7 +61,7 @@ export default function PortalAccounts(): JSX.Element {
     setForm({
       name: '', company_name: '', system_id: '', portal_email: '',
       password: randomPassword(), passwordMode: 'generate',
-      showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '10',
+      showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '50',
     });
     setFormErr('');
     setShowCreate(true);
@@ -82,7 +82,7 @@ export default function PortalAccounts(): JSX.Element {
           ...(form.passwordMode === 'manual' ? { password: form.password } : {}),
           currency: form.currency,
           credit_limit: Number(form.credit_limit) || 0,
-          tps_limit: Number(form.tps_limit) || 10,
+          tps_limit: Math.max(1, Number(form.tps_limit) || 50),
         }),
       });
       setIssued({ ...r.portal, name: r.client.name });

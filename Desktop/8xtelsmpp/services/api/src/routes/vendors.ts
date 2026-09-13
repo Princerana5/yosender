@@ -130,9 +130,50 @@ router.patch('/:id', requirePerm('vendors.update'), audit('updated_vendor', 'ven
     res.status(404).json({ error: 'not found' });
     return;
   }
+  // Keep vendor_connections rows in sync when the bind count changes
+  if (req.body?.connection_count !== undefined) {
+    const n = Math.min(8, Math.max(1, Number(req.body.connection_count) || 1));
+    const pool = getPool();
+    for (let i = 0; i < n; i++) {
+      await pool.query(
+        'INSERT INTO vendor_connections (vendor_id, conn_index) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+        [req.params.id, i],
+      );
+    }
+    await pool.query('DELETE FROM vendor_connections WHERE vendor_id=$1 AND conn_index >= $2', [req.params.id, n]);
+  }
   const { password_enc: _o, ...safe } = rows[0] as Record<string, unknown>;
   void _o;
   res.json({ vendor: safe });
+});
+
+// ── Delete vendor ────────────────────────────────────────────────────────────
+// Detaches routes (route_vendors rows cascade) and keeps message history
+// (messages.vendor_id is nulled) so reports survive the delete.
+router.delete('/:id', requirePerm('vendors.delete'), audit('deleted_vendor', 'vendor'), async (req, res) => {
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    await db.query('UPDATE billing_records SET vendor_id=NULL WHERE vendor_id=$1', [req.params.id]);
+    await db.query('UPDATE message_events SET vendor_id=NULL WHERE vendor_id=$1', [req.params.id]);
+    await db.query('UPDATE messages SET vendor_id=NULL WHERE vendor_id=$1', [req.params.id]);
+    await db.query('DELETE FROM smpp_logs WHERE vendor_id=$1', [req.params.id]);
+    await db.query('DELETE FROM vendor_rates WHERE vendor_id=$1', [req.params.id]);
+    await db.query('DELETE FROM vendor_connections WHERE vendor_id=$1', [req.params.id]);
+    const r = await db.query('DELETE FROM vendors WHERE id=$1', [req.params.id]);
+    await db.query('COMMIT');
+    if (!r.rowCount) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: `delete failed: ${(e as Error).message}` });
+  } finally {
+    db.release();
+  }
 });
 
 // ── Rate card CSV import (§14): vendor_id,country_iso,prefix,operator,cost ──
