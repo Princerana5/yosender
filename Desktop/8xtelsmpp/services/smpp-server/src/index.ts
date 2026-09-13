@@ -8,6 +8,10 @@ import { handleSession, type SmppSession } from './session.js';
 
 const PORT = Number(process.env.SMPP_PORT ?? 2775);
 const HOST = process.env.SMPP_HOST ?? '0.0.0.0';
+// Alt listener for clients whose network blocks outbound 2775 (very common
+// on corporate firewalls). Same handler, shared session registry — binds on
+// either port behave identically. Unset = single listener.
+const ALT_PORT = process.env.SMPP_ALT_PORT ? Number(process.env.SMPP_ALT_PORT) : null;
 
 // Live session registry for DLR delivery back to clients
 const sessions = new Map<string, SmppSession>(); // client_id → session
@@ -16,7 +20,7 @@ export function getClientSession(clientId: string): SmppSession | undefined {
   return sessions.get(clientId);
 }
 
-const server = smpp.createServer((session: SmppSession) => {
+function onConnection(session: SmppSession): void {
   // smpp lib exposes remote address on the socket
   const remoteIp =
     ((session as unknown as { socket?: { remoteAddress?: string } }).socket?.remoteAddress ?? 'unknown')
@@ -27,7 +31,9 @@ const server = smpp.createServer((session: SmppSession) => {
       if (sessions.get(clientId) === session) sessions.delete(clientId);
     },
   });
-});
+}
+
+const server = smpp.createServer(onConnection);
 
 server.listen(PORT, HOST, () => {
   console.log(`[8xtelSMPP smpp-server] listening on ${HOST}:${PORT}`);
@@ -37,6 +43,14 @@ server.listen(PORT, HOST, () => {
     .then((r) => console.log(`[8xtelSMPP smpp-server] cleared ${r.rowCount} stale client_binds`))
     .catch((e: Error) => console.error('[smpp] client_binds boot wipe failed', e.message));
 });
+
+// Optional second listener (e.g. 443) for firewall-restricted clients
+if (ALT_PORT && ALT_PORT !== PORT) {
+  const alt = smpp.createServer(onConnection);
+  alt.listen(ALT_PORT, HOST, () => {
+    console.log(`[8xtelSMPP smpp-server] alt listener on ${HOST}:${ALT_PORT}`);
+  });
+}
 
 // ── Client DLR fan-out (§17): deliver_sm over the bound session ─────────────
 async function startClientDlrConsumer(): Promise<void> {

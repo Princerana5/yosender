@@ -71,6 +71,10 @@ services:
       PG_POOL_MAX: ${PG_POOL_MAX:-10}
     ports:
       - "${SMPP_PORT:-2775}:2775"
+      # Alt SMPP listener (same-number mapping): when SMPP_ALT_PORT is set in
+      # .env (e.g. 443), the server also listens on that port inside the
+      # container. Publish it via docker-compose.override.yml on hosts that
+      # need it — base compose stays single-port so unset means unexposed.
     depends_on:
       postgres:
         condition: service_healthy
