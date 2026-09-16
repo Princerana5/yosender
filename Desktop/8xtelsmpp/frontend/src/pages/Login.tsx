@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Icon } from '../components';
+import { Icon, ThemeToggle } from '../components';
 
 const BASE = import.meta.env.VITE_API_URL ?? '';
 
@@ -79,7 +79,10 @@ export default function Login(): JSX.Element {
         </div>
 
         {/* form */}
-        <form onSubmit={submit} className="p-8 space-y-5">
+        <form onSubmit={submit} className="p-8 space-y-5 relative">
+          <div className="absolute top-4 right-4">
+            <ThemeToggle />
+          </div>
           <div>
             <div className="text-xl font-bold tracking-tight">Welcome back</div>
             <div className="text-sm text-muted mt-1">Sign in to the operations console</div>

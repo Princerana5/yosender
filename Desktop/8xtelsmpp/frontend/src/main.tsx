@@ -16,8 +16,12 @@ import UsersPage from './pages/Users.js';
 import Traffic from './pages/Traffic.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
-import { StatusBadge } from './components.js';
+import ClientApi from './pages/ClientApi.js';
+import Docs from './pages/Docs.js';
+import { StatusBadge, initTheme } from './components.js';
 import { token } from './api.js';
+
+initTheme(); // saved light/dark before first paint — no theme flash
 import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
 import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage } from './portal-pages.js';
 
@@ -56,6 +60,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="clients" element={<Clients />} />
           <Route path="clients/:id" element={<ClientDetail />} />
           <Route path="portal-accounts" element={<PortalAccounts />} />
+          <Route path="client-api" element={<ClientApi />} />
+          <Route path="docs" element={<Docs />} />
           <Route path="vendors" element={<Vendors />} />
           <Route path="connections" element={<Connections />} />
           <Route path="routes" element={<RoutesPage />} />

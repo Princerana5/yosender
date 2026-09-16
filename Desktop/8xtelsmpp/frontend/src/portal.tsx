@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { PageHeader, StatCard, DataTable, StatusBadge, Money, Icon } from './components';
+import { PageHeader, StatCard, DataTable, StatusBadge, Money, Icon, ThemeToggle } from './components';
 
 // ── Portal API client (separate token from the admin console) ────────────────
 const BASE = import.meta.env.VITE_API_URL ?? '';
@@ -98,7 +98,10 @@ export function PortalLogin(): JSX.Element {
           </div>
           <div className="relative text-[11px] text-muted">Need help? Contact your account manager.</div>
         </div>
-        <form onSubmit={submit} className="p-8 space-y-5">
+        <form onSubmit={submit} className="p-8 space-y-5 relative">
+          <div className="absolute top-4 right-4">
+            <ThemeToggle />
+          </div>
           <div>
             <div className="text-xl font-bold tracking-tight">Client sign in</div>
             <div className="text-sm text-muted mt-1">Use the portal email + password from your provider</div>
@@ -168,6 +171,7 @@ export function PortalLayout(): JSX.Element {
         </nav>
         <div className="ml-auto flex items-center gap-3">
           {name && <span className="text-xs text-muted">{name}</span>}
+          <ThemeToggle />
           <button className="navlink" onClick={() => portalLogout(nav)}>
             <Icon name="x" size={14} /> Logout
           </button>

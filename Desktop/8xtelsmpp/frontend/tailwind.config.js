@@ -4,17 +4,19 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 8xtelSMPP enterprise NOC theme — deep slate + emerald signal
-        ink: '#0a0f14', // app background
-        panel: '#101820', // cards / sidebar
-        panel2: '#151f29', // raised surfaces
-        line: '#1f2c38', // borders
-        brand: '#10b981', // emerald primary
+        // Theme-aware tokens: dark defaults, overridden under `html.light`
+        // via CSS variables (see index.css). All existing classes keep working
+        // in both themes with zero per-file changes.
+        ink: 'rgb(var(--c-ink) / <alpha-value>)', // app background
+        panel: 'rgb(var(--c-panel) / <alpha-value>)', // cards / sidebar
+        panel2: 'rgb(var(--c-panel2) / <alpha-value>)', // raised surfaces
+        line: 'rgb(var(--c-line) / <alpha-value>)', // borders
+        brand: '#10b981', // emerald primary (same both themes)
         branddim: '#065f46',
         accent: '#38bdf8', // sky for info/links
         warn: '#f59e0b',
         danger: '#ef4444',
-        muted: '#8b98a5',
+        muted: 'rgb(var(--c-muted) / <alpha-value>)',
       },
       fontFamily: {
         sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],

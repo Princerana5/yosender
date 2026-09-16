@@ -25,7 +25,57 @@ const P: Record<string, JSX.Element> = {
   search: <><circle cx="11" cy="11" r="6.5" /><path d="m16 16 5 5" /></>,
   bolt: <><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" /></>,
   trash: <><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 13h9l1-13" /><path d="M10 11v6M14 11v6" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
+  moon: <><path d="M20 13.5A8 8 0 0 1 10.5 4 8 8 0 1 0 20 13.5Z" /></>,
 };
+
+// ── Theme: light / dark toggle, persisted in localStorage ──────────────────
+export type Theme = 'dark' | 'light';
+
+export function getTheme(): Theme {
+  try {
+    const saved = localStorage.getItem('xtel_theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch { /* private mode */ }
+  return 'dark'; // default preserves the existing NOC look
+}
+
+export function applyTheme(t: Theme): void {
+  document.documentElement.classList.toggle('light', t === 'light');
+  document.documentElement.classList.toggle('dark', t !== 'light');
+  try {
+    localStorage.setItem('xtel_theme', t);
+  } catch { /* private mode */ }
+}
+
+/** Apply saved theme ASAP (call once at startup to avoid a flash). */
+export function initTheme(): void {
+  applyTheme(getTheme());
+}
+
+export function ThemeToggle(): JSX.Element {
+  const [theme, setTheme] = React.useState<Theme>(() => getTheme());
+  function flip(): void {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    applyTheme(next);
+  }
+  // Keep in sync if another tab changes it
+  React.useEffect(() => {
+    const fn = (): void => setTheme(getTheme());
+    window.addEventListener('storage', fn);
+    return () => window.removeEventListener('storage', fn);
+  }, []);
+  return (
+    <button
+      className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-line bg-panel text-muted hover:text-gray-200 transition"
+      onClick={flip}
+      title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+    >
+      <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={15} />
+    </button>
+  );
+}
 
 export function Icon({ name, size = 16, className = '' }: { name: keyof typeof P; size?: number; className?: string }): JSX.Element {
   return (

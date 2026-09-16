@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { api } from './api';
-import { Icon } from './components';
+import { Icon, ThemeToggle } from './components';
 
 interface NavItem {
   to: string;
@@ -22,6 +22,7 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     items: [
       { to: '/clients', label: 'Clients', icon: 'users' },
       { to: '/portal-accounts', label: 'Portal Accounts', icon: 'shield' },
+      { to: '/client-api', label: 'HTTP API', icon: 'plug' },
     ],
   },
   {
@@ -54,6 +55,7 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     ],
   },
   { name: 'Reports', items: [{ to: '/reports', label: 'Reports', icon: 'chart' }] },
+  { name: 'Help', items: [{ to: '/docs', label: 'Documentation', icon: 'globe' }] },
   {
     name: 'System',
     items: [
@@ -195,6 +197,7 @@ export default function Layout(): JSX.Element {
             <span className="text-gray-100 font-medium">{crumbs[1]}</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <ThemeToggle />
             <button
               className="hidden md:flex items-center gap-2 text-xs text-muted border border-line rounded-lg px-3 py-1.5 hover:border-brand/50 hover:text-gray-200 transition bg-panel"
               onClick={() => setPalette(true)}
