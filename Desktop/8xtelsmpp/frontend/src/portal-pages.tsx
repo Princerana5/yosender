@@ -734,7 +734,7 @@ export function PortalCoverage(): JSX.Element {
     <div className="space-y-5">
       <PageHeader
         title="Coverage & rates"
-        sub={`Routes you can send on (yours + shared) · prices per segment in ${currency}`}
+        sub={`Routes you can send on (assigned + global) · prices per segment in ${currency}`}
       />
       <div className="card card-pad flex gap-2 items-center">
         <input className="input max-w-sm" placeholder="Search route, country, ISO, code…"
@@ -754,11 +754,11 @@ export function PortalCoverage(): JSX.Element {
                   {r.name}
                   {r.dedicated ? (
                     <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25 align-middle">
-                      YOURS
+                      ASSIGNED
                     </span>
                   ) : (
                     <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line align-middle">
-                      SHARED
+                      GLOBAL
                     </span>
                   )}
                 </div>

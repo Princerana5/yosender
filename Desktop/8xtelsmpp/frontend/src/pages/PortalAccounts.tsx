@@ -14,6 +14,8 @@ interface PortalAccount {
 interface RouteOpt {
   id: string; name: string; strategy: string; status: string;
   client_id: string | null; country_name?: string | null;
+  member_clients?: Array<{ client_id: string; client_name: string; system_id: string }> | null;
+  member_count?: string;
 }
 
 interface Issued {
@@ -446,16 +448,22 @@ function RouteDrawer({ account, routes, onClose, onDone }: {
   account: PortalAccount; routes: RouteOpt[]; onClose: () => void; onDone: () => void;
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
-  const mine = routes.filter((r) => r.client_id === account.id);
-  const global = routes.filter((r) => !r.client_id);
+  const isMember = (r: RouteOpt): boolean =>
+    (r.member_clients ?? []).some((m) => m.client_id === account.id);
+  const mine = routes.filter(isMember);
+  const others = routes.filter((r) => !isMember(r));
 
-  async function assign(routeId: string, toClient: boolean): Promise<void> {
+  async function setMember(routeId: string, member: boolean): Promise<void> {
     setBusy(true);
     try {
-      await api(`/routes/${routeId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ client_id: toClient ? account.id : null }),
-      });
+      if (member) {
+        await api(`/routes/${routeId}/members`, {
+          method: 'POST',
+          body: JSON.stringify({ client_id: account.id }),
+        });
+      } else {
+        await api(`/routes/${routeId}/members/${account.id}`, { method: 'DELETE' });
+      }
       onDone();
       // refresh route list in parent via reload
       const r = await api<{ routes: RouteOpt[] }>('/routes');
@@ -469,45 +477,53 @@ function RouteDrawer({ account, routes, onClose, onDone }: {
     <Modal title={`Routes — ${account.name}`} onClose={onClose} wide>
       <div className="space-y-4">
         <p className="text-xs text-muted">
-          Client-specific routes serve only this account. Global routes serve everyone (including this account).
-          Assign a global route to make it exclusive, or unassign to return it to global.
+          Member routes serve only their listed clients. Global routes (no members) serve everyone, including this account.
+          Add this account to a route, or remove it — removing the last member makes a route global again.
         </p>
         <div>
-          <div className="stat-label mb-1.5">Assigned to {account.name} ({mine.length})</div>
-          {!mine.length && <div className="text-xs text-muted border border-dashed border-line rounded-lg px-3 py-2.5">None — only global routes apply.</div>}
+          <div className="stat-label mb-1.5">Serving {account.name} ({mine.length})</div>
+          {!mine.length && <div className="text-xs text-muted border border-dashed border-line rounded-lg px-3 py-2.5">None explicitly — only global routes apply.</div>}
           <div className="space-y-1.5">
-            {mine.map((r) => (
-              <div key={r.id} className="flex items-center gap-2 text-sm bg-brand/5 border border-brand/25 rounded-lg px-3 py-2">
-                <span className="font-semibold">{r.name}</span>
-                <span className="font-mono text-[11px] text-muted">{r.strategy}</span>
-                <StatusBadge status={r.status} />
-                <button className="ml-auto btn-ghost !py-1 !px-2 !text-xs" disabled={busy}
-                  onClick={() => assign(r.id, false)}>
-                  Make global
-                </button>
-              </div>
-            ))}
+            {mine.map((r) => {
+              const n = Number(r.member_count ?? r.member_clients?.length ?? 1);
+              return (
+                <div key={r.id} className="flex items-center gap-2 text-sm bg-brand/5 border border-brand/25 rounded-lg px-3 py-2">
+                  <span className="font-semibold">{r.name}</span>
+                  <span className="font-mono text-[11px] text-muted">{r.strategy}</span>
+                  <StatusBadge status={r.status} />
+                  {n > 1 && <span className="text-[11px] text-muted">+{n - 1} other{n - 1 === 1 ? '' : 's'}</span>}
+                  <button className="ml-auto btn-ghost !py-1 !px-2 !text-xs" disabled={busy}
+                    onClick={() => setMember(r.id, false)}>
+                    Remove
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </div>
         <div>
-          <div className="stat-label mb-1.5">Global routes ({global.length})</div>
+          <div className="stat-label mb-1.5">Other routes ({others.length})</div>
           <div className="space-y-1.5 max-h-56 overflow-y-auto">
-            {global.map((r) => (
-              <div key={r.id} className="flex items-center gap-2 text-sm bg-ink/50 border border-line/60 rounded-lg px-3 py-2">
-                <span className="font-medium">{r.name}</span>
-                <span className="font-mono text-[11px] text-muted">{r.strategy}</span>
-                {r.country_name && <span className="text-[11px] text-muted">{r.country_name}</span>}
-                <button className="ml-auto btn-ghost !py-1 !px-2 !text-xs" disabled={busy}
-                  onClick={() => assign(r.id, true)}>
-                  Assign to {account.name}
-                </button>
-              </div>
-            ))}
-            {!global.length && <div className="text-xs text-muted">No global routes — create one under Routes & Failover.</div>}
+            {others.map((r) => {
+              const n = Number(r.member_count ?? r.member_clients?.length ?? 0);
+              return (
+                <div key={r.id} className="flex items-center gap-2 text-sm bg-ink/50 border border-line/60 rounded-lg px-3 py-2">
+                  <span className="font-medium">{r.name}</span>
+                  <span className="font-mono text-[11px] text-muted">{r.strategy}</span>
+                  {r.country_name && <span className="text-[11px] text-muted">{r.country_name}</span>}
+                  <span className="text-[11px] text-muted">{n === 0 ? '🌍 global' : `👥 ${n} member${n === 1 ? '' : 's'}`}</span>
+                  <button className="ml-auto btn-ghost !py-1 !px-2 !text-xs" disabled={busy}
+                    onClick={() => setMember(r.id, true)}>
+                    Add {account.name}
+                  </button>
+                </div>
+              );
+            })}
+            {!others.length && <div className="text-xs text-muted">Every route already serves this account.</div>}
           </div>
         </div>
         <p className="text-[11px] text-muted">
-          Need a brand-new route for this client? <Link to="/routes" className="text-brand hover:underline">Create it under Routes & Failover</Link> with Client = {account.name}.
+          Need a brand-new route? <Link to="/routes" className="text-brand hover:underline">Create it under Routes & Failover</Link> and tick {account.name} in Select clients.
         </p>
       </div>
     </Modal>

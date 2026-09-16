@@ -67,7 +67,8 @@ export default function ClientDetail(): JSX.Element {
     prefix: string | null; sender_id: string | null;
     price_per_segment: string | null; price_currency: string;
     min_margin_pct: string | null; min_vendor_cost: string | null;
-    dedicated: boolean;
+    member_count: string; // 0 = global, 1 = only me, N = shared
+    is_member: string; // 1 = I'm an explicit member
     country_id: string | null; country_name: string | null;
     iso_code: string | null; calling_code: string | null;
     vendor_count: string;
@@ -148,14 +149,22 @@ export default function ClientDetail(): JSX.Element {
     api(`/clients/${id}/ips/${ipId}`, { method: 'DELETE' }).then(load);
   }
   async function removeRoute(r: ClientRoute): Promise<void> {
-    if (r.dedicated) {
-      // Dedicated = only ever served this client → real delete is safe.
-      if (!window.confirm(`Delete dedicated route "${r.name}"? Traffic falls back to global routes. This cannot be undone.`)) return;
+    const members = Number(r.member_count ?? 0);
+    const mine = Number(r.is_member ?? 0) === 1;
+    if (members > 0 && mine) {
+      // I'm an explicit member → remove me from the membership. Route keeps
+      // serving its other members. Last-member removal makes it global again.
+      const last = members === 1;
+      if (!window.confirm(
+        last
+          ? `Remove this client from "${r.name}"?\n\n⚠ This is the LAST member — the route becomes GLOBAL (serves everyone).`
+          : `Remove this client from "${r.name}"?\n\nIt keeps serving its ${members - 1} other member(s).`,
+      )) return;
       try {
-        await api(`/routes/${r.id}`, { method: 'DELETE' });
+        await api(`/routes/${r.id}/members/${id}`, { method: 'DELETE' });
         load();
       } catch (e) {
-        window.alert(`Could not delete route: ${(e as Error).message}`);
+        window.alert(`Could not remove route: ${(e as Error).message}`);
       }
       return;
     }
@@ -449,34 +458,42 @@ export default function ClientDetail(): JSX.Element {
       <div>
         <div className="card-title mb-2 px-1">
           Routes serving this client{' '}
-          <span className="text-muted font-normal">· active only · dedicated + global fallback</span>
+          <span className="text-muted font-normal">· active only · mine + shared + global fallback</span>
         </div>
         <DataTable
           keyOf={(r) => r.id}
           rows={data.routes ?? []}
-          empty="No active routes serve this client yet — create one in Routes (client-specific or global)."
+          empty="No active routes serve this client yet — create one in Routes (pick this client, several, or none for global)."
           columns={[
             {
               key: 'name', label: 'Route',
-              render: (r) => (
-                <div>
-                  <div className="font-semibold">
-                    {r.name}
-                    {r.dedicated ? (
-                      <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25 align-middle">
-                        DEDICATED
-                      </span>
-                    ) : (
-                      <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line align-middle">
-                        GLOBAL
-                      </span>
-                    )}
+              render: (r) => {
+                const members = Number(r.member_count ?? 0);
+                const mine = Number(r.is_member ?? 0) === 1;
+                return (
+                  <div>
+                    <div className="font-semibold">
+                      {r.name}
+                      {members === 0 ? (
+                        <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line align-middle">
+                          GLOBAL
+                        </span>
+                      ) : mine && members === 1 ? (
+                        <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25 align-middle">
+                          ONLY MINE
+                        </span>
+                      ) : (
+                        <span className="ml-1.5 text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 align-middle">
+                          SHARED · {members}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-muted font-mono">
+                      {r.strategy}{r.prefix ? ` · prefix ${r.prefix}` : ''}{r.sender_id ? ` · sender ${r.sender_id}` : ''}
+                    </div>
                   </div>
-                  <div className="text-[11px] text-muted font-mono">
-                    {r.strategy}{r.prefix ? ` · prefix ${r.prefix}` : ''}{r.sender_id ? ` · sender ${r.sender_id}` : ''}
-                  </div>
-                </div>
-              ),
+                );
+              },
             },
             {
               key: 'country', label: 'Country',
@@ -516,13 +533,17 @@ export default function ClientDetail(): JSX.Element {
             },
             {
               key: 'actions', label: '', right: true,
-              render: (r) => (
-                <button className="btn-ghost !px-2 !py-1 text-red-300 hover:text-red-200"
-                  title={r.dedicated ? `Delete dedicated route "${r.name}"` : `Detach GLOBAL route "${r.name}" from this client only (keeps serving others)`}
-                  onClick={() => removeRoute(r)}>
-                  <Icon name={r.dedicated ? 'trash' : 'x'} size={14} />
-                </button>
-              ),
+              render: (r) => {
+                const members = Number(r.member_count ?? 0);
+                const mine = Number(r.is_member ?? 0) === 1;
+                return (
+                  <button className="btn-ghost !px-2 !py-1 text-red-300 hover:text-red-200"
+                    title={members > 0 && mine ? `Remove this client from "${r.name}" (keeps serving ${members - 1} other${members - 1 === 1 ? '' : 's'})` : `Detach GLOBAL route "${r.name}" from this client only (keeps serving others)`}
+                    onClick={() => removeRoute(r)}>
+                    <Icon name="x" size={14} />
+                  </button>
+                );
+              },
             },
           ]}
         />

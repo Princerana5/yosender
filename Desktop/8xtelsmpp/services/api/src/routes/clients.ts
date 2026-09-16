@@ -234,26 +234,30 @@ router.get('/:id', async (req, res) => {
      LEFT JOIN countries c ON c.id=cr.country_id WHERE cr.client_id=$1 ORDER BY cr.prefix NULLS LAST`,
     [req.params.id],
   );
-  // Active routes serving this client: dedicated + global fallback minus
+  // Active routes serving this client: member routes + global fallback minus
   // per-client exclusions, sms only. Mirrors the routing engine's candidate
   // set (minus vendor-chain expansion).
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.status, r.prefix, r.sender_id,
             r.price_per_segment, COALESCE(r.price_currency,'USD') AS price_currency,
             r.min_margin_pct,
-            (r.client_id IS NOT NULL) AS dedicated,
+            (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id) AS member_count,
+            (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid) AS is_member,
             co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code,
             (SELECT count(*) FROM route_vendors rv WHERE rv.route_id=r.id) AS vendor_count,
             (SELECT min(vr.cost) FROM vendor_rates vr JOIN route_vendors rv2 ON rv2.vendor_id=vr.vendor_id
              WHERE rv2.route_id=r.id AND (vr.country_id IS NULL OR vr.country_id=r.country_id)) AS min_vendor_cost
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
      WHERE r.status='active' AND r.channel='sms'
-       AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+       AND (
+         NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)
+         OR EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid)
+       )
        AND NOT EXISTS (
          SELECT 1 FROM route_client_exclusions x
          WHERE x.route_id=r.id AND x.client_id=$1::uuid
        )
-     ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
+     ORDER BY (NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)), co.name NULLS LAST, r.name`,
     [req.params.id],
   );
   // ── Overview stats: traffic today / all-time, balance in / out ──────────
@@ -535,6 +539,10 @@ router.delete('/:id', requirePerm('clients.delete'), audit('deleted_client', 'cl
     await db.query('UPDATE messages SET client_id=NULL WHERE client_id=$1', [req.params.id]);
     await db.query('UPDATE campaigns SET client_id=NULL WHERE client_id=$1', [req.params.id]);
     await db.query('UPDATE routes SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    // Membership + exclusions cascade via FK, but be explicit for clarity —
+    // a deleted client simply stops being a member anywhere.
+    await db.query('DELETE FROM route_clients WHERE client_id=$1', [req.params.id]);
+    await db.query('DELETE FROM route_client_exclusions WHERE client_id=$1', [req.params.id]);
     await db.query('DELETE FROM transactions WHERE client_id=$1', [req.params.id]);
     await db.query('DELETE FROM wallets WHERE client_id=$1', [req.params.id]);
     await db.query('DELETE FROM sender_requests WHERE client_id=$1', [req.params.id]);

@@ -11,10 +11,18 @@ interface RouteVendor {
   weight: number;
 }
 
+interface RouteMember {
+  client_id: string;
+  client_name: string;
+  system_id: string;
+}
+
 interface Route {
   id: string; name: string; channel: string; strategy: string; status: string;
-  client_id: string | null;
+  client_id: string | null; // legacy single-owner column (kept in sync, not authoritative)
   client_name?: string | null;
+  member_clients?: RouteMember[] | null;
+  member_count?: string;
   country_id: string | null;
   country_name?: string | null;
   prefix: string | null;
@@ -41,6 +49,47 @@ interface RouteDetail {
   served_clients: Array<{ id: string; name: string; system_id: string }>;
   served_count: number;
   excluded: Array<{ id: string; name: string; system_id: string; excluded_at: string }>;
+  available: Array<{ id: string; name: string; system_id: string }>;
+}
+
+// Scope helpers: global = no members · shared = 2+ members · dedicated = 1 member
+function memberCount(r: Route): number {
+  if (r.member_count !== undefined && r.member_count !== null) return Number(r.member_count);
+  return r.member_clients?.length ?? (r.client_id ? 1 : 0);
+}
+function scopeOf(r: Route): 'global' | 'shared' | 'dedicated' {
+  const n = memberCount(r);
+  if (n === 0) return 'global';
+  if (n === 1) return 'dedicated';
+  return 'shared';
+}
+function ScopeBadge({ route, clients }: { route: Route; clients: Opt[] }): JSX.Element {
+  const scope = scopeOf(route);
+  if (scope === 'global') {
+    return (
+      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line">
+        🌍 GLOBAL · all clients
+      </span>
+    );
+  }
+  const members = route.member_clients ?? [];
+  const first = members[0];
+  const firstName = first?.client_name ?? (route.client_id ? clients.find((c) => c.id === route.client_id)?.name ?? '1 client' : '1 client');
+  if (scope === 'dedicated') {
+    return (
+      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25" title={first?.system_id ?? ''}>
+        🎯 {firstName}
+      </span>
+    );
+  }
+  const extra = members.slice(1, 3).map((m) => m.client_name).join(', ');
+  const rest = members.length - 3;
+  return (
+    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25"
+      title={members.map((m) => `${m.client_name} (${m.system_id})`).join('\n')}>
+      👥 {firstName}{extra ? `, ${extra}` : ''}{rest > 0 ? ` +${rest} more` : ''} · {members.length}
+    </span>
+  );
 }
 
 interface Opt {
@@ -72,13 +121,91 @@ const STRATEGY_HINT: Record<string, string> = {
   percentage: 'Weighted random pick per message (weight = % share). Full chain kept behind the pick for failover.',
 };
 
+// ── Member manager: add/remove clients on a member route ───────────────────
+function MemberManager({ detail, clients, onChange, setDetail }: {
+  detail: RouteDetail; clients: Opt[]; onChange: () => void; setDetail: (d: RouteDetail | null) => void;
+}): JSX.Element {
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+  const needle = search.trim().toLowerCase();
+  const available = (detail.available ?? []).filter((c) =>
+    !needle || c.name.toLowerCase().includes(needle) || (c.system_id ?? '').toLowerCase().includes(needle),
+  );
+
+  async function add(clientId: string): Promise<void> {
+    setBusy(true);
+    try {
+      await api(`/routes/${detail.route.id}/members`, { method: 'POST', body: JSON.stringify({ client_id: clientId }) });
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function remove(c: { id: string; name: string }): Promise<void> {
+    const remaining = detail.served_clients.length - 1;
+    const warn = remaining === 0
+      ? `\n\n⚠ This is the LAST member — removing makes the route GLOBAL (serves everyone).`
+      : '';
+    if (!window.confirm(`Remove ${c.name} from "${detail.route.name}"?${warn}`)) return;
+    setBusy(true);
+    try {
+      await api(`/routes/${detail.route.id}/members/${c.id}`, { method: 'DELETE' });
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1.5">
+        Members ({detail.served_clients.length}) · only these clients use this route
+      </div>
+      <div className="space-y-1 max-h-36 overflow-y-auto">
+        {detail.served_clients.map((c) => (
+          <div key={c.id} className="flex items-center gap-2 text-sm bg-brand/5 border border-brand/25 rounded-lg px-3 py-1.5">
+            <Link className="font-semibold text-sky-300 hover:underline" to={`/clients/${c.id}`} onClick={() => setDetail(null)}>{c.name}</Link>
+            <span className="text-[11px] text-muted font-mono">{c.system_id}</span>
+            <button className="btn-ghost !py-0.5 !px-2 !text-[11px] ml-auto" disabled={busy}
+              title={`Remove ${c.name} from this route`}
+              onClick={() => remove(c)}>
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="mt-2.5">
+        <input className="input !py-1.5 !text-xs" placeholder="+ Add client — search name or system ID…"
+          value={search} onChange={(e) => setSearch(e.target.value)} />
+        {search.trim() && (
+          <div className="space-y-1 mt-1.5 max-h-32 overflow-y-auto">
+            {available.slice(0, 8).map((c) => (
+              <button key={c.id} disabled={busy}
+                className="w-full flex items-center gap-2 text-sm border border-line hover:border-brand/40 rounded-lg px-3 py-1.5 text-left transition"
+                onClick={() => { setSearch(''); add(c.id); }}>
+                <span className="font-medium">{c.name}</span>
+                <span className="text-[11px] text-muted font-mono">{c.system_id}</span>
+                <span className="ml-auto text-emerald-300 text-xs font-bold">+ Add</span>
+              </button>
+            ))}
+            {!available.length && <div className="text-xs text-muted px-1 py-1">No matching clients (all active clients already members).</div>}
+          </div>
+        )}
+        {!search.trim() && (detail.available ?? []).length > 0 && (
+          <div className="text-[11px] text-muted mt-1">{detail.available.length} other client{(detail.available.length === 1) ? '' : 's'} can be added — search above.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Routes(): JSX.Element {
   const [routes, setRoutes] = useState<Route[]>([]);
   const [clients, setClients] = useState<Opt[]>([]);
   const [vendors, setVendors] = useState<Opt[]>([]);
   const [countries, setCountries] = useState<Opt[]>([]);
   const [q, setQ] = useState('');
-  const [scope, setScope] = useState<'all' | 'global' | 'dedicated'>('all');
+  const [scope, setScope] = useState<'all' | 'global' | 'shared' | 'dedicated'>('all');
   const [status, setStatus] = useState<'all' | 'active' | 'disabled'>('all');
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -86,8 +213,9 @@ export default function Routes(): JSX.Element {
   const CURS = ['USD', 'EUR', 'INR'] as const;
   const [form, setForm] = useState({
     name: '', prefix: '', sender_id: '', strategy: 'priority',
-    client_id: '', country_id: '', price: '', currency: 'USD', margin: '', tps: '',
+    client_ids: [] as string[], country_id: '', price: '', currency: 'USD', margin: '', tps: '',
   });
+  const [clientSearch, setClientSearch] = useState('');
   const [editing, setEditing] = useState<Route | null>(null);
   const [editPrice, setEditPrice] = useState('');
   const [editCurrency, setEditCurrency] = useState('USD');
@@ -112,29 +240,28 @@ export default function Routes(): JSX.Element {
   }, []);
 
   const vendorName = (id: string): string => vendors.find((v) => v.id === id)?.name ?? id.slice(0, 8);
-  const clientName = (id: string | null): string =>
-    !id ? 'All clients' : clients.find((c) => c.id === id)?.name ?? id.slice(0, 8);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return routes.filter((r) => {
-      if (scope === 'global' && r.client_id) return false;
-      if (scope === 'dedicated' && !r.client_id) return false;
+      if (scope !== 'all' && scopeOf(r) !== scope) return false;
       if (status !== 'all' && r.status !== status) return false;
       if (!needle) return true;
       const hay = [
         r.name, r.strategy, r.channel, r.prefix ?? '', r.sender_id ?? '',
-        clientName(r.client_id), r.country_name ?? '',
+        ...(r.member_clients ?? []).map((m) => `${m.client_name} ${m.system_id}`),
+        r.country_name ?? '',
         ...(r.vendors ?? []).map((v) => v.vendor_name ?? vendorName(v.vendor_id)),
       ].join(' ').toLowerCase();
       return hay.includes(needle);
     });
-  }, [routes, q, scope, status, clients, vendors]);
+  }, [routes, q, scope, status, vendors]);
 
   const counts = useMemo(() => ({
     all: routes.length,
-    global: routes.filter((r) => !r.client_id).length,
-    dedicated: routes.filter((r) => r.client_id).length,
+    global: routes.filter((r) => scopeOf(r) === 'global').length,
+    shared: routes.filter((r) => scopeOf(r) === 'shared').length,
+    dedicated: routes.filter((r) => scopeOf(r) === 'dedicated').length,
     active: routes.filter((r) => r.status === 'active').length,
   }), [routes]);
 
@@ -145,8 +272,16 @@ export default function Routes(): JSX.Element {
     });
   }
 
+  function toggleFormClient(id: string): void {
+    setForm((f) => ({
+      ...f,
+      client_ids: f.client_ids.includes(id) ? f.client_ids.filter((c) => c !== id) : [...f.client_ids, id],
+    }));
+  }
+
   function openModal(): void {
-    setForm({ name: '', prefix: '', sender_id: '', strategy: 'priority', client_id: '', country_id: '', price: '', currency: 'USD', margin: '', tps: '' });
+    setForm({ name: '', prefix: '', sender_id: '', strategy: 'priority', client_ids: [], country_id: '', price: '', currency: 'USD', margin: '', tps: '' });
+    setClientSearch('');
     setChain([]);
     setFormErr('');
     setShow(true);
@@ -168,7 +303,7 @@ export default function Routes(): JSX.Element {
           prefix: form.prefix || null,
           sender_id: form.sender_id || null,
           strategy: form.strategy,
-          client_id: form.client_id || null,
+          client_ids: form.client_ids,
           country_id: form.country_id || null,
           price_per_segment: form.price === '' ? null : Number(form.price),
           price_currency: form.currency,
@@ -231,14 +366,15 @@ export default function Routes(): JSX.Element {
   }
 
   /** First click: ask the server for impact. Global routes with traffic or
-      multiple clients move to a type-to-confirm step; everything else deletes
-      with a single confirm. */
+      multiple clients move to a type-to-confirm step; member routes (1..N
+      clients, never served anyone else) delete with a single confirm. */
   async function askDelete(r: Route): Promise<void> {
     setDeleteErr('');
     setDeleteTyped('');
-    if (r.client_id) {
-      // Dedicated: only ever served one client — single confirm is enough.
-      if (!window.confirm(`Delete dedicated route "${r.name}" for ${clientName(r.client_id)}? Traffic falls back to global routes. This cannot be undone.`)) return;
+    if (scopeOf(r) !== 'global') {
+      const n = memberCount(r);
+      const who = (r.member_clients ?? []).map((m) => m.client_name).join(', ') || `${n} client${n === 1 ? '' : 's'}`;
+      if (!window.confirm(`Delete route "${r.name}" for ${who}? Traffic falls back to global routes. This cannot be undone.`)) return;
       try {
         await api(`/routes/${r.id}`, { method: 'DELETE' });
         load();
@@ -306,7 +442,8 @@ export default function Routes(): JSX.Element {
           {([
             ['all', `All (${counts.all})`],
             ['global', `🌍 Global (${counts.global})`],
-            ['dedicated', `🎯 Dedicated (${counts.dedicated})`],
+            ['shared', `👥 Shared (${counts.shared})`],
+            ['dedicated', `🎯 1 client (${counts.dedicated})`],
           ] as const).map(([v, label]) => (
             <button key={v} onClick={() => setScope(v)}
               className={`text-xs font-semibold px-3 py-1.5 rounded-lg border transition ${scope === v
@@ -345,15 +482,7 @@ export default function Routes(): JSX.Element {
                     {r.name}
                   </button>
                   <div className="flex items-center gap-1.5 mt-1">
-                    {r.client_id ? (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-brand/10 text-emerald-300 border border-brand/25">
-                        🎯 {clientName(r.client_id)}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-panel2 text-muted border border-line">
-                        🌍 GLOBAL · all clients
-                      </span>
-                    )}
+                    <ScopeBadge route={r} clients={clients} />
                     <span className="text-[11px] text-muted font-mono">{r.strategy}</span>
                   </div>
                   <div className="text-[11px] text-muted font-mono mt-0.5">
@@ -425,7 +554,7 @@ export default function Routes(): JSX.Element {
                     {r.status === 'active' ? 'Disable' : 'Enable'}
                   </button>
                   <button className="btn-ghost !px-2 !py-1 text-red-300 hover:text-red-200"
-                    title={r.client_id ? `Delete dedicated route "${r.name}"` : `Delete GLOBAL route "${r.name}" (serves all clients)`}
+                    title={scopeOf(r) === 'global' ? `Delete GLOBAL route "${r.name}" (serves all clients)` : `Delete route "${r.name}" (${memberCount(r)} client${memberCount(r) === 1 ? '' : 's'})`}
                     onClick={() => askDelete(r)}>
                     <Icon name="trash" size={14} />
                   </button>
@@ -448,14 +577,9 @@ export default function Routes(): JSX.Element {
             <div className="space-y-4">
               <div className="flex items-center gap-2 flex-wrap">
                 <StatusBadge status={detail.route.status} />
-                {detail.route.client_id ? (
-                  <span className="text-[11px] font-bold px-2 py-1 rounded bg-brand/10 text-emerald-300 border border-brand/25">
-                    🎯 Dedicated · {detail.route.client_name ?? clientName(detail.route.client_id)}
-                  </span>
-                ) : (
-                  <span className="text-[11px] font-bold px-2 py-1 rounded bg-panel2 text-muted border border-line">
-                    🌍 GLOBAL · serves {detail.served_count} client{detail.served_count === 1 ? '' : 's'}
-                  </span>
+                <ScopeBadge route={detail.route} clients={clients} />
+                {scopeOf(detail.route) === 'global' && (
+                  <span className="text-[11px] text-muted">serves {detail.served_count} client{detail.served_count === 1 ? '' : 's'}</span>
                 )}
                 <span className="text-xs text-muted font-mono">{detail.route.strategy} · {detail.route.channel}</span>
                 <span className="ml-auto flex gap-1.5">
@@ -503,7 +627,7 @@ export default function Routes(): JSX.Element {
               </div>
 
               {/* who it serves */}
-              {!detail.route.client_id ? (
+              {scopeOf(detail.route) === 'global' ? (
                 <div>
                   <div className="text-[11px] uppercase tracking-wider text-muted font-semibold mb-1.5">
                     Serves {detail.served_count} client{detail.served_count === 1 ? '' : 's'} · detach removes ONE client safely
@@ -552,10 +676,7 @@ export default function Routes(): JSX.Element {
                   )}
                 </div>
               ) : (
-                <div className="text-[13px] text-muted">
-                  Dedicated to <span className="text-gray-200 font-semibold">{detail.route.client_name ?? clientName(detail.route.client_id)}</span> —{' '}
-                  <Link className="text-sky-300 hover:underline" to={`/clients/${detail.route.client_id}`} onClick={() => setDetail(null)}>open client →</Link>
-                </div>
+                <MemberManager detail={detail} clients={clients} onChange={() => { openDetail(detail.route.id); load(); }} setDetail={setDetail} />
               )}
             </div>
           )}
@@ -597,23 +718,69 @@ export default function Routes(): JSX.Element {
         <Modal title="New route" onClose={() => setShow(false)} wide>
           <form onSubmit={create} className="space-y-3">
             {formErr && <div className="text-sm text-red-300 bg-danger/10 border border-danger/30 rounded-lg px-3 py-2">{formErr}</div>}
-            {/* name + scope on one row */}
-            <div className="grid grid-cols-5 gap-2.5">
-              <div className="col-span-3">
-                <label className="label">Route name</label>
-                <input className="input" placeholder="India Premium — all clients" value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
+            {/* name */}
+            <div>
+              <label className="label">Route name</label>
+              <input className="input" placeholder="India Premium — all clients" value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
+            </div>
+            {/* clients multi-select */}
+            <div>
+              <label className="label">
+                Select clients{' '}
+                <span className="text-gray-600 font-normal">
+                  ({form.client_ids.length === 0 ? 'none = 🌍 global, serves everyone' : `${form.client_ids.length} selected`})
+                </span>
+              </label>
+              {form.client_ids.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {form.client_ids.map((id) => {
+                    const c = clients.find((x) => x.id === id);
+                    return (
+                      <span key={id} className="inline-flex items-center gap-1.5 text-xs font-semibold bg-brand/10 text-emerald-300 border border-brand/30 rounded-full pl-2.5 pr-1.5 py-1">
+                        {c?.name ?? id.slice(0, 8)}
+                        <button type="button" onClick={() => toggleFormClient(id)}
+                          className="w-4 h-4 rounded-full hover:bg-brand/25 flex items-center justify-center text-[10px]" title="Remove">
+                          ✕
+                        </button>
+                      </span>
+                    );
+                  })}
+                  <button type="button" onClick={() => setForm({ ...form, client_ids: [] })}
+                    className="text-[11px] text-muted hover:text-red-300 underline underline-offset-2">
+                    Clear all → global
+                  </button>
+                </div>
+              )}
+              <input className="input !py-1.5 !text-xs mb-1.5" placeholder="Search clients to add…"
+                value={clientSearch} onChange={(e) => setClientSearch(e.target.value)} />
+              <div className="space-y-1 max-h-32 overflow-y-auto border border-line/60 rounded-lg p-1.5 bg-ink/40">
+                {clients
+                  .filter((c) => {
+                    const n = clientSearch.trim().toLowerCase();
+                    return !n || c.name.toLowerCase().includes(n) || (c.system_id ?? '').toLowerCase().includes(n);
+                  })
+                  .slice(0, 30)
+                  .map((c) => {
+                    const picked = form.client_ids.includes(c.id);
+                    return (
+                      <label key={c.id}
+                        className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 cursor-pointer transition text-sm ${picked ? 'border-brand/50 bg-brand/5' : 'border-transparent hover:border-line hover:bg-panel2/50'}`}>
+                        <input type="checkbox" checked={picked} onChange={() => toggleFormClient(c.id)} className="accent-emerald-500" />
+                        <span className="font-medium truncate">{c.name}</span>
+                        <span className="text-[11px] text-muted font-mono ml-auto shrink-0">{c.system_id}</span>
+                      </label>
+                    );
+                  })}
+                {!clients.length && <div className="text-sm text-muted px-1 py-2">No clients yet — create one under Clients first.</div>}
               </div>
-              <div className="col-span-2">
-                <label className="label">Scope</label>
-                <select className="input" value={form.client_id}
-                  onChange={(e) => setForm({ ...form, client_id: e.target.value })}>
-                  <option value="">🌍 Global — all clients</option>
-                  {clients.map((c) => (
-                    <option key={c.id} value={c.id}>🎯 {c.name} — dedicated</option>
-                  ))}
-                </select>
-              </div>
+              <p className="text-[11px] text-muted mt-1">
+                {form.client_ids.length === 0
+                  ? '🌍 Global: every client falls back to it. Deleting later needs typed confirmation.'
+                  : form.client_ids.length === 1
+                    ? '🎯 1 client: only they use it. Safe to delete anytime.'
+                    : `👥 ${form.client_ids.length} clients: only they use it. Manage membership later from route detail.`}
+              </p>
             </div>
             {/* match: country + prefix + sender + tps on one row */}
             <div className="grid grid-cols-4 gap-2.5">
@@ -672,7 +839,6 @@ export default function Routes(): JSX.Element {
               </div>
             </div>
             <p className="text-[11px] text-muted -mt-1">
-              {form.client_id ? '🎯 Dedicated — only this client uses it.' : '🌍 Global — every client falls back to it.'}{' '}
               {STRATEGY_HINT[form.strategy]}
             </p>
             {/* vendors: compact rows */}

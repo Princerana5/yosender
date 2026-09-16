@@ -6,6 +6,17 @@ import { requirePerm, audit } from '../middleware.js';
 const router = Router();
 router.use(requirePerm('routes.read'));
 
+// Scope helper: global (no members) vs member list. Returned on every route
+// so the UI can render 🌍 Global / 👥 N clients without extra round-trips.
+const SCOPE_SQL = `
+  (SELECT COALESCE(json_agg(m ORDER BY m.client_name), '[]') FROM (
+     SELECT rc.client_id, c.name AS client_name, c.system_id
+     FROM route_clients rc JOIN clients c ON c.id=rc.client_id
+     WHERE rc.route_id=r.id
+   ) m) AS member_clients,
+  (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id) AS member_count
+`;
+
 router.get('/', async (_req, res) => {
   const rows = await query(
     `SELECT r.*, c.name AS country_name, cl.name AS client_name,
@@ -18,7 +29,8 @@ router.get('/', async (_req, res) => {
        (SELECT count(*) FROM messages m WHERE m.route_id=r.id AND m.created_at >= now() - interval '24 hours') AS msgs_24h,
        (SELECT count(*) FROM messages m WHERE m.route_id=r.id AND m.created_at >= now() - interval '7 days') AS msgs_7d,
        (SELECT count(*) FROM filters f WHERE f.reroute_id=r.id) AS filter_refs,
-       (SELECT count(*) FROM traffic_policies tp WHERE tp.route_id=r.id) AS policy_count
+       (SELECT count(*) FROM traffic_policies tp WHERE tp.route_id=r.id) AS policy_count,
+       ${SCOPE_SQL}
      FROM routes r
      LEFT JOIN countries c ON c.id=r.country_id
      LEFT JOIN clients cl ON cl.id=r.client_id
@@ -42,7 +54,8 @@ router.get('/', async (_req, res) => {
 const routeSchema = z.object({
   name: z.string().min(1),
   channel: z.enum(['sms', 'whatsapp', 'rcs']).default('sms'),
-  client_id: z.string().uuid().nullable().optional(),
+  client_id: z.string().uuid().nullable().optional(), // legacy single-owner; mapped into client_ids
+  client_ids: z.array(z.string().uuid()).optional(), // multi-select membership; [] / omitted = global
   country_id: z.string().uuid().nullable().optional(),
   prefix: z.string().nullable().optional(),
   sender_id: z.string().nullable().optional(),
@@ -60,6 +73,14 @@ const routeSchema = z.object({
   })).default([]),
 });
 
+// Resolve the membership list for create/update: explicit client_ids wins;
+// legacy single client_id maps to a 1-member list; absent/empty = global.
+function resolveMembers(body: { client_ids?: string[]; client_id?: string | null }): string[] {
+  if (Array.isArray(body.client_ids)) return [...new Set(body.client_ids)];
+  if (body.client_id) return [body.client_id];
+  return [];
+}
+
 router.post('/', requirePerm('routes.create'), audit('created_route', 'route'), async (req, res) => {
   const parsed = routeSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -68,14 +89,21 @@ router.post('/', requirePerm('routes.create'), audit('created_route', 'route'), 
   }
   const b = parsed.data;
   const pool = getPool();
+  const members = resolveMembers(b);
   const { rows } = await pool.query(
     `INSERT INTO routes (name, channel, client_id, country_id, prefix, sender_id, strategy, status, tps_limit, group_id, price_per_segment, price_currency, min_margin_pct)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-    [b.name, b.channel, b.client_id ?? null, b.country_id ?? null, b.prefix ?? null, b.sender_id ?? null,
+    [b.name, b.channel, members.length === 1 ? members[0] : null, b.country_id ?? null, b.prefix ?? null, b.sender_id ?? null,
      b.strategy, b.status, b.tps_limit ?? null, b.group_id ?? null,
      b.price_per_segment ?? null, b.price_currency ?? 'USD', b.min_margin_pct ?? null],
   );
   const route = rows[0];
+  for (const cid of members) {
+    await pool.query(
+      'INSERT INTO route_clients (route_id, client_id) VALUES ($1,$2) ON CONFLICT DO NOTHING',
+      [route.id, cid],
+    );
+  }
   for (const v of b.vendors) {
     await pool.query(
       'INSERT INTO route_vendors (route_id, vendor_id, priority, weight) VALUES ($1,$2,$3,$4) ON CONFLICT (route_id, vendor_id) DO UPDATE SET priority=EXCLUDED.priority, weight=EXCLUDED.weight',
@@ -86,7 +114,7 @@ router.post('/', requirePerm('routes.create'), audit('created_route', 'route'), 
 });
 
 router.patch('/:id', requirePerm('routes.update'), audit('updated_route', 'route'), async (req, res) => {
-  const allowed = ['name', 'channel', 'client_id', 'country_id', 'prefix', 'sender_id', 'strategy', 'status', 'tps_limit', 'group_id', 'price_per_segment', 'price_currency', 'min_margin_pct'] as const;
+  const allowed = ['name', 'channel', 'country_id', 'prefix', 'sender_id', 'strategy', 'status', 'tps_limit', 'group_id', 'price_per_segment', 'price_currency', 'min_margin_pct'] as const;
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const k of allowed) {
@@ -95,8 +123,22 @@ router.patch('/:id', requirePerm('routes.update'), audit('updated_route', 'route
       sets.push(`${k} = $${params.length}`);
     }
   }
+  const pool = getPool();
+  // Membership replace: client_ids (multi-select) or legacy single client_id.
+  // [] / null = make global. Keeps the legacy column in sync (1 member → set, else NULL).
+  let members: string[] | null = null;
+  if (req.body?.client_ids !== undefined || req.body?.client_id !== undefined) {
+    members = Array.isArray(req.body?.client_ids)
+      ? [...new Set(req.body.client_ids as string[])]
+      : req.body?.client_id ? [req.body.client_id as string] : [];
+    await pool.query('DELETE FROM route_clients WHERE route_id=$1', [req.params.id]);
+    for (const cid of members) {
+      await pool.query('INSERT INTO route_clients (route_id, client_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.params.id, cid]);
+    }
+    params.push(members.length === 1 ? members[0] : null);
+    sets.push(`client_id = $${params.length}`);
+  }
   if (req.body?.vendors) {
-    const pool = getPool();
     await pool.query('DELETE FROM route_vendors WHERE route_id=$1', [req.params.id]);
     for (const v of req.body.vendors as Array<{ vendor_id: string; priority: number; weight: number }>) {
       await pool.query('INSERT INTO route_vendors (route_id, vendor_id, priority, weight) VALUES ($1,$2,$3,$4)', [
@@ -104,7 +146,7 @@ router.patch('/:id', requirePerm('routes.update'), audit('updated_route', 'route
       ]);
     }
   }
-  if (!sets.length && !req.body?.vendors) {
+  if (!sets.length && !req.body?.vendors && members === null) {
     res.status(400).json({ error: 'nothing to update' });
     return;
   }
@@ -148,7 +190,8 @@ router.get('/:id', async (req, res) => {
          AND m.status='delivered') AS delivered_7d,
        (SELECT count(*) FROM filters f WHERE f.reroute_id=r.id) AS filter_refs,
        (SELECT count(*) FROM traffic_policies tp WHERE tp.route_id=r.id) AS policy_count,
-       (SELECT count(*) FROM route_client_exclusions x WHERE x.route_id=r.id) AS exclusion_count
+       (SELECT count(*) FROM route_client_exclusions x WHERE x.route_id=r.id) AS exclusion_count,
+       ${SCOPE_SQL}
      FROM routes r
      LEFT JOIN countries c ON c.id=r.country_id
      LEFT JOIN clients cl ON cl.id=r.client_id
@@ -159,29 +202,84 @@ router.get('/:id', async (req, res) => {
     res.status(404).json({ error: 'route not found' });
     return;
   }
-  const servedClients = route.client_id
-    ? await query('SELECT id, name, system_id FROM clients WHERE id=$1', [route.client_id as string])
-    : await query(
+  const memberCount = Number((route as { member_count?: string }).member_count ?? 0);
+  // Global (no members): serves all active clients minus exclusions.
+  // Member route: serves exactly the member list.
+  const servedClients = memberCount === 0
+    ? await query(
       `SELECT c.id, c.name, c.system_id FROM clients c WHERE c.status='active'
        AND NOT EXISTS (SELECT 1 FROM route_client_exclusions x WHERE x.route_id=$1 AND x.client_id=c.id)
        ORDER BY c.name LIMIT 200`,
       [req.params.id],
-    );
-  const excluded = route.client_id
-    ? []
+    )
     : await query(
+      `SELECT c.id, c.name, c.system_id FROM route_clients rc
+       JOIN clients c ON c.id=rc.client_id WHERE rc.route_id=$1 ORDER BY c.name`,
+      [req.params.id],
+    );
+  const excluded = memberCount === 0
+    ? await query(
       `SELECT c.id, c.name, c.system_id, x.created_at AS excluded_at
        FROM route_client_exclusions x JOIN clients c ON c.id=x.client_id
        WHERE x.route_id=$1 ORDER BY c.name`,
       [req.params.id],
+    )
+    : [];
+  // All active clients NOT yet members — for the add-member picker.
+  const available = memberCount === 0
+    ? []
+    : await query(
+      `SELECT c.id, c.name, c.system_id FROM clients c WHERE c.status='active'
+       AND NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=$1 AND rc.client_id=c.id)
+       ORDER BY c.name LIMIT 200`,
+      [req.params.id],
     );
-  res.json({ route, served_clients: servedClients, served_count: servedClients.length, excluded });
+  res.json({ route, served_clients: servedClients, served_count: memberCount === 0 ? servedClients.length : memberCount, excluded, available });
+});
+
+// ── Membership: add / remove ONE client (member routes) ────────────────────
+// POST /routes/:id/members { client_id } → route serves that client too.
+// A global route (no members) gains its first member and stops being global.
+// DELETE /routes/:id/members/:clientId → client removed; last removal makes
+// the route global again. Both idempotent.
+router.post('/:id/members', requirePerm('routes.update'), audit('added_route_member', 'route'), async (req, res) => {
+  const { client_id } = (req.body ?? {}) as { client_id?: string };
+  if (!client_id || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(client_id)) {
+    res.status(400).json({ error: 'provide body.client_id (uuid)' });
+    return;
+  }
+  const route = await queryOne<{ id: string; name: string }>('SELECT id, name FROM routes WHERE id=$1', [req.params.id]);
+  if (!route) {
+    res.status(404).json({ error: 'route not found' });
+    return;
+  }
+  const client = await queryOne<{ id: string; name: string }>('SELECT id, name FROM clients WHERE id=$1', [client_id]);
+  if (!client) {
+    res.status(404).json({ error: 'client not found' });
+    return;
+  }
+  const pool = getPool();
+  await pool.query('INSERT INTO route_clients (route_id, client_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [req.params.id, client_id]);
+  const [{ n }] = await query<{ n: string }>('SELECT count(*) AS n FROM route_clients WHERE route_id=$1', [req.params.id]);
+  // Keep legacy column in sync: exactly 1 member → set, else NULL.
+  const [one] = await query<{ client_id: string }>('SELECT client_id FROM route_clients WHERE route_id=$1 LIMIT 1', [req.params.id]);
+  await pool.query('UPDATE routes SET client_id=$1, updated_at=now() WHERE id=$2', [Number(n) === 1 ? one.client_id : null, req.params.id]);
+  res.json({ ok: true, member_count: Number(n), added: { client_id, client_name: client.name } });
+});
+
+router.delete('/:id/members/:clientId', requirePerm('routes.update'), audit('removed_route_member', 'route'), async (req, res) => {
+  const pool = getPool();
+  await pool.query('DELETE FROM route_clients WHERE route_id=$1 AND client_id=$2', [req.params.id, req.params.clientId]);
+  const [{ n }] = await query<{ n: string }>('SELECT count(*) AS n FROM route_clients WHERE route_id=$1', [req.params.id]);
+  const [one] = await query<{ client_id: string }>('SELECT client_id FROM route_clients WHERE route_id=$1 LIMIT 1', [req.params.id]);
+  await pool.query('UPDATE routes SET client_id=$1, updated_at=now() WHERE id=$2', [Number(n) === 1 ? one?.client_id ?? null : null, req.params.id]);
+  res.json({ ok: true, member_count: Number(n), became_global: Number(n) === 0 });
 });
 
 // ── Detach a GLOBAL route from ONE client (safe removal) ───────────────────
 // Inserts a route_client_exclusions row instead of deleting the route, so the
-// route keeps serving everyone else. Dedicated routes can't be detached —
-// they only ever served that one client, so DELETE is the right call.
+// route keeps serving everyone else. Member routes use DELETE
+// /members/:clientId instead — detach only applies to globals.
 // Idempotent: detaching twice is a no-op.
 router.post('/:id/detach', requirePerm('routes.update'), audit('detached_route_client', 'route'), async (req, res) => {
   const { client_id } = (req.body ?? {}) as { client_id?: string };
@@ -189,17 +287,18 @@ router.post('/:id/detach', requirePerm('routes.update'), audit('detached_route_c
     res.status(400).json({ error: 'provide body.client_id (uuid)' });
     return;
   }
-  const route = await queryOne<{ id: string; name: string; client_id: string | null }>(
-    'SELECT id, name, client_id FROM routes WHERE id=$1', [req.params.id],
+  const route = await queryOne<{ id: string; name: string }>(
+    'SELECT id, name FROM routes WHERE id=$1', [req.params.id],
   );
   if (!route) {
     res.status(404).json({ error: 'route not found' });
     return;
   }
-  if (route.client_id) {
+  const [{ n }] = await query<{ n: string }>('SELECT count(*) AS n FROM route_clients WHERE route_id=$1', [req.params.id]);
+  if (Number(n) > 0) {
     res.status(422).json({
-      error: 'route is dedicated to one client — detach does not apply; DELETE it instead',
-      dedicated_to: route.client_id,
+      error: 'route has explicit members — remove the client via DELETE /routes/:id/members/:clientId instead',
+      member_count: Number(n),
     });
     return;
   }
@@ -231,8 +330,8 @@ router.post('/:id/attach', requirePerm('routes.update'), audit('attached_route_c
 });
 
 router.delete('/:id', requirePerm('routes.delete'), audit('deleted_route', 'route'), async (req, res) => {
-  const route = await queryOne<{ id: string; name: string; client_id: string | null }>(
-    'SELECT id, name, client_id FROM routes WHERE id=$1', [req.params.id],
+  const route = await queryOne<{ id: string; name: string }>(
+    'SELECT id, name FROM routes WHERE id=$1', [req.params.id],
   );
   if (!route) {
     res.status(404).json({ error: 'route not found' });
@@ -246,12 +345,16 @@ router.delete('/:id', requirePerm('routes.delete'), audit('deleted_route', 'rout
     res.status(409).json({ error: 'route is referenced by traffic filters (reroute); remove those first' });
     return;
   }
+  const [{ n: memberCount }] = await query<{ n: string }>(
+    'SELECT count(*) AS n FROM route_clients WHERE route_id=$1', [req.params.id],
+  );
+  const isGlobal = Number(memberCount) === 0;
   // Guard: deleting a GLOBAL route with recent traffic (or serving many
   // clients) requires explicit ?force=true — the UI surfaces this as a
-  // type-to-confirm step with impact stats. Prevents the classic "deleted
-  // from one client, wiped for everyone" accident.
+  // type-to-confirm step with impact stats. Member routes (1..N clients)
+  // never served anyone else, so they delete with a single confirm.
   const force = (req.query as Record<string, string>).force === 'true';
-  if (!route.client_id && !force) {
+  if (isGlobal && !force) {
     const [usage] = await query<{ msgs_7d: string; clients: string }>(
       `SELECT (SELECT count(*) FROM messages m WHERE m.route_id=$1 AND m.created_at >= now() - interval '7 days') AS msgs_7d,
               (SELECT count(*) FROM clients c WHERE c.status='active'
@@ -270,7 +373,7 @@ router.delete('/:id', requirePerm('routes.delete'), audit('deleted_route', 'rout
       return;
     }
   }
-  // route_vendors + traffic_policies + exclusions cascade; messages keep route_id history untouched.
+  // route_vendors + traffic_policies + exclusions + members cascade; messages keep route_id history untouched.
   await query('DELETE FROM routes WHERE id=$1', [req.params.id]);
   res.json({ deleted: route.id });
 });

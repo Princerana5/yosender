@@ -163,7 +163,10 @@ router.post('/estimate', async (req, res) => {
       `SELECT r.price_per_segment, r.name AS route_name FROM routes r
        LEFT JOIN countries co ON co.id=r.country_id
        WHERE r.status='active' AND r.channel='sms'
-         AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+         AND (
+           NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)
+           OR EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid)
+         )
          AND NOT EXISTS (
            SELECT 1 FROM route_client_exclusions x
            WHERE x.route_id=r.id AND x.client_id=$1::uuid
@@ -172,7 +175,7 @@ router.post('/estimate', async (req, res) => {
          AND (r.prefix IS NULL OR $2 LIKE r.prefix || '%')
          AND (r.sender_id IS NULL OR r.sender_id=$3)
          AND r.price_per_segment IS NOT NULL
-       ORDER BY (r.client_id IS NULL), length(COALESCE(r.prefix,'')) DESC LIMIT 1`,
+       ORDER BY (NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)), length(COALESCE(r.prefix,'')) DESC LIMIT 1`,
       [cid(req), digits, src],
     );
     if (hit?.price_per_segment !== null && hit?.price_per_segment !== undefined) {
@@ -494,22 +497,25 @@ router.get('/coverage', async (req, res) => {
     const rTo = toUsd[walletCurrency] ?? 1;
     return rTo ? +(amount * rFrom / rTo).toFixed(6) : amount;
   };
-  // Routes serving this client: dedicated rows (client_id = me) PLUS global
-  // fallback rows (client_id NULL) — mirrors the routing engine's candidate
+  // Routes serving this client: member routes (I'm listed) PLUS global
+  // fallback rows (no members) — mirrors the routing engine's candidate
   // set, so Coverage shows every route the client can actually send on.
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.prefix, r.sender_id,
             r.price_per_segment, COALESCE(r.price_currency,'USD') AS price_currency,
-            (r.client_id IS NOT NULL) AS dedicated,
+            EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid) AS dedicated,
             co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
      WHERE r.status='active' AND r.channel='sms'
-       AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+       AND (
+         NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)
+         OR EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid)
+       )
        AND NOT EXISTS (
          SELECT 1 FROM route_client_exclusions x
          WHERE x.route_id=r.id AND x.client_id=$1::uuid
        )
-     ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
+     ORDER BY (NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)), co.name NULLS LAST, r.name`,
     [cid(req)],
   );
   // Client rate-card fallback rows (cheapest per country/prefix)
