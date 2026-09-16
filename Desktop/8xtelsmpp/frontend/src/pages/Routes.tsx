@@ -595,30 +595,29 @@ export default function Routes(): JSX.Element {
 
       {show && (
         <Modal title="New route" onClose={() => setShow(false)} wide>
-          <form onSubmit={create} className="space-y-4">
+          <form onSubmit={create} className="space-y-3">
             {formErr && <div className="text-sm text-red-300 bg-danger/10 border border-danger/30 rounded-lg px-3 py-2">{formErr}</div>}
-            <div>
-              <label className="label">Route name</label>
-              <input className="input" placeholder="India Premium — all clients" value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Client scope</label>
+            {/* name + scope on one row */}
+            <div className="grid grid-cols-5 gap-2.5">
+              <div className="col-span-3">
+                <label className="label">Route name</label>
+                <input className="input" placeholder="India Premium — all clients" value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
+              </div>
+              <div className="col-span-2">
+                <label className="label">Scope</label>
                 <select className="input" value={form.client_id}
                   onChange={(e) => setForm({ ...form, client_id: e.target.value })}>
                   <option value="">🌍 Global — all clients</option>
                   {clients.map((c) => (
-                    <option key={c.id} value={c.id}>🎯 {c.name} ({c.system_id}) — dedicated</option>
+                    <option key={c.id} value={c.id}>🎯 {c.name} — dedicated</option>
                   ))}
                 </select>
-                <p className="text-[11px] text-muted mt-1">
-                  {form.client_id
-                    ? '🎯 Dedicated: only this client uses it. Safe to delete anytime.'
-                    : '🌍 Global: every client falls back to it. Deleting later needs typed confirmation.'}
-                </p>
               </div>
-              <div>
+            </div>
+            {/* match: country + prefix + sender + tps on one row */}
+            <div className="grid grid-cols-4 gap-2.5">
+              <div className="col-span-2">
                 <label className="label">Country</label>
                 <select className="input" value={form.country_id}
                   onChange={(e) => setForm({ ...form, country_id: e.target.value })}>
@@ -628,91 +627,84 @@ export default function Routes(): JSX.Element {
                   ))}
                 </select>
               </div>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
               <div>
-                <label className="label">Prefix <span className="text-gray-600">(blank = any)</span></label>
-                <input className="input font-mono" placeholder="91" value={form.prefix}
+                <label className="label">Prefix</label>
+                <input className="input font-mono" placeholder="91 · any" value={form.prefix}
                   onChange={(e) => setForm({ ...form, prefix: e.target.value })} />
               </div>
               <div>
-                <label className="label">Sender ID <span className="text-gray-600">(blank = any)</span></label>
-                <input className="input font-mono" placeholder="8XTEL" value={form.sender_id}
-                  onChange={(e) => setForm({ ...form, sender_id: e.target.value })} />
+                <label className="label">Sender · TPS</label>
+                <div className="flex gap-1.5">
+                  <input className="input font-mono" placeholder="sender" value={form.sender_id}
+                    onChange={(e) => setForm({ ...form, sender_id: e.target.value })} />
+                  <input className="input font-mono !w-[70px] shrink-0" placeholder="tps" value={form.tps}
+                    onChange={(e) => setForm({ ...form, tps: e.target.value })} inputMode="numeric" title="TPS cap (blank = none)" />
+                </div>
+              </div>
+            </div>
+            {/* price + margin + strategy on one row */}
+            <div className="grid grid-cols-4 gap-2.5">
+              <div className="col-span-2">
+                <label className="label">Price / seg <span className="text-gray-600">(blank = rate card)</span></label>
+                <div className="flex gap-1.5">
+                  <input className="input font-mono flex-1" placeholder="0.0045" value={form.price}
+                    onChange={(e) => setForm({ ...form, price: e.target.value })} inputMode="decimal" />
+                  <select className="input !w-auto" value={form.currency}
+                    onChange={(e) => setForm({ ...form, currency: e.target.value })}>
+                    {CURS.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
               </div>
               <div>
-                <label className="label">TPS cap <span className="text-gray-600">(blank = none)</span></label>
-                <input className="input font-mono" placeholder="100" value={form.tps}
-                  onChange={(e) => setForm({ ...form, tps: e.target.value })} inputMode="numeric" />
+                <label className="label">Margin %</label>
+                <input className="input font-mono" placeholder="15 · none" value={form.margin}
+                  onChange={(e) => setForm({ ...form, margin: e.target.value })} inputMode="decimal" title="Warn-only margin guard" />
               </div>
-            </div>
-            <div>
-              <label className="label">Price / segment <span className="text-gray-600">(blank = client rates)</span></label>
-              <div className="flex gap-1.5">
-                <input className="input font-mono flex-1" placeholder="0.0045" value={form.price}
-                  onChange={(e) => setForm({ ...form, price: e.target.value })} inputMode="decimal" />
-                <select className="input !w-auto" value={form.currency}
-                  onChange={(e) => setForm({ ...form, currency: e.target.value })}>
-                  {CURS.map((c) => <option key={c} value={c}>{c}</option>)}
+              <div>
+                <label className="label">Strategy</label>
+                <select className="input font-mono !text-[13px]" value={form.strategy}
+                  onChange={(e) => setForm({ ...form, strategy: e.target.value })}
+                  title={STRATEGY_HINT[form.strategy]}>
+                  {STRATEGIES.map(([v, desc]) => (
+                    <option key={v} value={v} title={desc}>{v}</option>
+                  ))}
                 </select>
               </div>
-              <p className="text-[11px] text-muted mt-1">
-                Route price × segments is held from the wallet at submit. Blank falls back to the client's rate card.
-              </p>
             </div>
+            <p className="text-[11px] text-muted -mt-1">
+              {form.client_id ? '🎯 Dedicated — only this client uses it.' : '🌍 Global — every client falls back to it.'}{' '}
+              {STRATEGY_HINT[form.strategy]}
+            </p>
+            {/* vendors: compact rows */}
             <div>
-              <label className="label">Min margin % <span className="text-gray-600">(blank = no guard · warn-only)</span></label>
-              <input className="input font-mono" placeholder="15" value={form.margin}
-                onChange={(e) => setForm({ ...form, margin: e.target.value })} inputMode="decimal" />
-            </div>
-            <div>
-              <label className="label">Vendors in this route (click to add, first added = priority 1)</label>
-              <div className="space-y-1.5 max-h-44 overflow-y-auto">
+              <label className="label">Vendors <span className="text-gray-600">(click to add · first = priority 1)</span></label>
+              <div className="space-y-1 max-h-36 overflow-y-auto border border-line/60 rounded-lg p-1.5 bg-ink/40">
                 {vendors.map((v) => {
                   const picked = chain.find((c) => c.vendor_id === v.id);
                   return (
                     <label key={v.id}
-                      className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 cursor-pointer transition ${picked ? 'border-brand/50 bg-brand/5' : 'border-line hover:border-brand/30'}`}>
+                      className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 cursor-pointer transition text-sm ${picked ? 'border-brand/50 bg-brand/5' : 'border-transparent hover:border-line hover:bg-panel2/50'}`}>
                       <input type="checkbox" checked={!!picked} onChange={() => toggleVendor(v.id)} className="accent-emerald-500" />
-                      <span className="text-sm font-medium">{v.name}</span>
+                      <span className="font-medium truncate">{v.name}</span>
                       {picked && (
-                        <span className="ml-auto flex items-center gap-1.5 text-xs text-muted">
-                          P
-                          <input type="number" min={1} value={picked.priority}
+                        <span className="ml-auto flex items-center gap-1 text-[11px] text-muted shrink-0" onClick={(e) => e.stopPropagation()}>
+                          P<input type="number" min={1} value={picked.priority}
                             onChange={(e) => setChain(chain.map((c) => c.vendor_id === v.id ? { ...c, priority: Number(e.target.value) } : c))}
-                            className="input font-mono !w-14 !py-1 !px-2 !text-xs" />
+                            className="input font-mono !w-12 !py-0.5 !px-1.5 !text-[11px]" />
                           {form.strategy === 'percentage' && (
-                            <span className="flex items-center gap-1">
-                              %
-                              <input type="number" min={1} max={100} value={picked.weight}
-                                onChange={(e) => setChain(chain.map((c) => c.vendor_id === v.id ? { ...c, weight: Number(e.target.value) } : c))}
-                                className="input font-mono !w-14 !py-1 !px-2 !text-xs" />
-                            </span>
+                            <span className="flex items-center gap-0.5">%<input type="number" min={1} max={100} value={picked.weight}
+                              onChange={(e) => setChain(chain.map((c) => c.vendor_id === v.id ? { ...c, weight: Number(e.target.value) } : c))}
+                              className="input font-mono !w-12 !py-0.5 !px-1.5 !text-[11px]" /></span>
                           )}
                         </span>
                       )}
                     </label>
                   );
                 })}
-                {!vendors.length && <div className="text-sm text-muted">No vendors yet — create one under Vendors first.</div>}
+                {!vendors.length && <div className="text-sm text-muted px-1 py-2">No vendors yet — create one under Vendors first.</div>}
               </div>
             </div>
-            <div>
-              <label className="label">Strategy</label>
-              <div className="space-y-1.5">
-                {STRATEGIES.map(([v, desc]) => (
-                  <label key={v}
-                    className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 cursor-pointer transition ${form.strategy === v ? 'border-brand/50 bg-brand/5' : 'border-line hover:border-brand/30'}`}>
-                    <input type="radio" name="strategy" value={v} checked={form.strategy === v}
-                      onChange={() => setForm({ ...form, strategy: v })} className="accent-emerald-500" />
-                    <span className="font-mono text-[13px]">{v}</span>
-                    <span className="text-xs text-muted ml-auto text-right">{desc}</span>
-                  </label>
-                ))}
-              </div>
-              <p className="text-[11px] text-muted mt-1.5">{STRATEGY_HINT[form.strategy]}</p>
-            </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 pt-1">
               <button className="btn flex-1" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create route'}</button>
               <button className="btn-ghost" type="button" onClick={() => setShow(false)}>Cancel</button>
             </div>

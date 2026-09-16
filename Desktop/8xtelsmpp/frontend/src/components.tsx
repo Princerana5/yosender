@@ -212,17 +212,23 @@ export function DataTable<T>({ columns, rows, keyOf, empty }: {
 }
 
 // ── Modal ────────────────────────────────────────────────────────────────────
+// Capped at viewport height with its own scroll region: long forms (new
+// route, vendor edit) stay usable on short screens instead of running
+// off-screen. Header stays pinned; body scrolls.
 export function Modal({ title, onClose, children, wide }: {
   title: string; onClose: () => void; children: React.ReactNode; wide?: boolean;
 }): JSX.Element {
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className={`modal ${wide ? '!max-w-2xl' : ''}`} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
+      <div className={`modal ${wide ? '!max-w-2xl' : ''} !p-0 overflow-hidden flex flex-col max-h-[calc(100vh-2rem)]`}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-4 pb-3 shrink-0 border-b border-line/60">
           <div className="font-semibold">{title}</div>
           <button className="btn-ghost !px-2 !py-1" onClick={onClose}><Icon name="x" size={14} /></button>
         </div>
-        {children}
+        <div className="overflow-y-auto px-5 py-4 min-h-0">
+          {children}
+        </div>
       </div>
     </div>
   );
