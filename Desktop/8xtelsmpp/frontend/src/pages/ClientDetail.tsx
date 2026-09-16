@@ -148,15 +148,26 @@ export default function ClientDetail(): JSX.Element {
     api(`/clients/${id}/ips/${ipId}`, { method: 'DELETE' }).then(load);
   }
   async function removeRoute(r: ClientRoute): Promise<void> {
-    const scope = r.dedicated
-      ? `Delete route "${r.name}"? This cannot be undone.`
-      : `Delete GLOBAL route "${r.name}"? It serves ALL clients, not just this one. This cannot be undone.`;
-    if (!window.confirm(scope)) return;
+    if (r.dedicated) {
+      // Dedicated = only ever served this client → real delete is safe.
+      if (!window.confirm(`Delete dedicated route "${r.name}"? Traffic falls back to global routes. This cannot be undone.`)) return;
+      try {
+        await api(`/routes/${r.id}`, { method: 'DELETE' });
+        load();
+      } catch (e) {
+        window.alert(`Could not delete route: ${(e as Error).message}`);
+      }
+      return;
+    }
+    // Global = serves everyone → DETACH from this client only. The route
+    // keeps working for all other clients. Full delete lives on the Routes
+    // page behind a typed confirmation.
+    if (!window.confirm(`Detach GLOBAL route "${r.name}" from this client only?\n\nIt keeps serving ALL other clients. This client falls back to its remaining routes.`)) return;
     try {
-      await api(`/routes/${r.id}`, { method: 'DELETE' });
+      await api(`/routes/${r.id}/detach`, { method: 'POST', body: JSON.stringify({ client_id: id }) });
       load();
     } catch (e) {
-      window.alert(`Could not delete route: ${(e as Error).message}`);
+      window.alert(`Could not detach route: ${(e as Error).message}`);
     }
   }
   async function savePortalEmail(): Promise<void> {
@@ -507,9 +518,9 @@ export default function ClientDetail(): JSX.Element {
               key: 'actions', label: '', right: true,
               render: (r) => (
                 <button className="btn-ghost !px-2 !py-1 text-red-300 hover:text-red-200"
-                  title={r.dedicated ? `Delete route "${r.name}"` : `Delete GLOBAL route "${r.name}" (serves all clients)`}
+                  title={r.dedicated ? `Delete dedicated route "${r.name}"` : `Detach GLOBAL route "${r.name}" from this client only (keeps serving others)`}
                   onClick={() => removeRoute(r)}>
-                  <Icon name="trash" size={14} />
+                  <Icon name={r.dedicated ? 'trash' : 'x'} size={14} />
                 </button>
               ),
             },

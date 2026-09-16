@@ -78,6 +78,10 @@ export async function findRoutes(
      JOIN vendors v ON v.id=rv.vendor_id AND v.status='enabled'
      WHERE r.status='active' AND r.channel=$3
        AND (r.client_id IS NULL OR r.client_id=$4)
+       AND NOT EXISTS (
+         SELECT 1 FROM route_client_exclusions x
+         WHERE x.route_id=r.id AND x.client_id=$4
+       )
        AND (r.country_id IS NULL OR r.country_id=$2)
        AND (r.prefix IS NULL OR $1 LIKE r.prefix || '%')
        AND (r.sender_id IS NULL OR r.sender_id=$5)

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { parse as parseCsv } from 'csv-parse/sync';
 import {
-  query, queryOne, getPool, getQueue, QUEUES, checkTps, incrStat,
+  query, queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat,
   analyzeSms, normalizeToGsm, parseDestinations,
   type MessageJob,
 } from '@8xtel/core';
@@ -96,7 +96,7 @@ router.post('/send', async (req, res) => {
     res.status(422).json({ error: 'insufficient balance — please top up' });
     return;
   }
-  if (!(await checkTps(`client:${client.id}`, client.tps_limit))) {
+  if (!(await tryAcquireTps(`client:${client.id}`, client.tps_limit))) {
     res.status(429).json({ error: 'sending too fast — try again in a second' });
     return;
   }
@@ -164,6 +164,10 @@ router.post('/estimate', async (req, res) => {
        LEFT JOIN countries co ON co.id=r.country_id
        WHERE r.status='active' AND r.channel='sms'
          AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+         AND NOT EXISTS (
+           SELECT 1 FROM route_client_exclusions x
+           WHERE x.route_id=r.id AND x.client_id=$1::uuid
+         )
          AND (r.country_id IS NULL OR ($2 LIKE COALESCE(co.calling_code,'') || '%'))
          AND (r.prefix IS NULL OR $2 LIKE r.prefix || '%')
          AND (r.sender_id IS NULL OR r.sender_id=$3)
@@ -501,6 +505,10 @@ router.get('/coverage', async (req, res) => {
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
      WHERE r.status='active' AND r.channel='sms'
        AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+       AND NOT EXISTS (
+         SELECT 1 FROM route_client_exclusions x
+         WHERE x.route_id=r.id AND x.client_id=$1::uuid
+       )
      ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
     [cid(req)],
   );

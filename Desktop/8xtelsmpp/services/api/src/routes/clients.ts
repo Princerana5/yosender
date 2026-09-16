@@ -234,8 +234,9 @@ router.get('/:id', async (req, res) => {
      LEFT JOIN countries c ON c.id=cr.country_id WHERE cr.client_id=$1 ORDER BY cr.prefix NULLS LAST`,
     [req.params.id],
   );
-  // Active routes serving this client: dedicated + global fallback, sms only.
-  // Mirrors the routing engine's candidate set (minus vendor-chain expansion).
+  // Active routes serving this client: dedicated + global fallback minus
+  // per-client exclusions, sms only. Mirrors the routing engine's candidate
+  // set (minus vendor-chain expansion).
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.status, r.prefix, r.sender_id,
             r.price_per_segment, COALESCE(r.price_currency,'USD') AS price_currency,
@@ -248,6 +249,10 @@ router.get('/:id', async (req, res) => {
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
      WHERE r.status='active' AND r.channel='sms'
        AND (r.client_id IS NULL OR r.client_id=$1::uuid)
+       AND NOT EXISTS (
+         SELECT 1 FROM route_client_exclusions x
+         WHERE x.route_id=r.id AND x.client_id=$1::uuid
+       )
      ORDER BY (r.client_id IS NULL), co.name NULLS LAST, r.name`,
     [req.params.id],
   );
@@ -557,6 +562,63 @@ router.post('/:id/rotate-password', requirePerm('clients.update'), audit('rotate
     req.params.id,
   ]);
   res.json({ password: plain }); // shown once
+});
+
+// ── Client HTTP API keys (for /client/v1/* send API) ─────────────────────────
+// Key plaintext shown ONCE at creation; only sha256 hash stored.
+router.get('/:id/api-keys', async (req, res) => {
+  const rows = await query(
+    `SELECT id, key_prefix, label, is_active, last_used_at, created_at
+     FROM client_api_keys WHERE client_id=$1 ORDER BY created_at DESC`,
+    [req.params.id],
+  );
+  res.json({ keys: rows });
+});
+
+router.post('/:id/api-keys', requirePerm('clients.update'), audit('created_client_api_key', 'client'), async (req, res) => {
+  const client = await queryOne('SELECT id FROM clients WHERE id=$1', [req.params.id]);
+  if (!client) {
+    res.status(404).json({ error: 'client not found' });
+    return;
+  }
+  const label = typeof req.body?.label === 'string' ? req.body.label.slice(0, 100) : null;
+  const plain = `x8_${crypto.randomBytes(24).toString('base64url')}`;
+  const keyHash = crypto.createHash('sha256').update(plain).digest('hex');
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `INSERT INTO client_api_keys (client_id, key_hash, key_prefix, label)
+     VALUES ($1,$2,$3,$4) RETURNING id, key_prefix, label, created_at`,
+    [req.params.id, keyHash, plain.slice(0, 11), label],
+  );
+  res.status(201).json({ key: { ...rows[0], value: plain } }); // value shown once
+});
+
+router.patch('/:id/api-keys/:keyId', requirePerm('clients.update'), audit('toggled_client_api_key', 'client'), async (req, res) => {
+  const active = req.body?.is_active;
+  if (typeof active !== 'boolean') {
+    res.status(400).json({ error: 'provide body.is_active boolean' });
+    return;
+  }
+  const rows = await query(
+    'UPDATE client_api_keys SET is_active=$1 WHERE id=$2 AND client_id=$3 RETURNING id, is_active',
+    [active, req.params.keyId, req.params.id],
+  );
+  if (!rows.length) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  res.json({ key: rows[0] });
+});
+
+router.delete('/:id/api-keys/:keyId', requirePerm('clients.update'), audit('deleted_client_api_key', 'client'), async (req, res) => {
+  const r = await getPool().query(
+    'DELETE FROM client_api_keys WHERE id=$1 AND client_id=$2', [req.params.keyId, req.params.id],
+  );
+  if (!r.rowCount) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  res.json({ ok: true });
 });
 
 export default router;
