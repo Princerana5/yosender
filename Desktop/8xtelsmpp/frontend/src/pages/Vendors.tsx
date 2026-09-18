@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { PageHeader, StatusBadge, Modal, EmptyState, Icon } from '../components';
 
@@ -622,6 +622,12 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
   const [isDefault, setIsDefault] = useState(false);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  // Inline edit state: which row is being edited + its draft values
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTpl, setEditTpl] = useState('');
+  const [editDefault, setEditDefault] = useState(false);
+  const [editBusy, setEditBusy] = useState(false);
+  const sidRef = useRef<HTMLInputElement>(null);
 
   const load = (): void => {
     api<{ templates: SenderTpl[] }>(`/vendors/${vendorId}/sender-templates`)
@@ -629,6 +635,14 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
       .catch(() => undefined);
   };
   useEffect(load, [vendorId]);
+
+  async function saveRow(senderId: string, template: string, makeDefault: boolean): Promise<void> {
+    await api(`/vendors/${vendorId}/sender-templates`, {
+      method: 'POST',
+      body: JSON.stringify({ sender_id: senderId.trim(), template: template.trim(), is_default: makeDefault }),
+    });
+    load();
+  }
 
   async function add(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -639,15 +653,12 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
     setBusy(true);
     setMsg('');
     try {
-      await api(`/vendors/${vendorId}/sender-templates`, {
-        method: 'POST',
-        body: JSON.stringify({ sender_id: sid.trim(), template: tpl.trim(), is_default: isDefault }),
-      });
+      await saveRow(sid, tpl, isDefault);
       setSid('');
       setTpl('');
       setIsDefault(false);
-      setMsg('Saved ✓');
-      load();
+      setMsg('Saved ✓ — add the next SID below');
+      sidRef.current?.focus(); // stay in flow for rapid multi-SID entry
     } catch (e) {
       setMsg(`Save failed: ${(e as Error).message}`);
     } finally {
@@ -655,10 +666,36 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
     }
   }
 
+  function startEdit(r: SenderTpl): void {
+    setEditingId(r.id);
+    setEditTpl(r.template);
+    setEditDefault(r.is_default);
+    setMsg('');
+  }
+
+  async function saveEdit(r: SenderTpl): Promise<void> {
+    if (!editTpl.trim()) {
+      setMsg('Template cannot be empty.');
+      return;
+    }
+    setEditBusy(true);
+    setMsg('');
+    try {
+      await saveRow(r.sender_id, editTpl, editDefault);
+      setEditingId(null);
+      setMsg(`Updated ${r.sender_id} ✓`);
+    } catch (e) {
+      setMsg(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   async function remove(id: string, senderId: string): Promise<void> {
     if (!window.confirm(`Delete template for sender "${senderId}"? Messages with that sender fall back to the default row.`)) return;
     try {
       await api(`/vendors/${vendorId}/sender-templates/${id}`, { method: 'DELETE' });
+      if (editingId === id) setEditingId(null);
       load();
     } catch (e) {
       setMsg(`Delete failed: ${(e as Error).message}`);
@@ -680,10 +717,34 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
                 {r.is_default && (
                   <span className="text-[10px] font-semibold bg-brand/15 text-emerald-300 border border-brand/30 rounded px-1.5 py-0.5">DEFAULT</span>
                 )}
-                <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300 ml-auto"
-                  onClick={() => void remove(r.id, r.sender_id)}>Delete</button>
+                {editingId === r.id ? (
+                  <span className="flex items-center gap-1.5 ml-auto">
+                    <button className="btn !py-0.5 !px-2.5 !text-[11px]" disabled={editBusy}
+                      onClick={() => void saveEdit(r)}>{editBusy ? 'Saving…' : 'Save'}</button>
+                    <button className="btn-ghost !py-0.5 !px-2 !text-[11px]" disabled={editBusy}
+                      onClick={() => setEditingId(null)}>Cancel</button>
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1.5 ml-auto">
+                    <button className="btn-ghost !py-0.5 !px-2 !text-[11px]"
+                      onClick={() => startEdit(r)}>Edit</button>
+                    <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300"
+                      onClick={() => void remove(r.id, r.sender_id)}>Delete</button>
+                  </span>
+                )}
               </div>
-              <div className="text-[11px] text-muted font-mono mt-1 break-words">{r.template}</div>
+              {editingId === r.id ? (
+                <div className="mt-2 space-y-2">
+                  <textarea className="input font-mono text-xs" rows={2} value={editTpl}
+                    onChange={(e) => setEditTpl(e.target.value)} />
+                  <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                    <input type="checkbox" checked={editDefault} onChange={(e) => setEditDefault(e.target.checked)} />
+                    Default (used when sender matches nothing)
+                  </label>
+                </div>
+              ) : (
+                <div className="text-[11px] text-muted font-mono mt-1 break-words">{r.template}</div>
+              )}
             </div>
           ))}
         </div>
@@ -692,7 +753,7 @@ function SenderTemplates({ vendorId }: { vendorId: string }): JSX.Element {
       )}
       <form onSubmit={add} className="space-y-2 pt-1 border-t border-line/60">
         <div className="grid grid-cols-[140px_1fr] gap-2 pt-2">
-          <input className="input font-mono text-xs" placeholder="Sender ID, e.g. PKSSSL"
+          <input ref={sidRef} className="input font-mono text-xs" placeholder="Sender ID, e.g. PKSSSL"
             value={sid} onChange={(e) => setSid(e.target.value)} maxLength={21} />
           <label className="flex items-center gap-1.5 text-[11px] text-muted">
             <input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} />
