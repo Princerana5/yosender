@@ -492,10 +492,19 @@ export function PortalReports(): JSX.Element {
   };
   useEffect(() => { loadSummary('today'); }, []);
 
-  function downloadSummary(): void {
-    const token = localStorage.getItem('xtel_portal_token');
-    fetch(`${API_BASE}/portal/summary/export?day=${day}`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
+  // Full detail download: every message for the day (content, cost, MCC/MNC,
+  // operator status…). Optional country ISO narrows to one country.
+  const [dlBusy, setDlBusy] = useState('');
+
+  function downloadFull(countryIso?: string): void {
+    const key = countryIso ?? 'all';
+    setDlBusy(key);
+    const p = new URLSearchParams({ day });
+    if (countryIso) p.set('country', countryIso);
+    fetch(`${API_BASE}/portal/summary/export?${p}`, {
+      headers: localStorage.getItem('xtel_portal_token')
+        ? { authorization: `Bearer ${localStorage.getItem('xtel_portal_token')}` }
+        : {},
     })
       .then((r) => {
         if (!r.ok) throw new Error('export failed');
@@ -505,11 +514,12 @@ export function PortalReports(): JSX.Element {
         const url = URL.createObjectURL(b);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `country-summary-${day}.csv`;
+        a.download = `full-report-${day}${countryIso ? `-${countryIso.toLowerCase()}` : ''}.csv`;
         a.click();
         URL.revokeObjectURL(url);
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setDlBusy(''));
   }
 
   const totals = rows.reduce(
@@ -544,12 +554,12 @@ export function PortalReports(): JSX.Element {
           <button className="btn-ghost" onClick={() => { setF({ from: '', to: '' }); setTimeout(load, 0); }}>Clear</button>
         )}
       </div>
-      {/* Country-wise summary: today / yesterday + CSV download */}
+      {/* Country-wise summary: today / yesterday + full detail download */}
       <div className="card card-pad">
         <div className="flex flex-wrap items-center gap-2">
           <div>
             <div className="card-title">Country summary</div>
-            <div className="card-sub">Totals per country · {day === 'today' ? "today (00:00 → now)" : "yesterday (full day)"}</div>
+            <div className="card-sub">Totals per country · {day === 'today' ? "today (00:00 → now)" : "yesterday (full day)"} · downloads carry full detail (content, cost, MCC/MNC, operator status…)</div>
           </div>
           <div className="flex gap-1.5 ml-auto">
             {(['today', 'yesterday'] as const).map((d) => (
@@ -560,8 +570,8 @@ export function PortalReports(): JSX.Element {
                 {d === 'today' ? 'Today' : 'Yesterday'}
               </button>
             ))}
-            <button className="btn !py-1.5 !text-xs" onClick={downloadSummary} disabled={sumBusy || !summary.length}>
-              ⬇ Download {day === 'today' ? 'today' : 'yesterday'} (CSV)
+            <button className="btn !py-1.5 !text-xs" onClick={() => downloadFull()} disabled={sumBusy || !summary.length || !!dlBusy}>
+              {dlBusy === 'all' ? 'Preparing…' : `⬇ Full report — ${day === 'today' ? 'today' : 'yesterday'} (CSV)`}
             </button>
           </div>
         </div>
@@ -584,6 +594,16 @@ export function PortalReports(): JSX.Element {
               { key: 'delivered', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{Number(r.delivered).toLocaleString()}</span> },
               { key: 'failed', label: 'Failed', right: true, render: (r) => <span className={`tabular-nums ${Number(r.failed) ? 'text-red-300' : 'text-muted'}`}>{Number(r.failed).toLocaleString()}</span> },
               { key: 'pending', label: 'Pending', right: true, render: (r) => <span className="tabular-nums text-muted">{Number(r.pending).toLocaleString()}</span> },
+              {
+                key: 'dl', label: 'Report', right: true,
+                render: (r) => (
+                  <button className="btn-ghost !py-1 !px-2.5 !text-[11px]"
+                    disabled={!!dlBusy} onClick={() => downloadFull(r.iso_code)}
+                    title={`Download full detail for ${r.country} (${day})`}>
+                    {dlBusy === r.iso_code ? '…' : '⬇ CSV'}
+                  </button>
+                ),
+              },
             ]}
           />
         </div>

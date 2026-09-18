@@ -507,35 +507,49 @@ router.get('/summary', async (req, res) => {
   res.json({ day, summary: rows });
 });
 
-// ── Country-wise summary as CSV download (?day=today|yesterday) ──────────────
+// ── Full detail report as CSV download (?day=today|yesterday, ?country=) ────
+// One row per message: destination, sender, content, status, operator DLR,
+// country, MCC/MNC/operator, vendor id, cost, error, submit + DLR time.
+// Optional ?country=<iso or name> filters to one country. Capped at 50k rows.
 router.get('/summary/export', async (req, res) => {
   const q = req.query as Record<string, string>;
   const day = q.day === 'yesterday' ? 'yesterday' : 'today';
   const timeFilter = day === 'yesterday'
     ? `m.created_at >= (CURRENT_DATE - interval '1 day') AND m.created_at < CURRENT_DATE`
     : `m.created_at >= CURRENT_DATE`;
-  const rows = await query<Record<string, unknown>>(
-    `SELECT COALESCE(co.name, 'Unknown') AS country, COALESCE(co.iso_code, '—') AS iso_code,
-            COUNT(*) AS total,
-            COUNT(*) FILTER (WHERE m.status='delivered') AS delivered,
-            COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
-            COUNT(*) FILTER (WHERE m.status='submitted') AS pending
+  const params: unknown[] = [cid(req)];
+  let countryFilter = '';
+  if (q.country) {
+    params.push(q.country);
+    countryFilter = ` AND (co.iso_code ILIKE $${params.length} OR co.name ILIKE $${params.length})`;
+  }
+  const numbers = await query<Record<string, unknown>>(
+    `SELECT m.destination, m.source, m.text, m.status, m.client_price,
+            m.submit_time, m.dlr_time, m.created_at, m.mnc, m.mcc, m.operator_name,
+            m.vendor_msg_id, m.error_code, m.error_description,
+            co.name AS country_name, co.iso_code,
+            d.vendor_status AS operator_status, d.client_status AS final_status
      FROM messages m
      LEFT JOIN countries co ON co.id=m.country_id
-     WHERE m.client_id=$1 AND ${timeFilter}
-     GROUP BY 1,2 ORDER BY total DESC`,
-    [cid(req)],
+     LEFT JOIN dlrs d ON d.message_id=m.id
+     WHERE m.client_id=$1 AND ${timeFilter}${countryFilter}
+     ORDER BY m.created_at LIMIT 50000`,
+    params,
   );
   const esc = (v: unknown): string => {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = 'country,iso_code,total,delivered,failed,pending\n';
-  const lines = rows.map((r) =>
-    [r.country, r.iso_code, r.total, r.delivered, r.failed, r.pending].map(esc).join(','),
+  const header = 'destination,sender,content,status,operator_status,final_status,country,iso_code,mcc,mnc,operator,vendor_msg_id,cost,error,submitted,delivered,created\n';
+  const lines = numbers.map((m) =>
+    [m.destination, m.source, m.text, m.status, m.operator_status, m.final_status,
+     m.country_name, m.iso_code, m.mcc, m.mnc, m.operator_name, m.vendor_msg_id,
+     m.client_price, m.error_code ?? m.error_description,
+     m.submit_time, m.dlr_time, m.created_at].map(esc).join(','),
   );
+  const suffix = q.country ? `-${String(q.country).toLowerCase().replace(/[^a-z0-9]+/g, '')}` : '';
   res.setHeader('content-type', 'text/csv; charset=utf-8');
-  res.setHeader('content-disposition', `attachment; filename="country-summary-${day}.csv"`);
+  res.setHeader('content-disposition', `attachment; filename="full-report-${day}${suffix}.csv"`);
   res.send(header + lines.join('\n'));
 });
 
