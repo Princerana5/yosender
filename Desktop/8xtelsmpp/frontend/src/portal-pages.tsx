@@ -457,9 +457,20 @@ interface Campaign {
   live_delivered: string; live_failed: string;
 }
 
+interface CountryRow {
+  country: string; iso_code: string; total: string;
+  delivered: string; failed: string; pending: string;
+}
+
+type SummaryDay = 'today' | 'yesterday';
+
 export function PortalReports(): JSX.Element {
   const [rows, setRows] = useState<Campaign[]>([]);
   const [f, setF] = useState({ from: '', to: '' });
+  // Country-wise summary (today / yesterday + CSV download)
+  const [day, setDay] = useState<SummaryDay>('today');
+  const [summary, setSummary] = useState<CountryRow[]>([]);
+  const [sumBusy, setSumBusy] = useState(false);
 
   const load = (): void => {
     const p = new URLSearchParams();
@@ -470,6 +481,36 @@ export function PortalReports(): JSX.Element {
       .catch(() => undefined);
   };
   useEffect(load, []);
+
+  const loadSummary = (d: SummaryDay): void => {
+    setDay(d);
+    setSumBusy(true);
+    portalApi<{ summary: CountryRow[] }>(`/portal/summary?day=${d}`)
+      .then((r) => setSummary(r.summary))
+      .catch(() => undefined)
+      .finally(() => setSumBusy(false));
+  };
+  useEffect(() => { loadSummary('today'); }, []);
+
+  function downloadSummary(): void {
+    const token = localStorage.getItem('xtel_portal_token');
+    fetch(`${API_BASE}/portal/summary/export?day=${day}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error('export failed');
+        return r.blob();
+      })
+      .then((b) => {
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `country-summary-${day}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => undefined);
+  }
 
   const totals = rows.reduce(
     (s, c) => ({
@@ -502,6 +543,50 @@ export function PortalReports(): JSX.Element {
         {(f.from || f.to) && (
           <button className="btn-ghost" onClick={() => { setF({ from: '', to: '' }); setTimeout(load, 0); }}>Clear</button>
         )}
+      </div>
+      {/* Country-wise summary: today / yesterday + CSV download */}
+      <div className="card card-pad">
+        <div className="flex flex-wrap items-center gap-2">
+          <div>
+            <div className="card-title">Country summary</div>
+            <div className="card-sub">Totals per country · {day === 'today' ? "today (00:00 → now)" : "yesterday (full day)"}</div>
+          </div>
+          <div className="flex gap-1.5 ml-auto">
+            {(['today', 'yesterday'] as const).map((d) => (
+              <button key={d} type="button" onClick={() => loadSummary(d)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold capitalize transition ${day === d
+                  ? 'border-brand/50 bg-brand/10 text-emerald-300'
+                  : 'border-line text-muted hover:text-white'}`}>
+                {d === 'today' ? 'Today' : 'Yesterday'}
+              </button>
+            ))}
+            <button className="btn !py-1.5 !text-xs" onClick={downloadSummary} disabled={sumBusy || !summary.length}>
+              ⬇ Download {day === 'today' ? 'today' : 'yesterday'} (CSV)
+            </button>
+          </div>
+        </div>
+        <div className="mt-3">
+          <DataTable
+            keyOf={(r) => `${r.country}-${r.iso_code}`}
+            rows={summary}
+            empty={sumBusy ? 'Loading…' : `No traffic ${day}.`}
+            columns={[
+              {
+                key: 'country', label: 'Country',
+                render: (r) => (
+                  <span>
+                    <span className="font-mono text-[11px] bg-panel2 border border-line rounded px-1.5 py-0.5 mr-1.5">{r.iso_code}</span>
+                    {r.country}
+                  </span>
+                ),
+              },
+              { key: 'total', label: 'Total', right: true, render: (r) => <span className="tabular-nums font-semibold">{Number(r.total).toLocaleString()}</span> },
+              { key: 'delivered', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{Number(r.delivered).toLocaleString()}</span> },
+              { key: 'failed', label: 'Failed', right: true, render: (r) => <span className={`tabular-nums ${Number(r.failed) ? 'text-red-300' : 'text-muted'}`}>{Number(r.failed).toLocaleString()}</span> },
+              { key: 'pending', label: 'Pending', right: true, render: (r) => <span className="tabular-nums text-muted">{Number(r.pending).toLocaleString()}</span> },
+            ]}
+          />
+        </div>
       </div>
       <DataTable
         keyOf={(c) => c.id}

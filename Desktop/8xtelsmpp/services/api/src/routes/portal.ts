@@ -483,6 +483,62 @@ router.get('/campaigns/:id/export', async (req, res) => {
   res.send(header + lines.join('\n'));
 });
 
+// ── Country-wise summary: totals per country for today / yesterday ─────────
+// Scoped to the logged-in client. ?day=today (default) | yesterday.
+// Used by the portal Reports page for the country table + CSV download.
+router.get('/summary', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const day = q.day === 'yesterday' ? 'yesterday' : 'today';
+  const timeFilter = day === 'yesterday'
+    ? `m.created_at >= (CURRENT_DATE - interval '1 day') AND m.created_at < CURRENT_DATE`
+    : `m.created_at >= CURRENT_DATE`;
+  const rows = await query(
+    `SELECT COALESCE(co.name, 'Unknown') AS country, COALESCE(co.iso_code, '—') AS iso_code,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE m.status='delivered') AS delivered,
+            COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='submitted') AS pending
+     FROM messages m
+     LEFT JOIN countries co ON co.id=m.country_id
+     WHERE m.client_id=$1 AND ${timeFilter}
+     GROUP BY 1,2 ORDER BY total DESC`,
+    [cid(req)],
+  );
+  res.json({ day, summary: rows });
+});
+
+// ── Country-wise summary as CSV download (?day=today|yesterday) ──────────────
+router.get('/summary/export', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const day = q.day === 'yesterday' ? 'yesterday' : 'today';
+  const timeFilter = day === 'yesterday'
+    ? `m.created_at >= (CURRENT_DATE - interval '1 day') AND m.created_at < CURRENT_DATE`
+    : `m.created_at >= CURRENT_DATE`;
+  const rows = await query<Record<string, unknown>>(
+    `SELECT COALESCE(co.name, 'Unknown') AS country, COALESCE(co.iso_code, '—') AS iso_code,
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE m.status='delivered') AS delivered,
+            COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='submitted') AS pending
+     FROM messages m
+     LEFT JOIN countries co ON co.id=m.country_id
+     WHERE m.client_id=$1 AND ${timeFilter}
+     GROUP BY 1,2 ORDER BY total DESC`,
+    [cid(req)],
+  );
+  const esc = (v: unknown): string => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = 'country,iso_code,total,delivered,failed,pending\n';
+  const lines = rows.map((r) =>
+    [r.country, r.iso_code, r.total, r.delivered, r.failed, r.pending].map(esc).join(','),
+  );
+  res.setHeader('content-type', 'text/csv; charset=utf-8');
+  res.setHeader('content-disposition', `attachment; filename="country-summary-${day}.csv"`);
+  res.send(header + lines.join('\n'));
+});
+
 // ── Coverage: routes available to this client + country + rate ──────────────
 router.get('/coverage', async (req, res) => {
   const me = await queryOne<{ currency: string }>(
