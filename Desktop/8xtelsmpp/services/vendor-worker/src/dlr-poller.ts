@@ -33,25 +33,17 @@ function fill(tpl: string, vars: Record<string, string>): string {
   );
 }
 
-/** Vendor status → classic DLR stat token.
-    Words (SamparkHub-style: delivered, DELIVRD, failed…) plus Fortius-style
-    numeric codes: 1 submitted · 2 sent · 3 rejected · 4 delivered ·
-    5 undelivered · 6 expired · 7 failed. */
+/** Vendor status word → classic DLR stat token.
+    NOTE: Fortius http-dlr.php returns NUMERIC codes ("1".."7") whose meanings
+    are undocumented — they are deliberately NOT mapped here. A numeric code
+    returns UNKNOWN so the message stays `submitted` (honest) instead of a
+    guessed terminal state. The raw code is logged per poll; once Fortius
+    support confirms the codebook, add the mapping here. */
 function toStat(raw: string): string {
   const s = raw.trim().toUpperCase();
-  // Numeric codes first (Fortius http-dlr.php returns "status":"4" etc.)
   if (/^\d+$/.test(s)) {
-    switch (s) {
-      case '4': return 'DELIVRD';
-      case '6': return 'EXPIRED';
-      case '5': return 'UNDELIV';
-      case '3': return 'REJECTD';
-      case '7': return 'FAILED';
-      case '1':
-      case '2':
-      case '0': return 'ACCEPTD';
-      default: return 'UNKNOWN';
-    }
+    console.warn(`[dlr-poll] unmapped numeric status=${s} — leaving submitted, confirm codebook with vendor`);
+    return 'UNKNOWN';
   }
   if (s.startsWith('DELIVRD') || s === 'DELIVERED' || s === 'DELIVERY_SUCCESS' || s === 'D') return 'DELIVRD';
   if (s.startsWith('EXPIRED') || s === 'EXPIRE') return 'EXPIRED';
