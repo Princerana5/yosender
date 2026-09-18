@@ -202,13 +202,20 @@ export class HttpVendorSender {
     // Vendor-level error detection: some HTTP vendors return HTTP 200 with an
     // error payload instead of a non-2xx status. Treat those as failures so
     // failover/retry engages instead of marking a fake send.
+    // Covers Fortius-style {"status":"false","code":"008",...} as well as
+    // SamparkHub-style {responseCode,status,msg} payloads.
     try {
       const probe: unknown = JSON.parse(text);
       const items = Array.isArray(probe) ? probe : [probe];
       for (const it of items) {
         const rec = it as Record<string, unknown>;
-        const sig = `${String(rec.responseCode ?? '')} ${String(rec.status ?? '')} ${String(rec.msg ?? '')}`;
-        if (/invalid|reject|fail|error|not approved/i.test(sig)) {
+        const statusRaw = String(rec.status ?? '');
+        // Explicit failure flag: status "false"/"fail"/"failed"/"error"
+        if (/^(false|fail|failed|error|0)$/i.test(statusRaw.trim())) {
+          throw new Error(`http vendor rejected: ${text.slice(0, 200)}`);
+        }
+        const sig = `${String(rec.responseCode ?? '')} ${statusRaw} ${String(rec.msg ?? '')} ${String(rec.description ?? '')}`;
+        if (/invalid|reject|fail|error|not approved|insufficient|deactivat/i.test(sig)) {
           throw new Error(`http vendor rejected: ${text.slice(0, 200)}`);
         }
       }
