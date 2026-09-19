@@ -1,5 +1,5 @@
 import {
-  createWorker, getQueue, QUEUES, getPool, checkTps, tryAcquireTps, incrStat, analyzeSms, type MessageJob,
+  createWorker, getQueue, QUEUES, getPool, tryAcquireTps, incrStat, analyzeSms, type MessageJob,
 } from '@8xtel/core';
 import { resolveCountry, applyFilters, findRoutes, orderVendors, recordEvent } from './engine.js';
 
@@ -111,7 +111,7 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     ? await pool.query('SELECT tps_limit FROM routes WHERE id=$1', [chosen.route_id])
     : { rows: [] as Array<{ tps_limit: number | null }> };
   const routeTps: number | null = routeRow.rows[0]?.tps_limit ?? null;
-  if (routeTps && !(await checkTps(`route:${chosen.route_id}`, routeTps))) {
+  if (routeTps && !(await tryAcquireTps(`route:${chosen.route_id}`, routeTps))) {
     await getQueue(QUEUES.submit).add('submit', msg, { delay: 1000 });
     return;
   }
@@ -147,10 +147,63 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   }
   const reserveAmount = Number(clientPrice ?? 0);
 
+  // ── Credit-mode reservation: 1 credit per segment, no money moves ─────────
+  // Clients with billing_mode='credit' burn SMS credits instead of funds.
+  // Same hold/settle/refund shape as money (reserved_credits on messages,
+  // credit_transactions ledger) but the money hold below is skipped.
+  let reserveCredits = 0;
+  {
+    const wmode = await pool.query(
+      'SELECT billing_mode FROM wallets WHERE client_id=$1', [msg.client_id],
+    );
+    if ((wmode.rows[0]?.billing_mode ?? 'prepay') === 'credit') {
+      reserveCredits = segments;
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const w = await db.query(
+          'SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE', [msg.client_id],
+        );
+        if (!w.rowCount) {
+          await db.query('ROLLBACK');
+          await pool.query(`UPDATE messages SET status='failed', error_description='no wallet', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
+          await recordEvent(msg.internal_id, null, 'failed', 'no wallet for credit reservation');
+          await incrStat('failed');
+          return;
+        }
+        const have = Number(w.rows[0].sms_credits ?? 0);
+        if (have < reserveCredits) {
+          await db.query('ROLLBACK');
+          await pool.query(`UPDATE messages SET status='rejected', error_description='insufficient SMS credits at routing', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
+          await recordEvent(msg.internal_id, null, 'failed', `credit reservation failed: need ${reserveCredits}, have ${have}`);
+          await incrStat('rejected');
+          return;
+        }
+        const after = +(have - reserveCredits).toFixed(2);
+        await db.query('UPDATE wallets SET sms_credits=$1, updated_at=now() WHERE client_id=$2', [after, msg.client_id]);
+        await db.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [after, msg.client_id]);
+        await db.query(
+          `INSERT INTO credit_transactions (client_id, message_id, type, amount, balance_after, description, remark)
+           VALUES ($1,$2,'burn',$3,$4,$5,$6)`,
+          [msg.client_id, msg.internal_id, -reserveCredits, after,
+           `SMS credit hold ${msg.internal_id.slice(0, 8)} (${segments} seg)`,
+           `Reserved at submit · ${segments} credit(s)`],
+        );
+        await db.query('COMMIT');
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        db.release();
+      }
+    }
+  }
+
   // ── Submit-time reservation: hold funds NOW, settle on outcome (§28) ──────
   // Atomic: only proceed if wallet covers the hold (prepay floor 0,
   // postpay floor -credit_limit). Concurrent submits serialize on the row lock.
-  if (reserveAmount > 0) {
+  // Skipped for credit-mode clients (credits held above instead).
+  if (reserveAmount > 0 && reserveCredits === 0) {
     const db = await pool.connect();
     try {
       await db.query('BEGIN');
@@ -194,12 +247,14 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   }
 
   await pool.query(
-    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5 WHERE id=$6',
-    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, msg.internal_id],
+    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6 WHERE id=$7',
+    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, reserveCredits, msg.internal_id],
   );
   await recordEvent(
     msg.internal_id, chain[0]?.vendor_id ?? null, 'routed',
-    `${chosen.route_name} [${chain.map((v) => v.vendor_name).join(' → ')}] · hold ${reserveAmount} (${priceSource})`,
+    reserveCredits > 0
+      ? `${chosen.route_name} [${chain.map((v) => v.vendor_name).join(' → ')}] · hold ${reserveCredits} credit(s)`
+      : `${chosen.route_name} [${chain.map((v) => v.vendor_name).join(' → ')}] · hold ${reserveAmount} (${priceSource})`,
   );
 
   await getQueue(QUEUES.vendorSend).add('send', {

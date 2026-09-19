@@ -205,10 +205,10 @@ router.post('/wallets/:clientId/deduct', requirePerm('billing.manage'), audit('w
   }
 });
 
-// Billing mode + credit limit — prepay/postpay switch for a client
+// Billing mode + credit limit — prepay/postpay/credit switch for a client
 router.post('/wallets/:clientId/billing-mode', requirePerm('billing.manage'), audit('changed_billing_mode', 'wallet'), async (req, res) => {
   const parsed = z.object({
-    billing_mode: z.enum(['prepay', 'postpay']),
+    billing_mode: z.enum(['prepay', 'postpay', 'credit']),
     credit_limit: z.number().nonnegative().optional(),
   }).safeParse(req.body);
   if (!parsed.success) {
@@ -241,6 +241,107 @@ router.post('/wallets/:clientId/billing-mode', requirePerm('billing.manage'), au
   } finally {
     db.release();
   }
+});
+
+// ── SMS credits: grant / deduct / ledger ─────────────────────────────────────
+// Credit-mode clients burn 1 credit per segment instead of money. Grants add
+// to the pile; sends hold + settle; failures refund. All immutable + audited.
+router.post('/wallets/:clientId/credits/grant', requirePerm('billing.manage'), audit('granted_sms_credits', 'wallet'), async (req, res) => {
+  const parsed = z.object({
+    amount: z.number().positive().max(10_000_000),
+    remark: z.string().trim().min(3, 'remark is required (min 3 chars)'),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const cur = await db.query('SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE', [req.params.clientId]);
+    if (!cur.rowCount) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'wallet not found' });
+      return;
+    }
+    const after = +(Number(cur.rows[0].sms_credits ?? 0) + parsed.data.amount).toFixed(2);
+    await db.query('UPDATE wallets SET sms_credits=$1, updated_at=now() WHERE client_id=$2', [after, req.params.clientId]);
+    await db.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [after, req.params.clientId]);
+    await db.query(
+      `INSERT INTO credit_transactions (client_id, type, amount, balance_after, description, remark, created_by)
+       VALUES ($1,'grant',$2,$3,$4,$4,$5)`,
+      [req.params.clientId, parsed.data.amount, after, parsed.data.remark, (req.user as { id: string }).id],
+    );
+    await db.query('COMMIT');
+    res.json({ sms_credits: after });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: 'grant failed' });
+  } finally {
+    db.release();
+  }
+});
+
+router.post('/wallets/:clientId/credits/deduct', requirePerm('billing.manage'), audit('deducted_sms_credits', 'wallet'), async (req, res) => {
+  const parsed = z.object({
+    amount: z.number().positive().max(10_000_000),
+    remark: z.string().trim().min(3, 'remark is required (min 3 chars)'),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const pool = getPool();
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const cur = await db.query('SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE', [req.params.clientId]);
+    if (!cur.rowCount) {
+      await db.query('ROLLBACK');
+      res.status(404).json({ error: 'wallet not found' });
+      return;
+    }
+    const have = Number(cur.rows[0].sms_credits ?? 0);
+    if (have < parsed.data.amount) {
+      await db.query('ROLLBACK');
+      res.status(422).json({ error: `insufficient credits (have ${have})` });
+      return;
+    }
+    const after = +(have - parsed.data.amount).toFixed(2);
+    await db.query('UPDATE wallets SET sms_credits=$1, updated_at=now() WHERE client_id=$2', [after, req.params.clientId]);
+    await db.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [after, req.params.clientId]);
+    await db.query(
+      `INSERT INTO credit_transactions (client_id, type, amount, balance_after, description, remark, created_by)
+       VALUES ($1,'adjustment',$2,$3,$4,$4,$5)`,
+      [req.params.clientId, -parsed.data.amount, after, parsed.data.remark, (req.user as { id: string }).id],
+    );
+    await db.query('COMMIT');
+    res.json({ sms_credits: after });
+  } catch (e) {
+    await db.query('ROLLBACK');
+    res.status(500).json({ error: 'deduct failed' });
+  } finally {
+    db.release();
+  }
+});
+
+router.get('/wallets/:clientId/credits', async (req, res) => {
+  const bal = await query(
+    'SELECT w.sms_credits, w.billing_mode, c.name AS client_name FROM wallets w JOIN clients c ON c.id=w.client_id WHERE w.client_id=$1',
+    [req.params.clientId],
+  );
+  if (!bal.length) {
+    res.status(404).json({ error: 'wallet not found' });
+    return;
+  }
+  const txs = await query(
+    `SELECT ct.*, m.destination FROM credit_transactions ct
+     LEFT JOIN messages m ON m.id=ct.message_id
+     WHERE ct.client_id=$1 ORDER BY ct.created_at DESC LIMIT 200`,
+    [req.params.clientId],
+  );
+  res.json({ wallet: bal[0], transactions: txs });
 });
 
 // ── Top-up requests: approve (= real topup) or reject ───────────────────────

@@ -5,6 +5,12 @@ import { PageHeader, DataTable, Modal, Icon, Money, CurrencyBadge, StatusBadge }
 interface Wallet {
   client_id: string; client_name: string; system_id: string; client_status: string;
   balance: string; credit_limit: string; currency: string; billing_mode: string;
+  sms_credits?: string | null;
+}
+interface CreditTx {
+  id: number; type: string; amount: string; balance_after: string;
+  description: string | null; remark: string | null; created_at: string;
+  destination?: string | null;
 }
 interface Tx {
   id: number; client_name: string; type: string; amount: string; balance_after: string;
@@ -31,7 +37,10 @@ export default function Billing(): JSX.Element {
   const [changing, setChanging] = useState<Wallet | null>(null);
   const [newCur, setNewCur] = useState<string>('USDT');
   const [modeEdit, setModeEdit] = useState<Wallet | null>(null);
-  const [modeDraft, setModeDraft] = useState<'prepay' | 'postpay'>('prepay');
+  const [modeDraft, setModeDraft] = useState<'prepay' | 'postpay' | 'credit'>('prepay');
+  const [crediting, setCrediting] = useState<Wallet | null>(null);
+  const [creditKind, setCreditKind] = useState<'grant' | 'deduct'>('grant');
+  const [creditTxs, setCreditTxs] = useState<CreditTx[]>([]);
   const [creditDraft, setCreditDraft] = useState('0');
   const [editingFx, setEditingFx] = useState(false);
   const [fxDraft, setFxDraft] = useState<Record<string, string>>({});
@@ -101,9 +110,49 @@ export default function Billing(): JSX.Element {
 
   function openMode(w: Wallet): void {
     setModeEdit(w);
-    setModeDraft(w.billing_mode === 'postpay' ? 'postpay' : 'prepay');
+    setModeDraft(w.billing_mode === 'postpay' ? 'postpay' : w.billing_mode === 'credit' ? 'credit' : 'prepay');
     setCreditDraft(w.credit_limit);
     setFormErr('');
+  }
+
+  function openCredits(w: Wallet, kind: 'grant' | 'deduct'): void {
+    setCrediting(w);
+    setCreditKind(kind);
+    setAmount(kind === 'deduct' ? '1000' : '10000');
+    setRemark('');
+    setFormErr('');
+    setCreditTxs([]);
+    api<{ transactions: CreditTx[] }>(`/billing/wallets/${w.client_id}/credits`)
+      .then((r) => setCreditTxs(r.transactions))
+      .catch(() => undefined);
+  }
+
+  async function doCreditAdj(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    if (!crediting) return;
+    const n = Number(amount);
+    if (!n || n <= 0) {
+      setFormErr('Enter a credit amount greater than 0.');
+      return;
+    }
+    if (remark.trim().length < 3) {
+      setFormErr('Remark is required (min 3 characters) — it appears in the ledger.');
+      return;
+    }
+    setBusy(true);
+    setFormErr('');
+    try {
+      await api(`/billing/wallets/${crediting.client_id}/credits/${creditKind}`, {
+        method: 'POST',
+        body: JSON.stringify({ amount: n, remark: remark.trim() }),
+      });
+      setCrediting(null);
+      load();
+    } catch (err) {
+      setFormErr((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function doModeChange(): Promise<void> {
@@ -230,44 +279,75 @@ export default function Billing(): JSX.Element {
         {wallets.map((w) => {
           const bal = Number(w.balance);
           const postpay = w.billing_mode === 'postpay';
-          const low = !postpay && bal < 10;
+          const creditMode = w.billing_mode === 'credit';
+          const credits = Number(w.sms_credits ?? 0);
+          const low = !postpay && !creditMode && bal < 10;
           const overLimit = postpay && bal < -Number(w.credit_limit);
+          const lowCredits = creditMode && credits < 100;
           return (
             <div key={w.client_id} className="card card-pad">
               <div className="flex items-center justify-between gap-2">
                 <div className="font-semibold truncate">{w.client_name}</div>
                 <div className="flex items-center gap-1.5">
-                  {(low || overLimit) && <span className="badge bg-warn/15 text-amber-300 border border-warn/25">low</span>}
-                  <CurrencyBadge code={w.currency} />
+                  {(low || overLimit || lowCredits) && <span className="badge bg-warn/15 text-amber-300 border border-warn/25">low</span>}
+                  {creditMode
+                    ? <span className="badge border bg-violet-500/10 text-violet-300 border-violet-500/25">SMS</span>
+                    : <CurrencyBadge code={w.currency} />}
                 </div>
               </div>
               <div className="flex items-center gap-1.5 mt-1.5">
-                <span className={`badge border ${postpay ? 'bg-sky-500/10 text-sky-300 border-sky-500/25' : 'bg-brand/10 text-emerald-300 border-brand/25'}`}>
-                  {postpay ? 'POSTPAY' : 'PREPAY'}
+                <span className={`badge border ${postpay ? 'bg-sky-500/10 text-sky-300 border-sky-500/25' : creditMode ? 'bg-violet-500/10 text-violet-300 border-violet-500/25' : 'bg-brand/10 text-emerald-300 border-brand/25'}`}>
+                  {postpay ? 'POSTPAY' : creditMode ? 'CREDITS' : 'PREPAY'}
                 </span>
                 <StatusBadge status={w.client_status} />
               </div>
-              <div className={`stat-value ${low || overLimit ? 'text-amber-300' : postpay && bal < 0 ? 'text-sky-300' : 'text-emerald-300'}`}>
-                <Money value={w.balance} currency={w.currency} />
-              </div>
-              <div className="text-xs text-muted mt-1">
-                Credit limit <Money value={w.credit_limit} currency={w.currency} />
-                {postpay && <span> · available <Money value={Number(w.credit_limit) + bal} currency={w.currency} /></span>}
-              </div>
+              {creditMode ? (
+                <>
+                  <div className={`stat-value tabular-nums ${lowCredits ? 'text-amber-300' : 'text-violet-300'}`}>
+                    {credits.toLocaleString()} <span className="text-sm font-normal text-muted">credits</span>
+                  </div>
+                  <div className="text-xs text-muted mt-1">1 credit = 1 SMS segment · failed sends refund automatically</div>
+                </>
+              ) : (
+                <>
+                  <div className={`stat-value ${low || overLimit ? 'text-amber-300' : postpay && bal < 0 ? 'text-sky-300' : 'text-emerald-300'}`}>
+                    <Money value={w.balance} currency={w.currency} />
+                  </div>
+                  <div className="text-xs text-muted mt-1">
+                    Credit limit <Money value={w.credit_limit} currency={w.currency} />
+                    {postpay && <span> · available <Money value={Number(w.credit_limit) + bal} currency={w.currency} /></span>}
+                  </div>
+                </>
+              )}
               <div className="grid grid-cols-2 gap-2 mt-3">
-                <button className="btn !text-xs" onClick={() => openAdj(w, 'topup')}>
-                  <Icon name="plus" size={13} /> Top up
+                {creditMode ? (
+                  <>
+                    <button className="btn !text-xs" onClick={() => openCredits(w, 'grant')}>
+                      <Icon name="plus" size={13} /> Grant credits
+                    </button>
+                    <button className="btn-ghost !text-xs !border-danger/30 hover:!border-danger/60 hover:!text-red-300" onClick={() => openCredits(w, 'deduct')}>
+                      − Deduct
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn !text-xs" onClick={() => openAdj(w, 'topup')}>
+                      <Icon name="plus" size={13} /> Top up
+                    </button>
+                    <button className="btn-ghost !text-xs !border-danger/30 hover:!border-danger/60 hover:!text-red-300" onClick={() => openAdj(w, 'deduct')}>
+                      − Deduct
+                    </button>
+                  </>
+                )}
+                <button className="btn-ghost !text-xs" title="Prepay / postpay / SMS credits + credit limit" onClick={() => openMode(w)}>
+                  {postpay ? 'Postpay ⚙' : creditMode ? 'Credits ⚙' : 'Prepay ⚙'}
                 </button>
-                <button className="btn-ghost !text-xs !border-danger/30 hover:!border-danger/60 hover:!text-red-300" onClick={() => openAdj(w, 'deduct')}>
-                  − Deduct
-                </button>
-                <button className="btn-ghost !text-xs" title="Prepay / postpay + credit limit" onClick={() => openMode(w)}>
-                  {postpay ? 'Postpay ⚙' : 'Prepay ⚙'}
-                </button>
-                <button className="btn-ghost !text-xs" title="Change currency"
-                  onClick={() => { setChanging(w); setNewCur(w.currency); }}>
-                  {w.currency} ⇄
-                </button>
+                {!creditMode && (
+                  <button className="btn-ghost !text-xs" title="Change currency"
+                    onClick={() => { setChanging(w); setNewCur(w.currency); }}>
+                    {w.currency} ⇄
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -362,17 +442,19 @@ export default function Billing(): JSX.Element {
         <Modal title={`Billing mode — ${modeEdit.client_name}`} onClose={() => setModeEdit(null)}>
           <div className="space-y-4">
             {formErr && <div className="text-sm text-red-300 bg-danger/10 border border-danger/30 rounded-lg px-3 py-2">{formErr}</div>}
-            <div className="grid grid-cols-2 gap-2">
-              {(['prepay', 'postpay'] as const).map((m) => (
+            <div className="grid grid-cols-3 gap-2">
+              {(['prepay', 'postpay', 'credit'] as const).map((m) => (
                 <button key={m} onClick={() => setModeDraft(m)}
                   className={`rounded-lg border px-3 py-3 text-left transition ${modeDraft === m
                     ? 'border-brand/50 bg-brand/10'
                     : 'border-line hover:border-brand/30'}`}>
-                  <div className={`text-sm font-bold ${m === 'postpay' ? 'text-sky-300' : 'text-emerald-300'}`}>
-                    {m === 'prepay' ? 'PREPAY' : 'POSTPAY'}
+                  <div className={`text-sm font-bold ${m === 'postpay' ? 'text-sky-300' : m === 'credit' ? 'text-violet-300' : 'text-emerald-300'}`}>
+                    {m === 'prepay' ? 'PREPAY' : m === 'postpay' ? 'POSTPAY' : 'CREDITS'}
                   </div>
                   <div className="text-[11px] text-muted mt-0.5">
-                    {m === 'prepay' ? 'Pay first — balance never below 0' : 'Use now, pay later — up to credit limit'}
+                    {m === 'prepay' ? 'Pay first — balance never below 0'
+                      : m === 'postpay' ? 'Use now, pay later — up to credit limit'
+                        : '1 credit = 1 segment — grant bundles, burns on send'}
                   </div>
                 </button>
               ))}
@@ -389,6 +471,82 @@ export default function Billing(): JSX.Element {
               <button className="btn-ghost" onClick={() => setModeEdit(null)}>Cancel</button>
             </div>
           </div>
+        </Modal>
+      )}
+
+      {crediting && (
+        <Modal title={`${creditKind === 'grant' ? 'Grant SMS credits' : 'Deduct SMS credits'} — ${crediting.client_name}`} onClose={() => setCrediting(null)}>
+          <form onSubmit={doCreditAdj} className="space-y-4">
+            {formErr && <div className="text-sm text-red-300 bg-danger/10 border border-danger/30 rounded-lg px-3 py-2">{formErr}</div>}
+            <div className="flex items-center gap-2">
+              <span className="badge border bg-violet-500/10 text-violet-300 border-violet-500/25">SMS</span>
+              <span className="badge border bg-violet-500/10 text-violet-300 border-violet-500/25">CREDITS</span>
+              <span className="text-xs text-muted ml-auto">Balance <span className="font-mono font-semibold text-violet-300">{Number(crediting.sms_credits ?? 0).toLocaleString()}</span> credits</span>
+            </div>
+            <div>
+              <label className="label">Credits (1 credit = 1 SMS segment)</label>
+              <input className="input font-mono text-lg" value={amount}
+                onChange={(e) => setAmount(e.target.value)} inputMode="numeric" autoFocus />
+            </div>
+            <div>
+              <label className="label">Remark <span className="text-red-400">*</span> <span className="text-gray-600">(required — shown in ledger)</span></label>
+              <input className="input" placeholder={creditKind === 'grant' ? 'e.g. Bundle purchase — 10k credits' : 'e.g. Correction — duplicate grant'}
+                value={remark} onChange={(e) => setRemark(e.target.value)} />
+            </div>
+            <div className="rounded-lg bg-ink/60 border border-line px-3 py-2.5 text-sm font-mono">
+              <span className="text-violet-300">{Number(crediting.sms_credits ?? 0).toLocaleString()}</span>
+              <span className="text-muted"> → </span>
+              <span className={creditKind === 'grant' ? 'text-emerald-300' : 'text-red-300'}>
+                {(Number(crediting.sms_credits ?? 0) + (creditKind === 'grant' ? 1 : -1) * (Number(amount) || 0)).toLocaleString()}
+              </span>
+              <span className="text-muted"> credits</span>
+            </div>
+            <div className="flex gap-2">
+              <button className={`btn flex-1 ${creditKind === 'deduct' ? '!bg-danger hover:!bg-red-500' : ''}`} type="submit" disabled={busy}>
+                {busy ? 'Processing…' : creditKind === 'grant' ? 'Confirm grant' : 'Confirm deduct'}
+              </button>
+              <button className="btn-ghost" type="button" onClick={() => setCrediting(null)}>Cancel</button>
+            </div>
+          </form>
+          {creditTxs.length > 0 && (
+            <div className="mt-5">
+              <div className="card-title mb-2">Credit ledger <span className="text-muted font-normal">· latest {creditTxs.length}</span></div>
+              <DataTable
+                keyOf={(t) => String(t.id)}
+                rows={creditTxs}
+                empty="No credit movements yet."
+                columns={[
+                  {
+                    key: 'created_at', label: 'Time',
+                    render: (t) => <span className="text-xs text-muted whitespace-nowrap">{new Date(t.created_at).toLocaleString()}</span>,
+                  },
+                  {
+                    key: 'type', label: 'Type',
+                    render: (t) => (
+                      <span className={`badge ${t.type === 'burn' ? 'bg-red-500/10 text-red-300 border border-red-500/25'
+                        : t.type === 'refund' ? 'bg-warn/10 text-amber-300 border border-warn/25'
+                          : t.type === 'grant' ? 'bg-brand/10 text-emerald-300 border border-brand/25'
+                            : 'bg-sky-500/10 text-sky-300 border border-sky-500/25'}`}>
+                        {t.type}
+                      </span>
+                    ),
+                  },
+                  {
+                    key: 'amount', label: 'Amount', right: true,
+                    render: (t) => <span className={`tabular-nums ${Number(t.amount) < 0 ? 'text-red-300' : 'text-emerald-300'}`}>{Number(t.amount).toLocaleString()}</span>,
+                  },
+                  {
+                    key: 'balance_after', label: 'Balance', right: true,
+                    render: (t) => <span className="tabular-nums">{Number(t.balance_after).toLocaleString()}</span>,
+                  },
+                  {
+                    key: 'remark', label: 'Remark',
+                    render: (t) => <span className="text-xs max-w-[220px] block truncate" title={t.remark ?? t.description ?? ''}>{t.remark ?? t.description ?? (t.destination ? `SMS → ${t.destination}` : '—')}</span>,
+                  },
+                ]}
+              />
+            </div>
+          )}
         </Modal>
       )}
 

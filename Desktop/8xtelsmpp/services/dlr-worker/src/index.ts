@@ -108,7 +108,38 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
   // ── Settlement: release the submit-time hold on non-delivered outcomes ────
   // Delivered → hold stands (billing worker converts it to the real charge).
   // Anything else → refund the hold so the client only pays for delivered SMS.
+  // Credit-mode messages refund sms_credits instead of money (same shape).
   if (clientStatus !== 'delivered') {
+    const creditHold = await queryOne<{ reserved_credits: string; client_id: string }>(
+      'SELECT reserved_credits, client_id FROM messages WHERE id=$1', [msg.id],
+    );
+    const credits = Number(creditHold?.reserved_credits ?? 0);
+    if (credits > 0) {
+      const db = await pool.connect();
+      try {
+        await db.query('BEGIN');
+        const w = await db.query(
+          'SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE', [creditHold!.client_id],
+        );
+        const after = +(Number(w.rows[0].sms_credits ?? 0) + credits).toFixed(2);
+        await db.query('UPDATE wallets SET sms_credits=$1, updated_at=now() WHERE client_id=$2', [after, creditHold!.client_id]);
+        await db.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [after, creditHold!.client_id]);
+        await db.query(
+          `INSERT INTO credit_transactions (client_id, message_id, type, amount, balance_after, description, remark)
+           VALUES ($1,$2,'refund',$3,$4,$5,$6)`,
+          [creditHold!.client_id, msg.id, credits, after,
+           `Release credit hold ${msg.id.slice(0, 8)} (${clientStatus})`,
+           `Credits released — outcome ${clientStatus}`],
+        );
+        await db.query('UPDATE messages SET reserved_credits=0 WHERE id=$1', [msg.id]);
+        await db.query('COMMIT');
+      } catch (e) {
+        await db.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      } finally {
+        db.release();
+      }
+    }
     const hold = await queryOne<{ reserved_amount: string; client_id: string }>(
       'SELECT reserved_amount, client_id FROM messages WHERE id=$1', [msg.id],
     );

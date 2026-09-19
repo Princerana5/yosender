@@ -18,6 +18,13 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   const exists = await queryOne('SELECT message_id FROM billing_records WHERE message_id=$1', [internal_id]);
   if (exists) return; // idempotent (§37)
 
+  // Credit-mode clients pay in SMS credits (held at routing), not money —
+  // record vendor cost only, convert the credit hold into the final charge.
+  const creditRow = await queryOne<{ reserved_credits: string; segments: number }>(
+    'SELECT reserved_credits, segments FROM messages WHERE id=$1', [internal_id],
+  );
+  const creditHeld = Number(creditRow?.reserved_credits ?? 0);
+
   // Resolve vendor cost: longest prefix / country match
   const msg = await queryOne<{ destination: string; country_id: string | null }>(
     'SELECT destination, country_id FROM messages WHERE id=$1', [internal_id],
@@ -35,6 +42,22 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
+    // Credit-mode: the routing hold (reserved_credits) IS the charge — no
+    // money moves. Convert it to credits_charged, keep vendor cost for margin.
+    if (creditHeld > 0) {
+      await db.query(
+        `INSERT INTO billing_records (message_id, client_id, vendor_id, client_price, vendor_cost)
+         VALUES ($1,$2,$3,0,$4) ON CONFLICT DO NOTHING`,
+        [internal_id, client_id, vendor_id, vendorCost],
+      );
+      await db.query(
+        'UPDATE messages SET vendor_cost=$1, reserved_amount=0, reserved_credits=0, credits_charged=$2 WHERE id=$3',
+        [vendorCost, creditHeld, internal_id],
+      );
+      await db.query('COMMIT');
+      await incrStat('credits_burned', Math.round(creditHeld * 100));
+      return;
+    }
     // Settle the submit-time hold: funds were already reserved at routing.
     // If the hold covers the price, just convert it (no new debit). If the
     // price differs (e.g. no hold was taken), debit/credit the difference.
