@@ -134,12 +134,29 @@ function pickField(obj: Record<string, unknown>, names: string[]): unknown {
 
 /** Normalize the many vendor envelope shapes into a flat entry list.
     Handles: [...] | {data:[...]} | {data:{...}} | {messages:[...]} |
-    {dlr:[...]} | {result/report/reports:{...}} | single {...} objects. */
+    {dlr:[...]} | {result/report/reports:{...}} | {records:[...]} (HSP
+    datewise: [{"responseCode":"success","records":[...]}]) |
+    single {...} objects. */
 function extractEntries(parsed: unknown): Array<Record<string, unknown>> {
-  if (Array.isArray(parsed)) return parsed as Array<Record<string, unknown>>;
+  if (Array.isArray(parsed)) {
+    // Array envelope whose items THEMSELVES wrap record lists (HSP:
+    // [{"responseCode":"success","records":[...]}]) — unwrap one level.
+    const out: Array<Record<string, unknown>> = [];
+    for (const it of parsed) {
+      if (it !== null && typeof it === 'object' && !Array.isArray(it)) {
+        const rec = (it as Record<string, unknown>).records;
+        if (Array.isArray(rec)) {
+          out.push(...(rec as Array<Record<string, unknown>>));
+          continue;
+        }
+      }
+      out.push(it as Record<string, unknown>);
+    }
+    return out;
+  }
   if (parsed !== null && typeof parsed === 'object') {
     const o = parsed as Record<string, unknown>;
-    for (const key of ['data', 'messages', 'message', 'dlr', 'dlrs', 'result', 'report', 'reports']) {
+    for (const key of ['data', 'messages', 'message', 'dlr', 'dlrs', 'result', 'report', 'reports', 'records']) {
       const v = o[key];
       if (Array.isArray(v)) return v as Array<Record<string, unknown>>;
       if (v !== null && typeof v === 'object') return [v as Record<string, unknown>];
