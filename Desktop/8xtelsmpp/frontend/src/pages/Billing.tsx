@@ -12,6 +12,7 @@ interface Tx {
 }
 interface Fx {
   code: string; symbol: string; name: string; rate_to_usd: string;
+  source?: string | null; refreshed_at?: string | null; updated_at?: string | null;
 }
 
 const CURS = ['USD', 'EUR', 'INR'] as const;
@@ -146,6 +147,18 @@ export default function Billing(): JSX.Element {
     }
   }
 
+  async function refreshFx(): Promise<void> {
+    setBusy(true);
+    try {
+      await api('/billing/currencies/refresh', { method: 'POST' });
+      load();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const previewConvert = (w: Wallet): string => {
     const from = fx.find((f) => f.code === w.currency)?.rate_to_usd;
     const to = fx.find((f) => f.code === newCur)?.rate_to_usd;
@@ -164,17 +177,44 @@ export default function Billing(): JSX.Element {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
             <div className="card-title">Exchange rates → USD</div>
-            <div className="card-sub">Used when a wallet changes currency</div>
+            <div className="card-sub">
+              1 unit = rate USD (e.g. 1 INR ≈ {Number(fx.find((f) => f.code.trim() === 'INR')?.rate_to_usd ?? 0).toFixed(4)} USD).
+              Used only when a wallet changes currency. Auto-refreshes hourly from the live market.
+            </div>
           </div>
-          <button className="btn-ghost !py-1.5 !text-xs" onClick={() => editingFx ? saveFx() : setEditingFx(true)} disabled={busy}>
-            {editingFx ? (busy ? 'Saving…' : 'Save rates') : 'Edit rates'}
-          </button>
+          <div className="flex items-center gap-2">
+            {fx.some((f) => (f.source ?? '') === 'live') && (
+              <span className="badge bg-brand/10 text-emerald-300 border border-brand/25" title={
+                `Last refresh: ${fx.filter((f) => f.refreshed_at).map((f) => `${f.code.trim()} ${new Date(f.refreshed_at!).toLocaleString()}`).join(' · ') || '—'}`
+              }>
+                <span className="relative flex w-1.5 h-1.5 mr-1">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 bg-emerald-400" />
+                  <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-400" />
+                </span>
+                live
+              </span>
+            )}
+            <button className="btn-ghost !py-1.5 !text-xs" onClick={refreshFx} disabled={busy || editingFx} title="Pull live market rates now">
+              {busy ? 'Refreshing…' : '↻ Refresh live'}
+            </button>
+            <button className="btn-ghost !py-1.5 !text-xs" onClick={() => editingFx ? saveFx() : setEditingFx(true)} disabled={busy}>
+              {editingFx ? (busy ? 'Saving…' : 'Save rates') : 'Edit rates'}
+            </button>
+          </div>
         </div>
         <div className="grid sm:grid-cols-3 gap-2.5 mt-3">
           {fx.map((f) => (
             <div key={f.code} className="rounded-lg bg-ink/60 border border-line px-3 py-2.5 flex items-center gap-2.5">
-              <CurrencyBadge code={f.code} />
-              <div className="text-xs text-muted">{f.symbol} {f.name}</div>
+              <CurrencyBadge code={f.code.trim()} />
+              <div className="text-xs text-muted">
+                <div>{f.symbol} {f.name}</div>
+                <div className="text-[10px] opacity-70">
+                  1 {f.code.trim()} = {Number(f.rate_to_usd).toFixed(f.code.trim() === 'INR' ? 4 : 4)} USD
+                  {(f.source ?? '') === 'live' && f.refreshed_at
+                    ? ` · live ${new Date(f.refreshed_at).toLocaleString()}`
+                    : (f.source ?? '') === 'manual' ? ' · manual' : ''}
+                </div>
+              </div>
               {editingFx ? (
                 <input className="input font-mono !py-1 !text-xs ml-auto !w-28" value={fxDraft[f.code] ?? ''}
                   onChange={(e) => setFxDraft({ ...fxDraft, [f.code]: e.target.value })} />

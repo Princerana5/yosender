@@ -2,6 +2,15 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { query, getPool } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
+import { refreshFxRates, startFxRefresh } from '../fx-refresh.js';
+
+// Hourly live-rate refresh. Started here (billing owns fx_rates) rather than
+// index.ts so server checkouts with local index.ts additions need no merge.
+let fxStarted = false;
+if (!fxStarted) {
+  fxStarted = true;
+  startFxRefresh();
+}
 
 const router = Router();
 router.use(requirePerm('billing.read'));
@@ -30,8 +39,21 @@ router.patch('/currencies/:code', requirePerm('billing.manage'), audit('updated_
     res.status(400).json({ error: 'rate_to_usd must be positive' });
     return;
   }
-  const rows = await query('UPDATE fx_rates SET rate_to_usd=$1, updated_at=now() WHERE code=$2 RETURNING *', [rate, code]);
+  const rows = await query(
+    `UPDATE fx_rates SET rate_to_usd=$1, source='manual', refreshed_at=NULL, updated_at=now()
+     WHERE code=$2 RETURNING *`,
+    [rate, code],
+  );
   res.json({ currency: rows[0] });
+});
+
+// Pull live rates from the FX API now (hourly auto-refresh also runs in the
+// background — see fx-refresh.ts, started from billing route registration).
+// Manual edits remain possible via PATCH; the next auto/manual refresh wins.
+router.post('/currencies/refresh', requirePerm('billing.manage'), audit('refreshed_fx_rates', 'fx_rate'), async (_req, res) => {
+  const r = await refreshFxRates('manual');
+  const currencies = await query('SELECT * FROM fx_rates ORDER BY code');
+  res.json({ ...r, currencies });
 });
 
 router.get('/wallets', async (_req, res) => {
