@@ -813,7 +813,7 @@ interface RateCardRow {
 export function PortalCoverage(): JSX.Element {
   const [routes, setRoutes] = useState<CoverageRoute[]>([]);
   const [rates, setRates] = useState<RateCardRow[]>([]);
-  const [currency, setCurrency] = useState('USDT');
+  const [currency, setCurrency] = useState('EUR');
   const [q, setQ] = useState('');
 
   useEffect(() => {

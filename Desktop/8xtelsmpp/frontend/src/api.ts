@@ -26,11 +26,11 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export const CUR_SYM: Record<string, string> = { USDT: '₮', EUR: '€', INR: '₹' };
+export const CUR_SYM: Record<string, string> = { EUR: '€' };
 
 export const fmtMoney = (
   n: number | string | null | undefined,
-  currency = 'USDT',
+  currency = 'EUR',
   decimals = 2,
 ): string => `${CUR_SYM[currency] ?? '$'}${Number(n ?? 0).toFixed(decimals)}`;
 

@@ -16,42 +16,26 @@ interface Tx {
   id: number; client_name: string; type: string; amount: string; balance_after: string;
   description: string; remark: string | null; created_at: string; currency: string | null;
 }
-interface Fx {
-  code: string; symbol: string; name: string; rate_to_usd: string;
-  source?: string | null; refreshed_at?: string | null; updated_at?: string | null;
-}
-
-const CURS = ['USDT', 'EUR', 'INR'] as const;
-
 type AdjKind = 'topup' | 'deduct';
 
 export default function Billing(): JSX.Element {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [txs, setTxs] = useState<Tx[]>([]);
-  const [fx, setFx] = useState<Fx[]>([]);
   const [adj, setAdj] = useState<{ wallet: Wallet; kind: AdjKind } | null>(null);
   const [amount, setAmount] = useState('100');
   const [remark, setRemark] = useState('');
   const [formErr, setFormErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [changing, setChanging] = useState<Wallet | null>(null);
-  const [newCur, setNewCur] = useState<string>('USDT');
   const [modeEdit, setModeEdit] = useState<Wallet | null>(null);
   const [modeDraft, setModeDraft] = useState<'prepay' | 'postpay' | 'credit'>('prepay');
   const [crediting, setCrediting] = useState<Wallet | null>(null);
   const [creditKind, setCreditKind] = useState<'grant' | 'deduct'>('grant');
   const [creditTxs, setCreditTxs] = useState<CreditTx[]>([]);
   const [creditDraft, setCreditDraft] = useState('0');
-  const [editingFx, setEditingFx] = useState(false);
-  const [fxDraft, setFxDraft] = useState<Record<string, string>>({});
 
   const load = (): void => {
     api<{ wallets: Wallet[] }>('/billing/wallets').then((r) => setWallets(r.wallets)).catch(() => undefined);
     api<{ transactions: Tx[] }>('/billing/transactions').then((r) => setTxs(r.transactions)).catch(() => undefined);
-    api<{ currencies: Fx[] }>('/billing/currencies').then((r) => {
-      setFx(r.currencies);
-      setFxDraft(Object.fromEntries(r.currencies.map((c) => [c.code, c.rate_to_usd])));
-    }).catch(() => undefined);
   };
   useEffect(load, []);
 
@@ -85,24 +69,6 @@ export default function Billing(): JSX.Element {
       load();
     } catch (e) {
       setFormErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function doCurrencyChange(): Promise<void> {
-    if (!changing) return;
-    setBusy(true);
-    try {
-      const r = await api<{ converted: boolean; from: string; to: string }>(
-        `/billing/wallets/${changing.client_id}/currency`,
-        { method: 'POST', body: JSON.stringify({ currency: newCur }) },
-      );
-      if (!r.converted) alert(`Already in ${r.to} — nothing to convert.`);
-      setChanging(null);
-      load();
-    } catch (e) {
-      alert((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -178,100 +144,22 @@ export default function Billing(): JSX.Element {
     }
   }
 
-  async function saveFx(): Promise<void> {
-    setBusy(true);
-    try {
-      for (const [code, rate] of Object.entries(fxDraft)) {
-        const orig = fx.find((f) => f.code === code)?.rate_to_usd;
-        if (rate !== orig) {
-          await api(`/billing/currencies/${code}`, { method: 'PATCH', body: JSON.stringify({ rate_to_usd: Number(rate) }) });
-        }
-      }
-      setEditingFx(false);
-      load();
-    } catch (e) {
-      alert((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function refreshFx(): Promise<void> {
-    setBusy(true);
-    try {
-      await api('/billing/currencies/refresh', { method: 'POST' });
-      load();
-    } catch (e) {
-      alert((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const previewConvert = (w: Wallet): string => {
-    const from = fx.find((f) => f.code === w.currency)?.rate_to_usd;
-    const to = fx.find((f) => f.code === newCur)?.rate_to_usd;
-    if (!from || !to || w.currency === newCur) return '';
-    const sym = newCur === 'EUR' ? '€' : newCur === 'INR' ? '₹' : '₮';
-    return `≈ ${sym}${(Number(w.balance) * Number(from) / Number(to)).toFixed(2)} ${newCur}`;
-  };
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Wallets & ledger" sub="Prepay / postpay · top-up & deduct with remarks · USDT / EUR / INR" />
+      <PageHeader title="Wallets & ledger" sub="Prepay / postpay in € EUR · or SMS credits (1 credit = 1 segment)" />
 
       <TopupQueue onDone={load} />
 
       <div className="card card-pad">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
-            <div className="card-title">Exchange rates → USDT</div>
+            <div className="card-title">Base currency — € Euro</div>
             <div className="card-sub">
-              1 unit = rate USDT (e.g. 1 INR ≈ {Number(fx.find((f) => f.code.trim() === 'INR')?.rate_to_usd ?? 0).toFixed(4)} USDT).
-              Used only when a wallet changes currency. Auto-refreshes hourly from the live market.
+              All money wallets, prices and rates are in EUR. SMS credits are unitless (1 credit = 1 segment).
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {fx.some((f) => (f.source ?? '') === 'live') && (
-              <span className="badge bg-brand/10 text-emerald-300 border border-brand/25" title={
-                `Last refresh: ${fx.filter((f) => f.refreshed_at).map((f) => `${f.code.trim()} ${new Date(f.refreshed_at!).toLocaleString()}`).join(' · ') || '—'}`
-              }>
-                <span className="relative flex w-1.5 h-1.5 mr-1">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 bg-emerald-400" />
-                  <span className="relative inline-flex rounded-full w-1.5 h-1.5 bg-emerald-400" />
-                </span>
-                live
-              </span>
-            )}
-            <button className="btn-ghost !py-1.5 !text-xs" onClick={refreshFx} disabled={busy || editingFx} title="Pull live market rates now">
-              {busy ? 'Refreshing…' : '↻ Refresh live'}
-            </button>
-            <button className="btn-ghost !py-1.5 !text-xs" onClick={() => editingFx ? saveFx() : setEditingFx(true)} disabled={busy}>
-              {editingFx ? (busy ? 'Saving…' : 'Save rates') : 'Edit rates'}
-            </button>
-          </div>
-        </div>
-        <div className="grid sm:grid-cols-3 gap-2.5 mt-3">
-          {fx.map((f) => (
-            <div key={f.code} className="rounded-lg bg-ink/60 border border-line px-3 py-2.5 flex items-center gap-2.5">
-              <CurrencyBadge code={f.code.trim()} />
-              <div className="text-xs text-muted">
-                <div>{f.symbol} {f.name}</div>
-                <div className="text-[10px] opacity-70">
-                  1 {f.code.trim()} = {Number(f.rate_to_usd).toFixed(f.code.trim() === 'INR' ? 4 : 4)} USDT
-                  {(f.source ?? '') === 'live' && f.refreshed_at
-                    ? ` · live ${new Date(f.refreshed_at).toLocaleString()}`
-                    : (f.source ?? '') === 'manual' ? ' · manual' : ''}
-                </div>
-              </div>
-              {editingFx ? (
-                <input className="input font-mono !py-1 !text-xs ml-auto !w-28" value={fxDraft[f.code] ?? ''}
-                  onChange={(e) => setFxDraft({ ...fxDraft, [f.code]: e.target.value })} />
-              ) : (
-                <div className="font-mono text-sm ml-auto">{Number(f.rate_to_usd).toFixed(4)}</div>
-              )}
-            </div>
-          ))}
+          <CurrencyBadge code="EUR" />
         </div>
       </div>
 
@@ -342,12 +230,6 @@ export default function Billing(): JSX.Element {
                 <button className="btn-ghost !text-xs" title="Prepay / postpay / SMS credits + credit limit" onClick={() => openMode(w)}>
                   {postpay ? 'Postpay ⚙' : creditMode ? 'Credits ⚙' : 'Prepay ⚙'}
                 </button>
-                {!creditMode && (
-                  <button className="btn-ghost !text-xs" title="Change currency"
-                    onClick={() => { setChanging(w); setNewCur(w.currency); }}>
-                    {w.currency} ⇄
-                  </button>
-                )}
               </div>
             </div>
           );
@@ -550,36 +432,6 @@ export default function Billing(): JSX.Element {
         </Modal>
       )}
 
-      {changing && (
-        <Modal title={`Change currency — ${changing.client_name}`} onClose={() => setChanging(null)}>
-          <div className="space-y-4">
-            <p className="text-xs text-muted">
-              Balance and credit limit convert at the current FX rate. A ledger entry records the change.
-            </p>
-            <div className="flex gap-1.5">
-              {CURS.map((c) => (
-                <button key={c} onClick={() => setNewCur(c)}
-                  className={`flex-1 rounded-lg border px-3 py-2.5 text-sm font-semibold transition ${newCur === c
-                    ? 'border-brand/50 bg-brand/10 text-emerald-300'
-                    : 'border-line text-muted hover:text-white'}`}>
-                  {c}
-                </button>
-              ))}
-            </div>
-            <div className="rounded-lg bg-ink/60 border border-line px-3 py-2.5 text-sm font-mono">
-              <Money value={changing.balance} currency={changing.currency} />
-              <span className="text-muted"> → </span>
-              <span className="text-emerald-300">{previewConvert(changing) || newCur}</span>
-            </div>
-            <div className="flex gap-2">
-              <button className="btn flex-1" onClick={doCurrencyChange} disabled={busy || newCur === changing.currency}>
-                {busy ? 'Converting…' : `Convert to ${newCur}`}
-              </button>
-              <button className="btn-ghost" onClick={() => setChanging(null)}>Cancel</button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }

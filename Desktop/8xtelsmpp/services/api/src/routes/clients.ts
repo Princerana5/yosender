@@ -34,7 +34,7 @@ const portalCreateSchema = z.object({
   system_id: z.string().min(3).regex(/^[A-Za-z0-9_.-]+$/),
   portal_email: z.string().email(),
   password: z.string().min(8).optional(), // portal password, auto-generated if omitted
-  currency: z.enum(['USDT', 'EUR', 'INR']).default('USDT'),
+  currency: z.enum(['EUR']).default('EUR'),
   credit_limit: z.number().nonnegative().default(0),
   tps_limit: z.number().int().positive().default(50),
 });
@@ -124,7 +124,7 @@ const createSchema = z.object({
   password: z.string().min(8).optional(), // auto-generated if omitted
   status: z.enum(['active', 'suspended', 'blocked', 'pending']).default('pending'),
   credit_limit: z.number().nonnegative().default(0),
-  currency: z.enum(['USDT', 'EUR', 'INR']).default('USDT'),
+  currency: z.enum(['EUR']).default('EUR'),
   tps_limit: z.number().int().positive().default(50),
   daily_limit: z.number().int().positive().nullable().optional(),
   monthly_limit: z.number().int().positive().nullable().optional(),
@@ -239,7 +239,7 @@ router.get('/:id', async (req, res) => {
   // set (minus vendor-chain expansion).
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.status, r.prefix, r.sender_id,
-            r.price_per_segment, COALESCE(r.price_currency,'USDT') AS price_currency,
+            r.price_per_segment, COALESCE(r.price_currency,'EUR') AS price_currency,
             r.min_margin_pct,
             (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id) AS member_count,
             (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid) AS is_member,
@@ -305,7 +305,7 @@ router.get('/:id', async (req, res) => {
       delivered,
       delivery_pct: decided ? +(delivered / decided * 100).toFixed(1) : 100,
       balance: Number((safe as Record<string, unknown>).balance ?? 0),
-      currency: (safe as Record<string, unknown>).currency ?? 'USDT',
+      currency: (safe as Record<string, unknown>).currency ?? 'EUR',
       total_topped_up: Number(funds.topped_up),
       total_spent: Number(funds.spent),
     },

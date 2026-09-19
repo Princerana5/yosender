@@ -52,7 +52,7 @@ export default function Clients(): JSX.Element {
   const [formErr, setFormErr] = useState('');
   const [form, setForm] = useState({
     name: '', system_id: '', password: '', passwordMode: 'generate' as 'generate' | 'manual',
-    showPw: false, allowed_ips: '', currency: 'USDT', tps_limit: '50',
+    showPw: false, allowed_ips: '', currency: 'EUR', tps_limit: '50',
   });
   const [created, setCreated] = useState<Handoff | null>(null);
   const [copied, setCopied] = useState(false);
@@ -69,7 +69,7 @@ export default function Clients(): JSX.Element {
   }, []);
 
   function openModal(): void {
-    setForm({ name: '', system_id: '', password: randomPassword(), passwordMode: 'generate', showPw: false, allowed_ips: '', currency: 'USDT', tps_limit: '50' });
+    setForm({ name: '', system_id: '', password: randomPassword(), passwordMode: 'generate', showPw: false, allowed_ips: '', currency: 'EUR', tps_limit: '50' });
     setFormErr('');
     setShow(true);
   }
@@ -321,15 +321,8 @@ export default function Clients(): JSX.Element {
 
             <div>
               <label className="label">Wallet currency</label>
-              <div className="flex gap-1.5">
-                {(['USDT', 'EUR', 'INR'] as const).map((cur) => (
-                  <button key={cur} type="button" onClick={() => setForm({ ...form, currency: cur })}
-                    className={`flex-1 rounded-lg border px-3 py-2 text-sm font-semibold transition ${form.currency === cur
-                      ? 'border-brand/50 bg-brand/10 text-emerald-300'
-                      : 'border-line text-muted hover:text-white'}`}>
-                    {cur === 'USDT' ? '₮ USDT' : cur === 'EUR' ? '€ EUR' : '₹ INR'}
-                  </button>
-                ))}
+              <div className="rounded-lg border border-brand/50 bg-brand/10 px-3 py-2 text-sm font-semibold text-emerald-300">
+                € EUR <span className="text-gray-600 font-normal">(only currency)</span>
               </div>
             </div>
 

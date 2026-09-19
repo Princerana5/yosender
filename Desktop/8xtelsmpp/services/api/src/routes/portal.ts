@@ -558,7 +558,7 @@ router.get('/coverage', async (req, res) => {
   const me = await queryOne<{ currency: string }>(
     'SELECT currency FROM clients WHERE id=$1', [cid(req)],
   );
-  const walletCurrency = me?.currency ?? 'USDT';
+  const walletCurrency = me?.currency ?? 'EUR';
   const fx = await query<{ code: string; rate_to_usd: string }>('SELECT code, rate_to_usd FROM fx_rates');
   // CHAR(3) pads codes with spaces — trim before keying
   const toUsd: Record<string, number> = Object.fromEntries(fx.map((f) => [f.code.trim(), Number(f.rate_to_usd)]));
@@ -572,7 +572,7 @@ router.get('/coverage', async (req, res) => {
   // set, so Coverage shows every route the client can actually send on.
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.prefix, r.sender_id,
-            r.price_per_segment, COALESCE(r.price_currency,'USDT') AS price_currency,
+            r.price_per_segment, COALESCE(r.price_currency,'EUR') AS price_currency,
             EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid) AS dedicated,
             co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
@@ -590,7 +590,7 @@ router.get('/coverage', async (req, res) => {
   );
   // Client rate-card fallback rows (cheapest per country/prefix)
   const rates = await query(
-    `SELECT cr.price, COALESCE(cr.currency,'USDT') AS currency,
+    `SELECT cr.price, COALESCE(cr.currency,'EUR') AS currency,
             co.id AS country_id, co.name AS country_name, co.iso_code, co.calling_code, cr.prefix
      FROM client_rates cr JOIN clients c ON c.pricing_profile_id=cr.profile_id
      LEFT JOIN countries co ON co.id=cr.country_id
@@ -602,14 +602,14 @@ router.get('/coverage', async (req, res) => {
     routes: (routes as Record<string, unknown>[]).map((r) => ({
       ...r,
       price_per_segment: r.price_per_segment !== null && r.price_per_segment !== undefined
-        ? convert(Number(r.price_per_segment), String(r.price_currency ?? 'USDT'))
+        ? convert(Number(r.price_per_segment), String(r.price_currency ?? 'EUR'))
         : null,
       price_currency: walletCurrency,
       price_source: r.price_per_segment !== null && r.price_per_segment !== undefined ? 'route' : 'rate card',
     })),
     rate_card: (rates as Record<string, unknown>[]).map((r) => ({
       ...r,
-      price: convert(Number(r.price), String(r.currency ?? 'USDT')),
+      price: convert(Number(r.price), String(r.currency ?? 'EUR')),
       currency: walletCurrency,
     })),
   });

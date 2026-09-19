@@ -54,10 +54,8 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-function curSym(c: string): string {
-  if (c === 'EUR') return '€';
-  if (c === 'INR') return '₹';
-  return '$';
+function curSym(_c: string): string {
+  return '€'; // EUR-only billing
 }
 
 export default function ClientDetail(): JSX.Element {
