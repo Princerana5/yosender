@@ -100,15 +100,13 @@ export class VendorConnector {
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, 3000);
         if (typeof timer.unref === 'function') timer.unref();
+        const done = (): void => { clearTimeout(timer); resolve(); };
         try {
-          session.send({
-            command_id: 0x00000006, // unbind
-            command_status: 0,
-            sequence_number: Math.floor(Math.random() * 0x7fffffff),
-          });
-        } catch { /* socket already dead */ }
-        // Give the SMSC a beat to process unbind before FIN.
-        setTimeout(() => { clearTimeout(timer); resolve(); }, 500);
+          // Proper PDU via the lib's shortcut (raw objects fail pdu.isResponse()).
+          (session as unknown as { unbind(cb?: () => void): void }).unbind(done);
+        } catch { done(); /* socket already dead */ }
+        // Give the SMSC a beat to process unbind before FIN regardless.
+        setTimeout(done, 800);
       });
     } catch { /* never block shutdown on unbind */ }
     try { session.close(); } catch { /* already dead */ }
