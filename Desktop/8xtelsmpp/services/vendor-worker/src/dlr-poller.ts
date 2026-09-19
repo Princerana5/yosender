@@ -305,7 +305,10 @@ async function pollOne(
   // send must never shadow this message's own DLR.
   // Report mode (HSP): entries carry no msgid at all — destination match is
   // REQUIRED (no fallback to the whole pool: another number's DELIVRD must
-  // never settle our row).
+  // never settle our row). AND: several sends to the SAME number share the
+  // report, so match by send-time proximity — the entry whose vendor send
+  // time (senton/submit date/created) is CLOSEST to our created_at wins.
+  // "Latest wins" is wrong here: it credited every sibling with one DELIVRD.
   const want = lastDigits(msg.destination);
   const byNumber = entries.filter((e) => {
     const mob = String(pickField(e, ['mobile', 'number', 'to', 'destination', 'phone']) ?? '');
@@ -316,14 +319,33 @@ async function pollOne(
     return; // our number not in this report slice yet — next round
   }
   const pool2 = byNumber.length ? byNumber : entries;
-  const scored = pool2
-    .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
-    .sort((a, b) => b.t - a.t);
-  const hit = scored.length === 1
-    ? scored[0]!.e
-    : (scored.find((s) => s.t >= 0)?.e
-      ?? pool2.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id)
-      ?? scored[0]!.e);
+  const SEND_TIME_FIELDS = ['senton', 'sent_on', 'send_time', 'submit_date', 'created', 'created_at', ...TIME_FIELDS];
+  const msgCreated = new Date(msg.created_at).getTime();
+  let hit: Record<string, unknown> | undefined;
+  if (reportMode && byNumber.length > 1 && !Number.isNaN(msgCreated)) {
+    // Closest vendor send-time to our own submit — ties broken toward the
+    // LATEST entry (a retry supersedes the original attempt).
+    let best = Infinity;
+    for (const e of byNumber) {
+      const t = parseVendorTime(pickField(e, SEND_TIME_FIELDS));
+      if (t < 0) continue;
+      const gap = Math.abs(t - msgCreated);
+      if (gap < best) {
+        best = gap;
+        hit = e;
+      }
+    }
+  }
+  if (!hit) {
+    const scored = pool2
+      .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
+      .sort((a, b) => b.t - a.t);
+    hit = scored.length === 1
+      ? scored[0]!.e
+      : (scored.find((s) => s.t >= 0)?.e
+        ?? pool2.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id)
+        ?? scored[0]!.e);
+  }
 
   if (!hit) return;
   const statusRaw = String(pickField(hit, STATUS_FIELDS) ?? '');
