@@ -91,12 +91,36 @@ export class VendorConnector {
     await this.connect();
   }
 
+  /** Graceful shutdown: send unbind first so the SMSC frees the session
+      slot immediately. A bare socket close leaves a ghost session upstream
+      that rejects the next bind with ESME_RBINDFAIL (status=13) until it
+      times out — the exact flap seen on Stellar/Arka after restarts. */
+  private async gracefulClose(session: AnySession): Promise<void> {
+    try {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 3000);
+        if (typeof timer.unref === 'function') timer.unref();
+        try {
+          session.send({
+            command_id: 0x00000006, // unbind
+            command_status: 0,
+            sequence_number: Math.floor(Math.random() * 0x7fffffff),
+          });
+        } catch { /* socket already dead */ }
+        // Give the SMSC a beat to process unbind before FIN.
+        setTimeout(() => { clearTimeout(timer); resolve(); }, 500);
+      });
+    } catch { /* never block shutdown on unbind */ }
+    try { session.close(); } catch { /* already dead */ }
+  }
+
   async stop(): Promise<void> {
     this.stopped = true;
     this.dialing = false;
     if (this.enquireTimer) clearInterval(this.enquireTimer);
-    this.session?.close();
+    const s = this.session;
     this.session = null;
+    if (s) await this.gracefulClose(s);
     await this.setStatus('disconnected');
   }
 
@@ -219,12 +243,25 @@ export class VendorConnector {
       `INSERT INTO smpp_logs (kind, vendor_id, result, reason) VALUES ('error',$1,'reconnecting',$2)`,
       [this.cfg.id, reason],
     );
-    const delay = Math.min(this.cfg.reconnect_interval_sec * 1000 * 2 ** Math.min(this.reconnects, 5), 120_000);
+    let delay = Math.min(this.cfg.reconnect_interval_sec * 1000 * 2 ** Math.min(this.reconnects, 5), 120_000);
+    // ESME_RBINDFAIL (13): the SMSC still holds our old session (ghost after
+    // an unclean close, or a duplicate bind elsewhere). Hammering the rebind
+    // just extends the rejection — floor the wait at 30s so the ghost clears.
+    if (/bind failed status=13/.test(reason)) {
+      delay = Math.max(delay, 30_000);
+    }
     console.warn(`[vendor] ${this.cfg.name}: ${reason} — retry in ${Math.round(delay / 1000)}s`);
-    setTimeout(() => this.connect(), delay);
+    const timer = setTimeout(() => this.connect(), delay);
+    if (typeof timer.unref === 'function') timer.unref();
   }
 
-  /** Submit one SMS over this bind. Resolves with vendor message id. */
+  /** Submit one SMS over this bind. Resolves with vendor message id.
+      A stalled vendor (socket alive, no submit_sm_resp) must never pin a
+      worker slot: the timeout rejects, the caller fails over to the next
+      vendor, and the job keeps flowing. Late vendor responses after a
+      timeout are ignored (promise already settled) — the message may have
+      been accepted upstream, so its DLR can arrive orphaned; that is
+      cheaper than head-of-line blocking the whole chain at 1000 TPS. */
   async submit(opts: {
     source: string; destination: string; text: string; data_coding: number;
     source_ton: number; source_npi: number; dest_ton: number; dest_npi: number;
@@ -232,7 +269,13 @@ export class VendorConnector {
   }): Promise<string> {
     const session = this.session;
     if (!session) throw new Error('not connected');
+    const timeoutMs = Number(process.env.VENDOR_SUBMIT_TIMEOUT_MS ?? 10_000);
     return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`submit timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+      // If the timer already fired, don't let it keep the process alive.
+      if (typeof timer.unref === 'function') timer.unref();
       session.submit_sm(
         {
           source_addr: opts.source,
@@ -246,6 +289,7 @@ export class VendorConnector {
           registered_delivery: opts.registered_delivery,
         },
         (pdu) => {
+          clearTimeout(timer);
           if (pdu.command_status === 0) resolve(pdu.message_id ?? '');
           else reject(new Error(`submit failed status=${pdu.command_status}`));
         },
@@ -254,10 +298,12 @@ export class VendorConnector {
   }
 }
 
-/** Load all enabled vendors and build connectors (connection_count each). */
+/** Load all enabled SMPP vendors and build connectors (connection_count each).
+    HTTP vendors need no binds — the worker sends one HTTPS request per
+    message (see http-sender.ts), so they are skipped here. */
 export async function loadConnectors(): Promise<VendorConnector[]> {
   const rows = await query<VendorConfig & { connection_count: number }>(
-    'SELECT * FROM vendors WHERE status=$1', ['enabled'],
+    `SELECT * FROM vendors WHERE status=$1 AND COALESCE(protocol,'smpp')='smpp'`, ['enabled'],
   );
   const out: VendorConnector[] = [];
   for (const v of rows) {
@@ -286,7 +332,20 @@ export async function syncConnectors(reg: ConnectorRegistry): Promise<void> {
   const seen = new Set<string>();
   for (const v of rows) {
     seen.add(v.id);
-    const want = v.status === 'enabled' ? Math.min(8, Math.max(1, v.connection_count || 1)) : 0;
+    // HTTP vendors hold no SMPP binds — drop any stale ones (e.g. vendor was
+    // switched from smpp to http) and skip.
+    if ((v as VendorConfig & { protocol?: string }).protocol === 'http') {
+      const stale = reg.get(v.id) ?? [];
+      for (const c of stale) await c.stop();
+      if (stale.length) {
+        reg.delete(v.id);
+        console.log(`[vendor] ${v.name}: http protocol — dropped ${stale.length} stale bind(s)`);
+      }
+      continue;
+    }
+    // Cap 16 binds/vendor: enough headroom for 1000-TPS vendors asking for
+    // 10 TRX binds, without unbounded socket growth per vendor.
+    const want = v.status === 'enabled' ? Math.min(16, Math.max(1, v.connection_count || 1)) : 0;
     let list = reg.get(v.id) ?? [];
     // shrink: stop + drop extras
     while (list.length > want) {
