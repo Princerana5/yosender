@@ -29,6 +29,14 @@ app.use(rateLimit({ windowMs: 60_000, max: 600 })); // §32
 app.use('/auth', authRoutes);
 app.get('/health', (_req, res) => res.json({ status: 'ok', service: '8xtelSMPP-api' }));
 
+// Inbound DLR webhook from HTTP vendors — token-authenticated, no JWT.
+// (Own router so console/portal auth never applies here.)
+app.use('/vendor-dlr', (await import('./routes/vendor-dlr.js')).default);
+
+// Client HTTP send API — per-client API keys, no JWT.
+// (Own router with its own keyAuth; console/portal auth never applies.)
+app.use('/client/v1', (await import('./routes/client-api.js')).default);
+
 // OpenAPI (§33)
 try {
   const doc = parseYaml(readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'openapi.yaml'), 'utf8'));
@@ -56,8 +64,15 @@ app.use('/portal', (await import('./routes/portal.js')).default);
 // 404 + error
 app.use((_req, res) => res.status(404).json({ error: 'not found' }));
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: Error & { status?: number; type?: string }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('[api]', err.message);
+  // Malformed JSON bodies (body-parser entity.parse.failed) are a CLIENT
+  // error — tell them what's wrong instead of a cryptic "internal error".
+  // Clients paste single-quoted pseudo-JSON ({from:...}) which is not valid.
+  if (err.status === 400 || err.type === 'entity.parse.failed') {
+    res.status(400).json({ error: 'invalid JSON body — keys and strings need double quotes, e.g. {"from":"SENDER","to":"919876543210","text":"Hello"}' });
+    return;
+  }
   res.status(500).json({ error: 'internal error' });
 });
 

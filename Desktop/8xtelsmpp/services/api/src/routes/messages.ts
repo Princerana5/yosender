@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
-  query, queryOne, getPool, getQueue, QUEUES, checkTps, incrStat,
+  query, queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat,
   type MessageJob,
 } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
@@ -15,16 +15,25 @@ router.get('/', async (req, res) => {
   const q = req.query as Record<string, string>;
   const where: string[] = [];
   const params: unknown[] = [];
-  const add = (sql: string, v: unknown): void => {
-    params.push(v);
-    where.push(sql.replace('?', `$${params.length}`));
+  const add = (sql: string, ...vals: unknown[]): void => {
+    const slots = vals.map((v) => {
+      params.push(v);
+      return `$${params.length}`;
+    });
+    let i = 0;
+    where.push(sql.replace(/\?/g, () => slots[i++] ?? '?'));
   };
   if (q.client_id) add('m.client_id = ?', q.client_id);
   if (q.vendor_id) add('m.vendor_id = ?', q.vendor_id);
   if (q.country_id) add('m.country_id = ?', q.country_id);
   if (q.destination) add('m.destination LIKE ?', `%${q.destination}%`);
   if (q.sender) add('m.source ILIKE ?', `%${q.sender}%`);
-  if (q.message_id) add('(m.id::text = ? OR m.vendor_msg_id = ? OR m.client_msg_id = ?)', q.message_id);
+  if (q.message_id) {
+    add(
+      '(m.id::text = ? OR m.vendor_msg_id = ? OR m.client_msg_id = ?)',
+      q.message_id, q.message_id, q.message_id,
+    );
+  }
   if (q.status) add('m.status = ?', q.status);
   if (q.route_id) add('m.route_id = ?', q.route_id);
   if (q.channel) add('m.channel = ?', q.channel);
@@ -100,7 +109,7 @@ router.post('/send', requirePerm('messages.send'), audit('sent_test_sms', 'messa
     res.status(422).json({ error: 'insufficient balance' });
     return;
   }
-  if (!(await checkTps(`client:${client.id}`, client.tps_limit))) {
+  if (!(await tryAcquireTps(`client:${client.id}`, client.tps_limit))) {
     res.status(429).json({ error: 'client TPS limit exceeded — try again in a second' });
     return;
   }
