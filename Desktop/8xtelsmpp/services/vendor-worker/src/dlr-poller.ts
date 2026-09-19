@@ -38,6 +38,23 @@ interface PendingMsg {
   id: string;
   vendor_msg_id: string;
   destination: string;
+  created_at: string;
+}
+
+/** HSP-style datewise report mode: the poll URL contains {date} (YYYY-MM-DD)
+    instead of {msgid}, and returns per-number records like:
+      [{"responseCode":"success","totalsize":"1","records":[
+        {"mobile":"9157908291","status":"DELIVRD","senton":"19/09/2026 18:24:20",...}]}]
+    Used when the vendor's send response carries no msgid (synthetic http-*
+    ids) and their per-msgid endpoint can't correlate. Matching is by
+    destination digits; the message's own send date picks the report day. */
+function isReportMode(tpl: string): boolean {
+  return tpl.includes('{date}');
+}
+
+function reportDate(d: Date): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 function fill(tpl: string, vars: Record<string, string>): string {
@@ -207,10 +224,15 @@ async function pollOne(
 ): Promise<void> {
   const pool = getPool();
 
+  // Report mode (HSP): match by destination in the datewise report — the
+  // synthetic http-* id is irrelevant here, skip the msgid gate below.
+  const reportMode = isReportMode(tpl);
+
   // Synthetic ids (http-<short>) mean the submit response carried no vendor
   // msgid — polling with a fake id can never match. Surface it on the message
   // so the operator fixes msgid_json_path instead of wondering why it sticks.
-  if (!msg.vendor_msg_id || msg.vendor_msg_id.startsWith('http-')) {
+  // (Skipped in report mode: matching is by destination, not msgid.)
+  if (!reportMode && (!msg.vendor_msg_id || msg.vendor_msg_id.startsWith('http-'))) {
     await pool.query(
       `UPDATE messages SET last_dlr_poll_at=now(),
          error_code=COALESCE(NULLIF(error_code,''),'poll:no-vendor-msgid')
@@ -221,7 +243,13 @@ async function pollOne(
     return;
   }
 
-  const url = fill(tpl, { msgid: msg.vendor_msg_id, to: msg.destination });
+  const url = reportMode
+    ? fill(tpl, {
+      msgid: msg.vendor_msg_id ?? '',
+      to: msg.destination,
+      date: reportDate(new Date(msg.created_at)),
+    })
+    : fill(tpl, { msgid: msg.vendor_msg_id, to: msg.destination });
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15_000);
   let res: Response;
@@ -258,11 +286,18 @@ async function pollOne(
   // returns several entries for the same id/mobile). Pick the entry for OUR
   // number with the LATEST delivery timestamp — a stale entry from an older
   // send must never shadow this message's own DLR.
+  // Report mode (HSP): entries carry no msgid at all — destination match is
+  // REQUIRED (no fallback to the whole pool: another number's DELIVRD must
+  // never settle our row).
   const want = lastDigits(msg.destination);
   const byNumber = entries.filter((e) => {
     const mob = String(pickField(e, ['mobile', 'number', 'to', 'destination', 'phone']) ?? '');
     return mob && (lastDigits(mob) === want || mob.endsWith(want));
   });
+  if (reportMode && !byNumber.length) {
+    await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+    return; // our number not in this report slice yet — next round
+  }
   const pool2 = byNumber.length ? byNumber : entries;
   const scored = pool2
     .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
@@ -379,7 +414,7 @@ async function tick(): Promise<void> {
   for (const v of vendors) {
     const interval = Math.max(10, v.dlr_poll_interval_sec || 30);
     const pending = await query<PendingMsg>(
-      `SELECT id, vendor_msg_id, destination FROM messages
+      `SELECT id, vendor_msg_id, destination, created_at FROM messages
        WHERE vendor_id = $1 AND status = 'submitted'
          AND vendor_msg_id IS NOT NULL AND vendor_msg_id <> ''
          AND (last_dlr_poll_at IS NULL OR last_dlr_poll_at < now() - ($2 || ' seconds')::interval)

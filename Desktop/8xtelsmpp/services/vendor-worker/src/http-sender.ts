@@ -56,10 +56,20 @@ function fillUrl(tpl: string, vars: Record<string, string>): string {
 }
 
 function pickPath(obj: unknown, path: string): unknown {
-  return path.split('.').reduce<unknown>(
-    (acc, k) => (acc !== null && typeof acc === 'object' ? (acc as Record<string, unknown>)[k] : undefined),
-    obj,
-  );
+  // Supports array indices: "0.msgid" reads obj[0].msgid (HSP returns
+  // [{"msgid":"..."}]). A bare numeric path ("0") reads obj[0] itself.
+  return path.split('.').reduce<unknown>((acc, k) => {
+    if (acc === null || acc === undefined) return undefined;
+    if (Array.isArray(acc)) {
+      if (/^\d+$/.test(k)) return acc[Number(k)];
+      // Non-numeric key on an array: try the first element (single-item
+      // vendor envelopes like [{"msgid":"x"}] with path "msgid").
+      const first = acc[0] as Record<string, unknown> | undefined;
+      return first !== null && typeof first === 'object' ? first[k] : undefined;
+    }
+    if (typeof acc === 'object') return (acc as Record<string, unknown>)[k];
+    return undefined;
+  }, obj);
 }
 
 function webhookBase(): string {
