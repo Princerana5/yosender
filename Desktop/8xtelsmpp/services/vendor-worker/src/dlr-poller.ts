@@ -72,6 +72,30 @@ function hasDeliveryTime(v: unknown): boolean {
   return true;
 }
 
+/** Parse a vendor delivery timestamp to epoch ms for ordering.
+    Returns -1 when absent/placeholder, -0.5 when present but unparseable
+    (still ranks above "no time" — presence alone proves delivery). */
+function parseVendorTime(v: unknown): number {
+  if (!hasDeliveryTime(v)) return -1;
+  const s = String(v).trim();
+  let m = s.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const t = new Date(+m[3]!, +m[2]! - 1, +m[1]!, +m[4]!, +m[5]!, +(m[6] ?? 0)).getTime();
+    return Number.isNaN(t) ? -0.5 : t;
+  }
+  m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (m) {
+    const t = new Date(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +(m[6] ?? 0)).getTime();
+    return Number.isNaN(t) ? -0.5 : t;
+  }
+  if (/^\d{10,13}$/.test(s)) {
+    const n = Number(s);
+    return n < 1e12 ? n * 1000 : n; // epoch seconds → ms
+  }
+  const t = Date.parse(s);
+  return Number.isNaN(t) ? -0.5 : t;
+}
+
 /** Case-insensitive field pick across common vendor spellings. */
 function pickField(obj: Record<string, unknown>, names: string[]): unknown {
   const lower: Record<string, unknown> = {};
@@ -180,22 +204,33 @@ async function pollOne(
   const entries = extractEntries(parsed);
   if (!entries.length) return;
 
-  // Batch sends share one msgid across numbers — match by mobile suffix.
+  // Vendors may reuse one msgid across numbers AND across sends (Fortius
+  // returns several entries for the same id/mobile). Pick the entry for OUR
+  // number with the LATEST delivery timestamp — a stale entry from an older
+  // send must never shadow this message's own DLR.
   const want = lastDigits(msg.destination);
-  const hit = entries.length === 1
-    ? entries[0]!
-    : entries.find((e) => {
-      const mob = String(pickField(e, ['mobile', 'number', 'to', 'destination', 'phone']) ?? '');
-      return (mob && lastDigits(mob) === want) || (mob && mob.endsWith(want));
-    })
-    ?? entries.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id);
+  const byNumber = entries.filter((e) => {
+    const mob = String(pickField(e, ['mobile', 'number', 'to', 'destination', 'phone']) ?? '');
+    return mob && (lastDigits(mob) === want || mob.endsWith(want));
+  });
+  const pool2 = byNumber.length ? byNumber : entries;
+  const scored = pool2
+    .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
+    .sort((a, b) => b.t - a.t);
+  const hit = scored.length === 1
+    ? scored[0]!.e
+    : (scored.find((s) => s.t >= 0)?.e
+      ?? pool2.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id)
+      ?? scored[0]!.e);
 
   if (!hit) return;
   const statusRaw = String(pickField(hit, STATUS_FIELDS) ?? '');
   const timeRaw = pickField(hit, TIME_FIELDS);
 
   // Ground truth first: a real delivery timestamp means DELIVRD even when the
-  // status code itself is an undocumented numeric.
+  // status code itself is an undocumented numeric. internal_id + destination
+  // pin the DLR to THIS message — vendors reusing msgids must not credit a
+  // sibling row (dlr-worker prefers the direct hit over msgid lookup).
   if (hasDeliveryTime(timeRaw)) {
     const now = dlrDate(new Date());
     const body =
@@ -206,6 +241,8 @@ async function pollOne(
       body,
       source: '',
       received_at: new Date().toISOString(),
+      internal_id: msg.id,
+      destination: msg.destination,
     });
     return;
   }
@@ -236,6 +273,8 @@ async function pollOne(
     body,
     source: '',
     received_at: new Date().toISOString(),
+    internal_id: msg.id,
+    destination: msg.destination,
   });
 }
 

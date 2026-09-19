@@ -11,6 +11,12 @@ interface IncomingDlr {
   body: string;
   source: string;
   received_at: string;
+  /** Internal message id this DLR was polled for (HTTP poller sets it).
+      Vendors that reuse one msgid across sends/numbers (Fortius) need this
+      to disambiguate — msgid alone can match a sibling row. */
+  internal_id?: string;
+  /** Destination the poller matched on — second disambiguator. */
+  destination?: string;
 }
 
 const FINAL = new Set(['delivered', 'undelivered', 'expired', 'rejected', 'failed']);
@@ -21,17 +27,42 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
   const { vendor_msg_id, stat } = parseDlrBody(body);
   const vendorStatus = mapDlrStatus(stat);
 
-  const msg = vendor_msg_id
-    ? await queryOne<{
+  // 1. Direct hit: the poller already resolved WHICH message this DLR is for.
+  let msg: {
+    id: string; client_id: string; status: string; source: string;
+    destination: string; dlr_mode: string; dlr_callback_url: string | null;
+  } | null = null;
+  if (job.data.internal_id) {
+    msg = await queryOne<{
       id: string; client_id: string; status: string; source: string;
       destination: string; dlr_mode: string; dlr_callback_url: string | null;
     }>(
       `SELECT m.id, m.client_id, m.status, m.source, m.destination, c.dlr_mode, c.dlr_callback_url
        FROM messages m JOIN clients c ON c.id=m.client_id
-       WHERE m.vendor_msg_id=$1 AND m.vendor_id=$2 ORDER BY m.created_at DESC LIMIT 1`,
-      [vendor_msg_id, vendor_id],
-    )
-    : null;
+       WHERE m.id=$1 AND m.vendor_id=$2`,
+      [job.data.internal_id, vendor_id],
+    );
+  }
+  // 2. Fallback: msgid lookup. Prefer a NON-final row for the same
+  // destination (reused msgids must not land on an already-settled sibling),
+  // then any non-final row, then newest overall (legacy behavior).
+  if (!msg && vendor_msg_id) {
+    const dest = job.data.destination ?? null;
+    msg = await queryOne<{
+      id: string; client_id: string; status: string; source: string;
+      destination: string; dlr_mode: string; dlr_callback_url: string | null;
+    }>(
+      `SELECT m.id, m.client_id, m.status, m.source, m.destination, c.dlr_mode, c.dlr_callback_url
+       FROM messages m JOIN clients c ON c.id=m.client_id
+       WHERE m.vendor_msg_id=$1 AND m.vendor_id=$2
+       ORDER BY
+         CASE WHEN m.status='submitted' AND ($3::text IS NULL OR m.destination=$3) THEN 0
+              WHEN m.status='submitted' THEN 1
+              ELSE 2 END,
+         m.created_at DESC LIMIT 1`,
+      [vendor_msg_id, vendor_id, dest],
+    );
+  }
 
   if (!msg) {
     console.warn(`[dlr] orphan DLR from vendor ${vendor_id}: ${body.slice(0, 120)}`);
@@ -119,7 +150,9 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
   );
   await incrStat(`dlr_${clientStatus}`);
 
-  // Fan out to client (§17)
+  // Fan out to client (§17) — separate queues per transport so the SMPP
+  // consumer (smpp-server) and the HTTP consumer (this worker) never steal
+  // each other's jobs.
   if (msg.dlr_mode === 'smpp') {
     await getQueue(QUEUES.clientDlr).add('client-dlr', {
       internal_id: msg.id,
@@ -134,7 +167,7 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
       destination: msg.destination,
     });
   } else if ((msg.dlr_mode === 'http' || msg.dlr_mode === 'api') && msg.dlr_callback_url) {
-    await getQueue(QUEUES.clientDlr).add('http-callback', {
+    await getQueue(QUEUES.clientDlrHttp).add('http-callback', {
       url: msg.dlr_callback_url,
       internal_id: msg.id,
       status: clientStatus,
@@ -162,7 +195,8 @@ async function processClientDlr(job: { data: Record<string, unknown> }): Promise
 
 async function main(): Promise<void> {
   createWorker(QUEUES.dlr, handleJob, 30);
-  createWorker(QUEUES.clientDlr, processClientDlr, 20);
+  // HTTP callbacks only — SMPP receipts live on QUEUES.clientDlr (smpp-server).
+  createWorker(QUEUES.clientDlrHttp, processClientDlr, 20);
   console.log('[8xtelSMPP dlr-worker] started');
 }
 
