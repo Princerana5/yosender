@@ -160,24 +160,43 @@ function lastDigits(s: string, n = 10): string {
 const STATUS_FIELDS = ['dlr_status', 'status', 'delivery_status', 'state', 'delivery_state'];
 const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at', 'done_date', 'delivery_time', 'delvdate'];
 
+/** Stale-numeric guard: a bare numeric that never advances to a terminal
+    state (Fortius "2" stuck while the vendor panel already shows FAILED)
+    fails after this many consecutive polls instead of sitting `submitted`
+    forever. 20 rounds × 30s interval ≈ 10 minutes. Tracked in
+    messages.error_code as `poll:<code>#<n>` so the count survives restarts. */
+const STALE_ROUNDS = 20;
+
 /** Words that count as an explicit DELIVERED from a poll entry.
     Anything else — including bare numerics ("1".."7") even WITH a delivery
     timestamp — is not proof the handset received it. */
 const EXPLICIT_DELIVERED_RE = /delivrd|delivered|delivery_success|\bsuccess\b|\bok\b|^d$/i;
 
+/** Fortius numeric codebook (confirmed live 2026-09-19):
+    - "4" = FAILED at the vendor (panel shows FAILED, handset never receives;
+      prior manual correction "code 4 is not delivered" agrees).
+    - "2"/"3" = accepted/in-flight at the vendor (panel keeps them pending;
+      a wrong-template test sits at "2" while the vendor panel shows the
+      send FAILED — the code never advances, so it must not sit `submitted`
+      forever either; see the stale guard in pollOne).
+    Only an explicit delivered WORD ever means delivered. */
+const FORTIUS_FAILED_CODES = new Set(['4']);
+
 /** Resolve a poll entry to a DLR stat token.
     - Word statuses map via toStat (FAILED/REJECTD/UNDELIV/EXPIRED/DELIVRD…).
     - Explicit delivered words (+ timestamp or not) → DELIVRD.
-    - Bare numerics / anything unrecognized → ACCEPTD when a delivery
-      timestamp is present (in-flight, keep polling), UNKNOWN otherwise.
-      NEVER DELIVRD: Fortius populates delvd_time on failed rows too, so the
-      timestamp alone proves nothing. Caller leaves the message `submitted`
-      and re-polls; the raw code is stashed on messages.error_code. */
+    - Fortius "4" → FAILED (vendor-confirmed failure code).
+    - Other bare numerics / unrecognized → ACCEPTD when a delivery timestamp
+      is present (in-flight, keep polling — the stale guard in pollOne fails
+      them after N rounds with no terminal state), UNKNOWN otherwise.
+      NEVER DELIVRD from a numeric: Fortius populates delvd_time on failed
+      rows too, so the timestamp alone proves nothing. */
 export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
   const stat = toStat(statusRaw);
   if (stat === 'DELIVRD') return 'DELIVRD';
   if (stat !== 'ACCEPTD' && stat !== 'UNKNOWN') return stat;
   if (EXPLICIT_DELIVERED_RE.test(statusRaw.trim())) return 'DELIVRD';
+  if (FORTIUS_FAILED_CODES.has(statusRaw.trim())) return 'FAILED';
   if (hasDeliveryTime(timeRaw)) return 'ACCEPTD';
   return stat;
 }
@@ -282,16 +301,55 @@ async function pollOne(
   // Still in flight (or undocumented numeric without delivery time) → leave
   // `submitted`, next round will re-poll. Stash the raw code on the message so
   // the operator can see it in message detail / logs instead of guessing.
+  // Stale guard: a numeric that never advances (e.g. Fortius "2" stuck while
+  // the vendor panel already shows the send FAILED, as in wrong-template
+  // tests) must not sit `submitted` forever. After STALE_ROUNDS consecutive
+  // polls with no terminal state, fail it as vendor:stale-<code> so the panel
+  // matches the vendor instead of hanging.
   if (stat === 'ACCEPTD' || stat === 'UNKNOWN') {
     const raw = statusRaw ? statusRaw.slice(0, 32) : 'empty';
+    if (/^\d+$/.test(statusRaw.trim())) {
+      // Bump the consecutive-stale counter kept in error_code (`poll:2#7`).
+      // A code change resets it; reaching STALE_ROUNDS fails the message so
+      // a stuck numeric (vendor already FAILED it) can't sit forever.
+      const cur = await pool.query('SELECT error_code FROM messages WHERE id=$1', [msg.id])
+        .then((x) => String(x.rows[0]?.error_code ?? '')).catch(() => '');
+      const m = cur.match(/^poll:([^\s#]+)#(\d+)$/);
+      const n = m && m[1] === raw ? Number(m[2]) + 1 : 1;
+      if (n >= STALE_ROUNDS) {
+        const now = dlrDate(new Date());
+        const body =
+          `id:${msg.vendor_msg_id} sub:001 dlvrd:001 submit date:${now} done date:${now} ` +
+          `stat:FAILED err:000 text:`;
+        await getQueue(QUEUES.dlr).add('dlr', {
+          vendor_id: vendorId,
+          body,
+          source: '',
+          received_at: new Date().toISOString(),
+          internal_id: msg.id,
+          destination: msg.destination,
+        });
+        await pool.query(
+          `UPDATE messages SET error_code=$1 WHERE id=$2
+           AND (error_code IS NULL OR error_code='' OR error_code LIKE 'poll:%')`,
+          [`poll:${raw}#stale`, msg.id],
+        ).catch(() => undefined);
+        console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} numeric status=${statusRaw} stale after ${n} rounds — failing`);
+        return;
+      }
+      await pool.query(
+        `UPDATE messages SET error_code=$1 WHERE id=$2
+         AND (error_code IS NULL OR error_code='' OR error_code LIKE 'poll:%')`,
+        [`poll:${raw}#${n}`, msg.id],
+      ).catch(() => undefined);
+      console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} numeric status=${statusRaw} (${n}/${STALE_ROUNDS}) — leaving submitted`);
+      return;
+    }
     await pool.query(
       `UPDATE messages SET error_code=$1 WHERE id=$2
        AND (error_code IS NULL OR error_code='' OR error_code LIKE 'poll:%')`,
       [`poll:${raw}`, msg.id],
     ).catch(() => undefined);
-    if (/^\d+$/.test(statusRaw.trim())) {
-      console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} numeric status=${statusRaw} no delvd_time — leaving submitted`);
-    }
     return;
   }
 
