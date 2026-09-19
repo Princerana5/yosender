@@ -14,18 +14,18 @@ import { getPool, getQueue, QUEUES, query } from '@8xtel/core';
 // from there the EXISTING dlr-worker handles mapping, storage, billing
 // settlement and client fan-out with zero changes.
 //
-// Fortius note: Fortius http-dlr.php returns NUMERIC per-message codes
-// ("1".."7") with no published codebook, so numbers are NEVER mapped to a
-// terminal state by guess. Ground truth is `delvd_time`: when the vendor
-// reports a real delivery timestamp (anything other than blank/"---"), the
-// handset got the SMS and we report DELIVRD regardless of the numeric code.
-// Numeric codes without a delivery timestamp stay `submitted` (honest) with
-// the raw code visible on messages.error_code as `poll:<raw>` for the operator.
-//
-// Explicit failures ALWAYS beat the timestamp (see resolvePollStat): some
-// vendors echo the submit time — or a stale timestamp from a reused msgid —
-// in delvd_time even on FAILED / template-mismatch rows. Letting the
-// timestamp win there produced false DELIVRDs the vendor panel showed failed.
+// Fortius note (verified 2026-09-19 against live http-dlr.php responses):
+// Fortius returns NUMERIC per-message codes with `delvd_time` ALWAYS
+// populated (IST, often the submit/attempt time — NOT proof of delivery).
+// Live evidence: entries with status "2"/"3"/"4" ALL carry real timestamps,
+// yet the vendor panel shows those messages failed / not received, and a
+// prior manual correction ("code 4 is not delivered - handset never
+// received it") confirms code 4 ≠ delivered. So for Fortius-style numeric
+// statuses the timestamp is MEANINGLESS and must never force DELIVRD.
+// Only an explicit delivered WORD ("delivered"/"delivrd"/"success") marks
+// delivered. Everything else stays `submitted` (re-polled) with the raw code
+// on messages.error_code as `poll:<raw>` for the operator.
+// Word statuses (FAILED, REJECTD, UNDELIV, …) map normally via toStat.
 
 interface PollVendor {
   vendor_id: string;
@@ -57,6 +57,9 @@ function toStat(raw: string): string {
   if (s.startsWith('UNDELIV') || s === 'UNDELIVERED' || s === 'FAILED_TEMP' || s === 'NDNC' || s === 'DND') return 'UNDELIV';
   if (s.startsWith('REJECTD') || s.startsWith('REJECT')) return 'REJECTD';
   if (s.startsWith('FAILED') || s === 'FAIL' || s === 'F') return 'FAILED';
+  // DLT-style free-text failures (e.g. "Template Not Matched") — vendors that
+  // reject on template/content grounds instead of a code.
+  if (/TEMPLATE|MISMATCH|NOT APPROVED|NOT WHITELIST|BLACKLIST|BLOCKED|BARRED|INVALID/i.test(raw)) return 'FAILED';
   if (s.startsWith('ACCEPTD') || s.startsWith('ENROUTE') || s === 'SENT' || s === 'SUBMITTED' || s === 'PENDING' || s === 'P') return 'ACCEPTD';
   return 'UNKNOWN';
 }
@@ -157,26 +160,25 @@ function lastDigits(s: string, n = 10): string {
 const STATUS_FIELDS = ['dlr_status', 'status', 'delivery_status', 'state', 'delivery_state'];
 const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at', 'done_date', 'delivery_time', 'delvdate'];
 
-/** Terminal failure words that must NEVER be overridden by a delivery
-    timestamp. Covers DLT template-mismatch style rows where the vendor echoes
-    a submit/stale time in delvd_time alongside an explicit failure status. */
-const EXPLICIT_FAILURE_RE = /fail|reject|undeliv|un-deliv|not.?deliv|expired|blocked|invalid|template|mismatch|dnd|ndnc|blacklist|spam|barred|absent/i;
+/** Words that count as an explicit DELIVERED from a poll entry.
+    Anything else — including bare numerics ("1".."7") even WITH a delivery
+    timestamp — is not proof the handset received it. */
+const EXPLICIT_DELIVERED_RE = /delivrd|delivered|delivery_success|\bsuccess\b|\bok\b|^d$/i;
 
 /** Resolve a poll entry to a DLR stat token.
-    - Explicit failure words in the status (FAILED, REJECTD, template
-      mismatch, …) always win — even with a delivery timestamp present.
-    - Otherwise a real delivery timestamp means DELIVRD (Fortius numeric
-      codes carry no meaning on their own).
-    - In-flight / undocumented codes without a timestamp stay ACCEPTD/UNKNOWN
-      (caller leaves the message `submitted` and re-polls). */
+    - Word statuses map via toStat (FAILED/REJECTD/UNDELIV/EXPIRED/DELIVRD…).
+    - Explicit delivered words (+ timestamp or not) → DELIVRD.
+    - Bare numerics / anything unrecognized → ACCEPTD when a delivery
+      timestamp is present (in-flight, keep polling), UNKNOWN otherwise.
+      NEVER DELIVRD: Fortius populates delvd_time on failed rows too, so the
+      timestamp alone proves nothing. Caller leaves the message `submitted`
+      and re-polls; the raw code is stashed on messages.error_code. */
 export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
   const stat = toStat(statusRaw);
+  if (stat === 'DELIVRD') return 'DELIVRD';
   if (stat !== 'ACCEPTD' && stat !== 'UNKNOWN') return stat;
-  if (EXPLICIT_FAILURE_RE.test(statusRaw.trim())) {
-    if (stat === 'UNKNOWN') return 'FAILED';
-    return stat;
-  }
-  if (hasDeliveryTime(timeRaw)) return 'DELIVRD';
+  if (EXPLICIT_DELIVERED_RE.test(statusRaw.trim())) return 'DELIVRD';
+  if (hasDeliveryTime(timeRaw)) return 'ACCEPTD';
   return stat;
 }
 
@@ -255,10 +257,11 @@ async function pollOne(
   const statusRaw = String(pickField(hit, STATUS_FIELDS) ?? '');
   const timeRaw = pickField(hit, TIME_FIELDS);
 
-  // Explicit failures beat the timestamp; a real delivery timestamp proves
-  // DELIVRD only when the status isn't an explicit failure. internal_id +
-  // destination pin the DLR to THIS message — vendors reusing msgids must not
-  // credit a sibling row (dlr-worker prefers the direct hit over msgid lookup).
+  // Only explicit delivered words (or mapped DELIVRD) close the loop.
+  // Numerics with timestamps stay `submitted` — Fortius fills delvd_time on
+  // failed rows too, so it proves nothing. internal_id + destination pin the
+  // DLR to THIS message — vendors reusing msgids must not credit a sibling
+  // row (dlr-worker prefers the direct hit over msgid lookup).
   const stat = resolvePollStat(statusRaw, timeRaw);
   if (stat === 'DELIVRD') {
     const now = dlrDate(new Date());
