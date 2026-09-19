@@ -15,7 +15,7 @@ interface Fx {
   source?: string | null; refreshed_at?: string | null; updated_at?: string | null;
 }
 
-const CURS = ['USD', 'EUR', 'INR'] as const;
+const CURS = ['USDT', 'EUR', 'INR'] as const;
 
 type AdjKind = 'topup' | 'deduct';
 
@@ -29,7 +29,7 @@ export default function Billing(): JSX.Element {
   const [formErr, setFormErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [changing, setChanging] = useState<Wallet | null>(null);
-  const [newCur, setNewCur] = useState<string>('USD');
+  const [newCur, setNewCur] = useState<string>('USDT');
   const [modeEdit, setModeEdit] = useState<Wallet | null>(null);
   const [modeDraft, setModeDraft] = useState<'prepay' | 'postpay'>('prepay');
   const [creditDraft, setCreditDraft] = useState('0');
@@ -163,22 +163,22 @@ export default function Billing(): JSX.Element {
     const from = fx.find((f) => f.code === w.currency)?.rate_to_usd;
     const to = fx.find((f) => f.code === newCur)?.rate_to_usd;
     if (!from || !to || w.currency === newCur) return '';
-    const sym = newCur === 'EUR' ? '€' : newCur === 'INR' ? '₹' : '$';
+    const sym = newCur === 'EUR' ? '€' : newCur === 'INR' ? '₹' : '₮';
     return `≈ ${sym}${(Number(w.balance) * Number(from) / Number(to)).toFixed(2)} ${newCur}`;
   };
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Wallets & ledger" sub="Prepay / postpay · top-up & deduct with remarks · USD / EUR / INR" />
+      <PageHeader title="Wallets & ledger" sub="Prepay / postpay · top-up & deduct with remarks · USDT / EUR / INR" />
 
       <TopupQueue onDone={load} />
 
       <div className="card card-pad">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
-            <div className="card-title">Exchange rates → USD</div>
+            <div className="card-title">Exchange rates → USDT</div>
             <div className="card-sub">
-              1 unit = rate USD (e.g. 1 INR ≈ {Number(fx.find((f) => f.code.trim() === 'INR')?.rate_to_usd ?? 0).toFixed(4)} USD).
+              1 unit = rate USDT (e.g. 1 INR ≈ {Number(fx.find((f) => f.code.trim() === 'INR')?.rate_to_usd ?? 0).toFixed(4)} USDT).
               Used only when a wallet changes currency. Auto-refreshes hourly from the live market.
             </div>
           </div>
@@ -209,7 +209,7 @@ export default function Billing(): JSX.Element {
               <div className="text-xs text-muted">
                 <div>{f.symbol} {f.name}</div>
                 <div className="text-[10px] opacity-70">
-                  1 {f.code.trim()} = {Number(f.rate_to_usd).toFixed(f.code.trim() === 'INR' ? 4 : 4)} USD
+                  1 {f.code.trim()} = {Number(f.rate_to_usd).toFixed(f.code.trim() === 'INR' ? 4 : 4)} USDT
                   {(f.source ?? '') === 'live' && f.refreshed_at
                     ? ` · live ${new Date(f.refreshed_at).toLocaleString()}`
                     : (f.source ?? '') === 'manual' ? ' · manual' : ''}

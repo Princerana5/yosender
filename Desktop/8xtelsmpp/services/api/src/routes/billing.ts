@@ -15,7 +15,7 @@ if (!fxStarted) {
 const router = Router();
 router.use(requirePerm('billing.read'));
 
-export const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'INR'] as const;
+export const SUPPORTED_CURRENCIES = ['USDT', 'EUR', 'INR'] as const;
 
 async function fxRate(code: string): Promise<number> {
   const row = await query<{ rate_to_usd: string }>('SELECT rate_to_usd FROM fx_rates WHERE code=$1', [code]);
@@ -31,7 +31,7 @@ router.get('/currencies', async (_req, res) => {
 router.patch('/currencies/:code', requirePerm('billing.manage'), audit('updated_fx_rate', 'fx_rate'), async (req, res) => {
   const code = req.params.code.toUpperCase();
   if (!SUPPORTED_CURRENCIES.includes(code as (typeof SUPPORTED_CURRENCIES)[number])) {
-    res.status(400).json({ error: 'currency must be USD, EUR or INR' });
+    res.status(400).json({ error: 'currency must be USDT, EUR or INR' });
     return;
   }
   const rate = Number(req.body?.rate_to_usd);
@@ -68,7 +68,7 @@ router.get('/wallets', async (_req, res) => {
 router.post('/wallets/:clientId/currency', requirePerm('billing.manage'), audit('changed_wallet_currency', 'wallet'), async (req, res) => {
   const to = String(req.body?.currency ?? '').toUpperCase();
   if (!SUPPORTED_CURRENCIES.includes(to as (typeof SUPPORTED_CURRENCIES)[number])) {
-    res.status(400).json({ error: 'currency must be USD, EUR or INR' });
+    res.status(400).json({ error: 'currency must be USDT, EUR or INR' });
     return;
   }
   const pool = getPool();
@@ -89,7 +89,7 @@ router.post('/wallets/:clientId/currency', requirePerm('billing.manage'), audit(
     }
     const fromRate = await fxRate(from);
     const toRate = await fxRate(to);
-    // native → USD → target
+    // native → base (USDT) → target
     const convert = (n: number): number => +(Number(n) * fromRate / toRate).toFixed(6);
     const newBalance = convert(Number(cur.rows[0].balance));
     const newCredit = convert(Number(cur.rows[0].credit_limit));

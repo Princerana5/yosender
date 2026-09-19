@@ -40,7 +40,7 @@ export default function PortalAccounts(): JSX.Element {
   const [form, setForm] = useState({
     name: '', company_name: '', system_id: '', portal_email: '',
     password: '', passwordMode: 'generate' as 'generate' | 'manual',
-    showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '50',
+    showPw: false, currency: 'USDT', credit_limit: '0', tps_limit: '50',
   });
   const [issued, setIssued] = useState<(Issued & { name: string }) | null>(null);
   const [copied, setCopied] = useState(false);
@@ -63,7 +63,7 @@ export default function PortalAccounts(): JSX.Element {
     setForm({
       name: '', company_name: '', system_id: '', portal_email: '',
       password: randomPassword(), passwordMode: 'generate',
-      showPw: false, currency: 'USD', credit_limit: '0', tps_limit: '50',
+      showPw: false, currency: 'USDT', credit_limit: '0', tps_limit: '50',
     });
     setFormErr('');
     setShowCreate(true);
@@ -279,7 +279,7 @@ export default function PortalAccounts(): JSX.Element {
               <div>
                 <label className="label">Currency</label>
                 <div className="flex gap-1">
-                  {(['USD', 'EUR', 'INR'] as const).map((cur) => (
+                  {(['USDT', 'EUR', 'INR'] as const).map((cur) => (
                     <button key={cur} type="button" onClick={() => setForm({ ...form, currency: cur })}
                       className={`flex-1 rounded-lg border px-2 py-2 text-xs font-semibold transition ${form.currency === cur
                         ? 'border-brand/50 bg-brand/10 text-emerald-300'

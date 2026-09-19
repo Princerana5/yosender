@@ -311,11 +311,11 @@ export function Money({ value, currency, tone, decimals }: {
 
 export function CurrencyBadge({ code }: { code: string }): JSX.Element {
   const style: Record<string, string> = {
-    USD: 'bg-brand/10 text-emerald-300 border-brand/25',
+    USDT: 'bg-brand/10 text-emerald-300 border-brand/25',
     EUR: 'bg-sky-500/10 text-sky-300 border-sky-500/25',
     INR: 'bg-warn/10 text-amber-300 border-warn/25',
   };
-  return <span className={`badge border ${style[code] ?? style.USD}`}>{code}</span>;
+  return <span className={`badge border ${style[code] ?? style.USDT}`}>{code}</span>;
 }
 
 // ── Empty state ──────────────────────────────────────────────────────────────

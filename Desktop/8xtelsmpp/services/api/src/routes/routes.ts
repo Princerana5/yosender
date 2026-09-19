@@ -64,7 +64,7 @@ const routeSchema = z.object({
   tps_limit: z.number().int().positive().nullable().optional(),
   group_id: z.string().uuid().nullable().optional(),
   price_per_segment: z.number().nonnegative().nullable().optional(),
-  price_currency: z.enum(['USD', 'EUR', 'INR']).optional(),
+  price_currency: z.enum(['USDT', 'EUR', 'INR']).optional(),
   min_margin_pct: z.number().min(0).max(1000).nullable().optional(),
   vendors: z.array(z.object({
     vendor_id: z.string().uuid(),
@@ -95,7 +95,7 @@ router.post('/', requirePerm('routes.create'), audit('created_route', 'route'), 
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
     [b.name, b.channel, members.length === 1 ? members[0] : null, b.country_id ?? null, b.prefix ?? null, b.sender_id ?? null,
      b.strategy, b.status, b.tps_limit ?? null, b.group_id ?? null,
-     b.price_per_segment ?? null, b.price_currency ?? 'USD', b.min_margin_pct ?? null],
+     b.price_per_segment ?? null, b.price_currency ?? 'USDT', b.min_margin_pct ?? null],
   );
   const route = rows[0];
   for (const cid of members) {

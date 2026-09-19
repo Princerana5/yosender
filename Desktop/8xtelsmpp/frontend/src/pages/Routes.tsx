@@ -210,15 +210,15 @@ export default function Routes(): JSX.Element {
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
   const [formErr, setFormErr] = useState('');
-  const CURS = ['USD', 'EUR', 'INR'] as const;
+  const CURS = ['USDT', 'EUR', 'INR'] as const;
   const [form, setForm] = useState({
     name: '', prefix: '', sender_id: '', strategy: 'priority',
-    client_ids: [] as string[], country_id: '', price: '', currency: 'USD', margin: '', tps: '',
+    client_ids: [] as string[], country_id: '', price: '', currency: 'USDT', margin: '', tps: '',
   });
   const [clientSearch, setClientSearch] = useState('');
   const [editing, setEditing] = useState<Route | null>(null);
   const [editPrice, setEditPrice] = useState('');
-  const [editCurrency, setEditCurrency] = useState('USD');
+  const [editCurrency, setEditCurrency] = useState('USDT');
   const [editMargin, setEditMargin] = useState('');
   const [chain, setChain] = useState<ChainItem[]>([]);
   // Detail drawer
@@ -280,7 +280,7 @@ export default function Routes(): JSX.Element {
   }
 
   function openModal(): void {
-    setForm({ name: '', prefix: '', sender_id: '', strategy: 'priority', client_ids: [], country_id: '', price: '', currency: 'USD', margin: '', tps: '' });
+    setForm({ name: '', prefix: '', sender_id: '', strategy: 'priority', client_ids: [], country_id: '', price: '', currency: 'USDT', margin: '', tps: '' });
     setClientSearch('');
     setChain([]);
     setFormErr('');
@@ -523,8 +523,8 @@ export default function Routes(): JSX.Element {
                 <span>
                   <button className={`tabular-nums font-semibold hover:underline ${r.below_margin ? 'text-red-300' : 'text-emerald-300'}`}
                     title={r.below_margin ? `Below margin floor ${r.margin_floor?.toFixed(4)} — click to edit` : 'Click to edit'}
-                    onClick={() => { setEditing(r); setEditPrice(String(r.price_per_segment)); setEditCurrency(r.price_currency ?? 'USD'); setEditMargin(r.min_margin_pct ?? ''); }}>
-                    {Number(r.price_per_segment).toFixed(4)} <span className="text-[10px] text-muted">{r.price_currency ?? 'USD'}</span>
+                    onClick={() => { setEditing(r); setEditPrice(String(r.price_per_segment)); setEditCurrency(r.price_currency ?? 'USDT'); setEditMargin(r.min_margin_pct ?? ''); }}>
+                    {Number(r.price_per_segment).toFixed(4)} <span className="text-[10px] text-muted">{r.price_currency ?? 'USDT'}</span>
                   </button>
                   {r.below_margin && (
                     <span className="block text-[10px] font-bold text-red-300" title={`Floor ${r.margin_floor?.toFixed(4)} = cost ${Number(r.min_vendor_cost).toFixed(4)} + ${Number(r.min_margin_pct).toFixed(1)}%`}>
@@ -534,7 +534,7 @@ export default function Routes(): JSX.Element {
                 </span>
               ) : (
                 <button className="text-xs text-muted hover:text-white" title="Set route price"
-                  onClick={() => { setEditing(r); setEditPrice(''); setEditCurrency('USD'); setEditMargin(r.min_margin_pct ?? ''); }}>
+                  onClick={() => { setEditing(r); setEditPrice(''); setEditCurrency('USDT'); setEditMargin(r.min_margin_pct ?? ''); }}>
                   + set
                 </button>
               ),
