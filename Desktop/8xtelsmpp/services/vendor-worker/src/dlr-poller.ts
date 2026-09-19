@@ -21,6 +21,11 @@ import { getPool, getQueue, QUEUES, query } from '@8xtel/core';
 // handset got the SMS and we report DELIVRD regardless of the numeric code.
 // Numeric codes without a delivery timestamp stay `submitted` (honest) with
 // the raw code visible on messages.error_code as `poll:<raw>` for the operator.
+//
+// Explicit failures ALWAYS beat the timestamp (see resolvePollStat): some
+// vendors echo the submit time — or a stale timestamp from a reused msgid —
+// in delvd_time even on FAILED / template-mismatch rows. Letting the
+// timestamp win there produced false DELIVRDs the vendor panel showed failed.
 
 interface PollVendor {
   vendor_id: string;
@@ -152,6 +157,29 @@ function lastDigits(s: string, n = 10): string {
 const STATUS_FIELDS = ['dlr_status', 'status', 'delivery_status', 'state', 'delivery_state'];
 const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at', 'done_date', 'delivery_time', 'delvdate'];
 
+/** Terminal failure words that must NEVER be overridden by a delivery
+    timestamp. Covers DLT template-mismatch style rows where the vendor echoes
+    a submit/stale time in delvd_time alongside an explicit failure status. */
+const EXPLICIT_FAILURE_RE = /fail|reject|undeliv|un-deliv|not.?deliv|expired|blocked|invalid|template|mismatch|dnd|ndnc|blacklist|spam|barred|absent/i;
+
+/** Resolve a poll entry to a DLR stat token.
+    - Explicit failure words in the status (FAILED, REJECTD, template
+      mismatch, …) always win — even with a delivery timestamp present.
+    - Otherwise a real delivery timestamp means DELIVRD (Fortius numeric
+      codes carry no meaning on their own).
+    - In-flight / undocumented codes without a timestamp stay ACCEPTD/UNKNOWN
+      (caller leaves the message `submitted` and re-polls). */
+export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
+  const stat = toStat(statusRaw);
+  if (stat !== 'ACCEPTD' && stat !== 'UNKNOWN') return stat;
+  if (EXPLICIT_FAILURE_RE.test(statusRaw.trim())) {
+    if (stat === 'UNKNOWN') return 'FAILED';
+    return stat;
+  }
+  if (hasDeliveryTime(timeRaw)) return 'DELIVRD';
+  return stat;
+}
+
 async function pollOne(
   vendorId: string, tpl: string, msg: PendingMsg,
 ): Promise<void> {
@@ -227,11 +255,12 @@ async function pollOne(
   const statusRaw = String(pickField(hit, STATUS_FIELDS) ?? '');
   const timeRaw = pickField(hit, TIME_FIELDS);
 
-  // Ground truth first: a real delivery timestamp means DELIVRD even when the
-  // status code itself is an undocumented numeric. internal_id + destination
-  // pin the DLR to THIS message — vendors reusing msgids must not credit a
-  // sibling row (dlr-worker prefers the direct hit over msgid lookup).
-  if (hasDeliveryTime(timeRaw)) {
+  // Explicit failures beat the timestamp; a real delivery timestamp proves
+  // DELIVRD only when the status isn't an explicit failure. internal_id +
+  // destination pin the DLR to THIS message — vendors reusing msgids must not
+  // credit a sibling row (dlr-worker prefers the direct hit over msgid lookup).
+  const stat = resolvePollStat(statusRaw, timeRaw);
+  if (stat === 'DELIVRD') {
     const now = dlrDate(new Date());
     const body =
       `id:${msg.vendor_msg_id} sub:001 dlvrd:001 submit date:${now} done date:${now} ` +
@@ -247,7 +276,6 @@ async function pollOne(
     return;
   }
 
-  const stat = toStat(statusRaw);
   // Still in flight (or undocumented numeric without delivery time) → leave
   // `submitted`, next round will re-poll. Stash the raw code on the message so
   // the operator can see it in message detail / logs instead of guessing.
