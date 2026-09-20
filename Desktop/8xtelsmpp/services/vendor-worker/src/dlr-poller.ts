@@ -105,7 +105,11 @@ function parseVendorTime(v: unknown): number {
   const s = String(v).trim();
   let m = s.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
   if (m) {
-    const t = new Date(+m[3]!, +m[2]! - 1, +m[1]!, +m[4]!, +m[5]!, +(m[6] ?? 0)).getTime();
+    // DD/MM/YYYY HH:mm:ss is the Indian-vendor format (HSP senton) — those
+    // clocks run IST (UTC+5:30) while our servers run UTC. Parse as IST so
+    // send-time proximity matching compares like with like; parsing as UTC
+    // shifts every entry 5.5h back and the sibling-claim guard misfires.
+    const t = Date.UTC(+m[3]!, +m[2]! - 1, +m[1]!, +m[4]!, +m[5]!, +(m[6] ?? 0)) - 5.5 * 3600_000;
     return Number.isNaN(t) ? -0.5 : t;
   }
   m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?/);
@@ -537,6 +541,41 @@ async function tick(): Promise<void> {
     );
     if (pending.length) console.log(`[dlr-poll] ${v.vendor_name}: polled ${pending.length}`);
   }
+  await expireSilentHttp();
+}
+
+// ── 60-min expiry (HTTP vendors only) ───────────────────────────────────────
+// A message still `submitted` 60 min after submit with an HTTP vendor assigned
+// means the vendor never answered (no poll hit, no webhook). Fail it as
+// vendor:failed via a synthetic DLR so the FULL pipeline runs: status update,
+// hold refund, client callback fan-out. Late vendor DLRs after this are
+// ignored as duplicates (dlr-worker keeps final state). SMPP vendors are
+// untouched — their binds deliver receipts on their own schedule.
+async function expireSilentHttp(): Promise<void> {
+  const stale = await query<{ id: string; vendor_id: string; vendor_msg_id: string | null; destination: string }>(
+    `SELECT m.id, m.vendor_id, m.vendor_msg_id, m.destination FROM messages m
+     JOIN vendors v ON v.id = m.vendor_id
+     WHERE m.status = 'submitted'
+       AND COALESCE(v.protocol, 'smpp') = 'http'
+       AND m.submit_time < now() - interval '60 minutes'`,
+  );
+  for (const m of stale) {
+    const now = dlrDate(new Date());
+    await getQueue(QUEUES.dlr).add('dlr', {
+      vendor_id: m.vendor_id,
+      body: `id:${m.vendor_msg_id ?? m.id} sub:001 dlvrd:001 submit date:${now} done date:${now} stat:FAILED err:000 text:`,
+      source: '',
+      received_at: new Date().toISOString(),
+      internal_id: m.id,
+      destination: m.destination,
+    });
+    await getPool().query(
+      `UPDATE messages SET error_code='dlr-timeout:60m' WHERE id=$1
+       AND (error_code IS NULL OR error_code='' OR error_code LIKE 'poll:%')`,
+      [m.id],
+    ).catch(() => undefined);
+  }
+  if (stale.length) console.log(`[dlr-poll] expired ${stale.length} silent HTTP message(s) (>60m, no DLR)`);
 }
 
 /** Start the periodic poll loop. Safe to call once from vendor-worker main. */
