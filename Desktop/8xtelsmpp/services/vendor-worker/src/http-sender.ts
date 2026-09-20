@@ -143,6 +143,19 @@ export class HttpVendorSender {
     const timeoutMs = cfg.timeout_ms > 0 ? cfg.timeout_ms : 10_000;
 
     const applied = await this.applyTemplate(cfg, opts.source, opts.text);
+    // ── HTTP-only template gate: never send unapproved content upstream ──
+    // Some HTTP vendors accept ANY content with HTTP 200 then report DELIVRD
+    // for messages they silently drop (wrong template = handset gets nothing
+    // but DLR says delivered). When this vendor uses per-SID templates, the
+    // upstream text must be fully resolved: any leftover {vN} placeholder
+    // means the client didn't supply the template variables → reject HERE
+    // (failover engages) instead of letting the vendor fake a DELIVRD.
+    // SMPP vendors are untouched — this runs inside HttpVendorSender only.
+    if (/\{v\d+\}/i.test(applied.text)) {
+      throw new Error(
+        `http vendor rejected: template variables missing for sender ${applied.from} (unresolved ${applied.text.match(/\{v\d+\}/i)?.[0]})`,
+      );
+    }
     // Multi-SID mode: does this vendor use per-SID templates? When yes the
     // resolved `from` MUST win even if the operator left a hardcoded SID in
     // the URL/body template (e.g. sendername=NDRTEd). Otherwise every message
@@ -209,6 +222,15 @@ export class HttpVendorSender {
     if (!res.ok) {
       throw new Error(`http vendor status=${res.status} body=${text.slice(0, 200)}`);
     }
+    // Audit trail: what the vendor actually saw (resolved SID + final text)
+    // plus their raw response excerpt. When the handset receives nothing but
+    // the vendor later reports DELIVRD, this proves whether WE sent the wrong
+    // SID/template upstream or THE VENDOR faked the DLR.
+    void getPool().query(
+      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'sent-audit',$3)`,
+      [opts.internal_id, this.vendorId,
+       `upstream from=${applied.from} text=${applied.text.slice(0, 160)} resp=${text.slice(0, 160)}`],
+    ).catch(() => undefined);
     // Vendor-level error detection: some HTTP vendors return HTTP 200 with an
     // error payload instead of a non-2xx status. Treat those as failures so
     // failover/retry engages instead of marking a fake send.

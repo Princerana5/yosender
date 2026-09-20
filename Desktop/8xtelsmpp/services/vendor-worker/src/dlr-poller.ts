@@ -200,7 +200,7 @@ const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at'
     forever. Polls land ~1–2 min apart in practice, so 6 rounds ≈ 10 min.
     Tracked in messages.error_code as `poll:<code>#<n>` so the count
     survives restarts. */
-const STALE_ROUNDS = 6;
+const STALE_ROUNDS = 24;
 
 /** Words that count as an explicit DELIVERED from a poll entry.
     Anything else — including bare numerics ("1".."7") even WITH a delivery
@@ -348,6 +348,65 @@ async function pollOne(
   }
 
   if (!hit) return;
+  // Sibling-claim guard (report mode): the datewise report is shared by every
+  // send to this number, so two of OUR messages can both pick the SAME entry
+  // (e.g. test #1 DELIVRD also matches test #2 sent a minute later with a bad
+  // template — test #2 then shows delivered though the handset got nothing).
+  // Before accepting the hit, check sibling `submitted` rows for the same
+  // vendor+destination: if one of them is closer to the entry's vendor
+  // send-time, this entry is THEIRS — leave us `submitted` for the next round.
+  // Report-mode entry fingerprint: vendor send-time + destination digits.
+  // One report row settles ONE message — whoever claims it first owns it.
+  const hitTimeForClaim = reportMode ? parseVendorTime(pickField(hit, SEND_TIME_FIELDS)) : -1;
+  if (reportMode) {
+    const hitTime = hitTimeForClaim;
+    // Already claimed? Another message settled off this exact entry — never
+    // settle twice off one row (the false-DELIVRD: test #2 claiming test #1's
+    // row after #1 already consumed it).
+    if (hitTime >= 0) {
+      const claimed = await pool.query(
+        `SELECT 1 FROM message_events e JOIN messages m ON m.id=e.message_id
+         WHERE m.vendor_id=$1 AND m.destination=$2 AND e.event='report-claim'
+           AND e.detail=$3 LIMIT 1`,
+        [vendorId, msg.destination, `report-claim ${hitTime}`],
+      ).catch(() => ({ rowCount: 0 }));
+      if ((claimed.rowCount ?? 0) > 0) {
+        await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+        console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} entry already claimed — leaving submitted`);
+        return;
+      }
+    }
+    if (hitTime >= 0 && !Number.isNaN(msgCreated)) {
+      const myGap = Math.abs(hitTime - msgCreated);
+      // NOTE: siblings include RECENTLY SETTLED rows (delivered in the last
+      // 2h), not just `submitted` ones — the classic false-DELIVRD is test #2
+      // claiming test #1's entry AFTER #1 already settled (a `submitted`-only
+      // filter can't see it, so the theft succeeds).
+      const sib = await pool.query(
+        `SELECT created_at FROM messages
+         WHERE vendor_id=$1 AND destination=$2 AND id<>$3
+           AND created_at > now() - interval '48 hours'
+           AND (status='submitted'
+                OR (status='delivered' AND dlr_time > now() - interval '2 hours'))
+         LIMIT 20`,
+        [vendorId, msg.destination, msg.id],
+      ).catch(() => ({ rows: [] as Array<{ created_at: string }> }));
+      for (const r of sib.rows) {
+        const t = new Date(r.created_at).getTime();
+        if (!Number.isNaN(t) && Math.abs(hitTime - t) < myGap) {
+          await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+          console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} hit belongs to a sibling send — leaving submitted`);
+          return;
+        }
+      }
+      // Tight window: an entry hours away from our submit is never ours.
+      // (Vendor clock skew + queue delay covered by ±30 min.)
+      if (myGap > 30 * 60 * 1000) {
+        await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+        return;
+      }
+    }
+  }
   const statusRaw = String(pickField(hit, STATUS_FIELDS) ?? '');
   const timeRaw = pickField(hit, TIME_FIELDS);
 
@@ -358,6 +417,14 @@ async function pollOne(
   // row (dlr-worker prefers the direct hit over msgid lookup).
   const stat = resolvePollStat(statusRaw, timeRaw);
   if (stat === 'DELIVRD') {
+    // Stamp the claim BEFORE settling: one report row = one message. A later
+    // sibling matching the same row sees the stamp above and backs off.
+    if (reportMode && hitTimeForClaim >= 0) {
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'report-claim',$3)`,
+        [msg.id, vendorId, `report-claim ${hitTimeForClaim}`],
+      ).catch(() => undefined);
+    }
     const now = dlrDate(new Date());
     const body =
       `id:${msg.vendor_msg_id} sub:001 dlvrd:001 submit date:${now} done date:${now} ` +
@@ -451,7 +518,7 @@ async function tick(): Promise<void> {
        AND c.dlr_poll_url_template IS NOT NULL AND c.dlr_poll_url_template <> ''`,
   );
   for (const v of vendors) {
-    const interval = Math.max(10, v.dlr_poll_interval_sec || 30);
+    const interval = Math.max(5, v.dlr_poll_interval_sec || 5);
     const pending = await query<PendingMsg>(
       `SELECT id, vendor_msg_id, destination, created_at FROM messages
        WHERE vendor_id = $1 AND status = 'submitted'
@@ -461,13 +528,13 @@ async function tick(): Promise<void> {
        ORDER BY last_dlr_poll_at NULLS FIRST, created_at LIMIT 50`,
       [v.vendor_id, String(interval)],
     );
-    for (const m of pending) {
-      try {
-        await pollOne(v.vendor_id, v.dlr_poll_url_template, m);
-      } catch (e) {
-        console.error('[dlr-poll] failed', (e as Error).message);
-      }
-    }
+    await Promise.allSettled(
+      pending.map((m) =>
+        pollOne(v.vendor_id, v.dlr_poll_url_template, m).catch((e) =>
+          console.error('[dlr-poll] failed', (e as Error).message),
+        ),
+      ),
+    );
     if (pending.length) console.log(`[dlr-poll] ${v.vendor_name}: polled ${pending.length}`);
   }
 }
@@ -477,6 +544,6 @@ export function startDlrPoller(): void {
   const loop = (): void => {
     tick().catch((e) => console.error('[dlr-poll] tick failed', (e as Error).message));
   };
-  setTimeout(loop, 10_000); // let binds settle first
-  setInterval(loop, 30_000).unref();
+  setTimeout(loop, 5_000); // let binds settle first
+  setInterval(loop, 5_000).unref();
 }
