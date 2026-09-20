@@ -70,6 +70,18 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     return;
   }
 
+  // Unrecognized vendor status → keep raw for audit, but NEVER surface
+  // 'unknown' to the panel/client as a message status. The message stays
+  // `submitted` so HTTP polling keeps retrying and the next real DLR settles it.
+  if (vendorStatus === 'unknown') {
+    await pool.query(
+      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'dlr',$3)`,
+      [msg.id, vendor_id, `unrecognized stat ignored: ${body.slice(0, 120)}`],
+    ).catch(() => undefined);
+    await incrStat('dlr_unknown');
+    return;
+  }
+
   // Duplicate / late DLR after final state → keep raw, don't regress (§37)
   if (FINAL.has(msg.status)) {
     await pool.query(
@@ -80,16 +92,11 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     return;
   }
 
-  // Traffic policy: client-visible status may be sampled; raw NEVER rewritten (§19)
-  const policy = await queryOne<{ report_policy: string }>(
-    `SELECT tp.report_policy FROM traffic_policies tp
-     JOIN messages m ON m.route_id=tp.route_id
-     WHERE m.id=$1 AND tp.enabled=true ORDER BY tp.percentage DESC LIMIT 1`,
-    [msg.id],
-  );
-  const clientStatus = policy?.report_policy === 'sampled' && vendorStatus === 'delivered' && Math.random() < 0.02
-    ? 'undelivered' // sampled reporting policy — auditable, raw stays DELIVRD
-    : vendorStatus;
+  // Client-visible status always mirrors the vendor outcome (§19: raw NEVER
+  // rewritten). Previously a 'sampled' traffic policy randomly flipped ~2% of
+  // delivered messages to undelivered — removed: it lied on delivered traffic,
+  // triggered wrongful refunds, and sent false client callbacks.
+  const clientStatus = vendorStatus;
 
   await pool.query(
     `INSERT INTO dlrs (message_id, vendor_msg_id, raw_body, vendor_status, client_status, delivered_at)
@@ -183,7 +190,11 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
 
   // Fan out to client (§17) — separate queues per transport so the SMPP
   // consumer (smpp-server) and the HTTP consumer (this worker) never steal
-  // each other's jobs.
+  // each other's jobs. 'none' = panel-only (no push), but the panel + status
+  // API already read messages.status so the client still sees realtime state.
+  if (msg.dlr_mode === 'none') {
+    return;
+  }
   if (msg.dlr_mode === 'smpp') {
     await getQueue(QUEUES.clientDlr).add('client-dlr', {
       internal_id: msg.id,
