@@ -162,6 +162,18 @@ router.patch('/:id', requirePerm('routes.update'), audit('updated_route', 'route
 router.get('/groups', async (_req, res) => {
   res.json({ groups: await query('SELECT * FROM route_groups ORDER BY name') });
 });
+
+// ── OTP templates: literal paths FIRST (before /:id swallows them) ─────────
+const OTP_LIST_SQL = `
+  SELECT t.*,
+    (SELECT count(*) FROM messages m WHERE m.otp_template_id=t.id AND m.created_at >= now() - interval '7 days') AS usage_7d,
+    (SELECT count(*) FROM route_otp_clients m WHERE m.template_id=t.id) AS client_maps
+  FROM otp_templates t ORDER BY t.is_default DESC, t.created_at DESC
+`;
+
+router.get('/otp-templates', async (_req, res) => {
+  res.json({ templates: await query(OTP_LIST_SQL) });
+});
 router.post('/groups', requirePerm('routes.create'), audit('created_route_group', 'route_group'), async (req, res) => {
   const parsed = z.object({ name: z.string().min(1), description: z.string().optional() }).safeParse(req.body);
   if (!parsed.success) {
@@ -177,8 +189,8 @@ router.post('/groups', requirePerm('routes.create'), audit('created_route_group'
 // ── Single route detail: chain, usage, references ──────────────────────────
 // Powers the professional route drawer: who it serves, how much traffic it
 // carries, and what would break if it were deleted/disabled.
-// NOTE: registered AFTER /groups so the literal "groups" path isn't
-// swallowed by the :id param.
+// NOTE: registered AFTER /groups AND /otp-templates so those literal paths
+// aren't swallowed by the :id param (Express matches in registration order).
 router.get('/:id', async (req, res) => {
   const route = await queryOne<Record<string, unknown>>(
     `SELECT r.*, c.name AS country_name, cl.name AS client_name,
@@ -240,6 +252,10 @@ router.get('/:id', async (req, res) => {
 });
 
 // ── OTP Template Manager (India HSP route transformation) ──────────────────
+// NOTE: every /otp-templates + /:id/otp-clients route MUST be registered
+// BEFORE `/:id`-style routes below — Express matches in registration order,
+// and `/:id` would otherwise swallow the literal "otp-templates" segment
+// (GET /routes/otp-templates → route-not-found, empty list, silent POST fail).
 // Templates hold the vendor-approved SID + DLT text with an {OTP} placeholder.
 // Only status='active' rows are eligible at send time; the routing worker
 // resolves per-client mapping → route default.
@@ -251,16 +267,6 @@ const otpSchema = z.object({
   otp_placeholder: z.string().min(1).max(20).default('{OTP}'),
   status: z.enum(['active', 'inactive']).default('active'),
   is_default: z.boolean().default(false),
-});
-
-router.get('/otp-templates', async (_req, res) => {
-  const rows = await query(
-    `SELECT t.*,
-            (SELECT count(*) FROM messages m WHERE m.otp_template_id=t.id AND m.created_at >= now() - interval '7 days') AS usage_7d,
-            (SELECT count(*) FROM route_otp_clients m WHERE m.template_id=t.id) AS client_maps
-     FROM otp_templates t ORDER BY t.is_default DESC, t.created_at DESC`,
-  );
-  res.json({ templates: rows });
 });
 
 router.post('/otp-templates', requirePerm('routes.create'), audit('created_otp_template', 'otp_template'), async (req, res) => {
