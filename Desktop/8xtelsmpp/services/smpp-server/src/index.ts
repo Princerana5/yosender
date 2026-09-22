@@ -1,5 +1,5 @@
 import smpp from 'smpp';
-import { getPool, getRedis, QUEUES, type DlrEvent } from '@8xtel/core';
+import { getPool, getQueue, getRedis, QUEUES, type DlrEvent } from '@8xtel/core';
 import { handleSession, type SmppSession } from './session.js';
 
 // ── 8xtelSMPP SMPP server — downstream client binds (§5, Phase 2) ───────────
@@ -13,11 +13,29 @@ const HOST = process.env.SMPP_HOST ?? '0.0.0.0';
 // either port behave identically. Unset = single listener.
 const ALT_PORT = process.env.SMPP_ALT_PORT ? Number(process.env.SMPP_ALT_PORT) : null;
 
-// Live session registry for DLR delivery back to clients
-const sessions = new Map<string, SmppSession>(); // client_id → session
+// Live session registry for DLR delivery back to clients.
+// One entry PER bound session (a client usually holds several binds): DLRs
+// round-robin across them so a single socket never becomes the fan-out
+// bottleneck at high TPS. Transmitter-only binds are tracked but skipped
+// for DLRs — SMPP-wise they can't receive deliver_sm.
+interface BoundSession {
+  session: SmppSession;
+  bindType: string;
+}
+const sessions = new Map<string, BoundSession[]>(); // client_id → sessions
+const dlrCursor = new Map<string, number>(); // client_id → round-robin cursor
 
 export function getClientSession(clientId: string): SmppSession | undefined {
-  return sessions.get(clientId);
+  return pickDlrSession(clientId)?.session;
+}
+
+/** Round-robin pick of a DLR-capable (receiver/transceiver) session. */
+function pickDlrSession(clientId: string): BoundSession | undefined {
+  const list = (sessions.get(clientId) ?? []).filter((b) => b.bindType !== 'transmitter');
+  if (!list.length) return undefined;
+  const cursor = (dlrCursor.get(clientId) ?? 0) % list.length;
+  dlrCursor.set(clientId, cursor + 1);
+  return list[cursor];
 }
 
 function onConnection(session: SmppSession): void {
@@ -26,9 +44,19 @@ function onConnection(session: SmppSession): void {
     ((session as unknown as { socket?: { remoteAddress?: string } }).socket?.remoteAddress ?? 'unknown')
       .replace(/^::ffff:/, '');
   handleSession(session, remoteIp, {
-    onBind: (clientId, s) => sessions.set(clientId, s),
-    onClose: (clientId) => {
-      if (sessions.get(clientId) === session) sessions.delete(clientId);
+    onBind: (clientId, s, bindType) => {
+      const list = sessions.get(clientId) ?? [];
+      list.push({ session: s, bindType });
+      sessions.set(clientId, list);
+    },
+    onClose: (clientId, s) => {
+      const list = sessions.get(clientId) ?? [];
+      const rest = list.filter((b) => b.session !== s);
+      if (rest.length) sessions.set(clientId, rest);
+      else {
+        sessions.delete(clientId);
+        dlrCursor.delete(clientId);
+      }
     },
   });
 }
@@ -52,29 +80,76 @@ if (ALT_PORT && ALT_PORT !== PORT) {
   });
 }
 
-// ── Client DLR fan-out (§17): deliver_sm over the bound session ─────────────
+// ── Client DLR fan-out (§17): deliver_sm over the bound sessions ────────────
+// Round-robins across the client's receiver/transceiver binds, and serializes
+// writes per client: one slow-reading client socket can't interleave-garble
+// receipts or stall another client's DLRs behind its backpressure.
+const dlrChains = new Map<string, Promise<void>>();
+
+function sendClientDlr(
+  dlr: DlrEvent & { client_id: string; source: string; destination: string },
+): Promise<void> {
+  const prev = dlrChains.get(dlr.client_id) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(async () => {
+      const bound = pickDlrSession(dlr.client_id);
+      if (!bound) {
+        console.warn(`[smpp] no bound session for client ${dlr.client_id}, DLR ${dlr.internal_id} deferred`);
+        throw new Error('client not bound'); // retry with backoff (§37)
+      }
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('client deliver_sm timeout')), 10_000);
+        if (typeof timer.unref === 'function') timer.unref();
+        try {
+          bound.session.deliver_sm(
+            {
+              source_addr: dlr.destination,
+              destination_addr: dlr.source,
+              short_message:
+                `id:${dlr.internal_id} sub:001 dlvrd:001 submit date:${dateFmt()} done date:${dateFmt()} stat:${statusToken(dlr.status)} err:${dlr.error_code ?? '000'} text:`,
+              esm_class: 4, // delivery receipt
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (resp: any) => {
+              clearTimeout(timer);
+              if (resp && typeof resp.command_status === 'number' && resp.command_status !== 0) {
+                reject(new Error(`client deliver_sm_resp status=${resp.command_status}`));
+              } else {
+                resolve();
+              }
+            },
+          );
+        } catch (e) {
+          clearTimeout(timer);
+          reject(e);
+        }
+      });
+    });
+  dlrChains.set(dlr.client_id, next.catch(() => undefined));
+  // Bound the map: drop settled chains for clients with no live sessions.
+  if (dlrChains.size > 10_000 && !sessions.has(dlr.client_id)) dlrChains.delete(dlr.client_id);
+  return next;
+}
+
 async function startClientDlrConsumer(): Promise<void> {
   const { Worker } = await import('bullmq');
   const redis = getRedis();
   new Worker(
     QUEUES.clientDlr,
     async (job) => {
-      const dlr = job.data as DlrEvent & { client_id: string; source: string; destination: string };
-      const session = sessions.get(dlr.client_id);
-      if (!session) {
-        console.warn(`[smpp] no bound session for client ${dlr.client_id}, DLR ${dlr.internal_id} deferred`);
-        throw new Error('client not bound'); // retry with backoff (§37)
+      // Migration shim: jobs enqueued before the queue split share this
+      // queue. Forward HTTP callbacks to their new queue instead of
+      // mishandling them as SMPP receipts.
+      if (job.name === 'http-callback') {
+        await getQueue(QUEUES.clientDlrHttp).add('http-callback', job.data);
+        return;
       }
-      session.deliver_sm({
-        source_addr: dlr.destination,
-        destination_addr: dlr.source,
-        short_message:
-          `id:${dlr.internal_id} sub:001 dlvrd:001 submit date:${dateFmt()} done date:${dateFmt()} stat:${statusToken(dlr.status)} err:${dlr.error_code ?? '000'} text:`,
-        esm_class: 4, // delivery receipt
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
+      // This queue carries SMPP receipts only (dlr-worker owns the HTTP one).
+      await sendClientDlr(job.data as DlrEvent & { client_id: string; source: string; destination: string });
     },
-    { connection: redis, concurrency: 20 },
+    { connection: redis, concurrency: 50, lockDuration: 60_000 },
   );
   console.log('[8xtelSMPP smpp-server] client-DLR consumer started');
 }

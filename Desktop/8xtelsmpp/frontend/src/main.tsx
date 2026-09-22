@@ -14,6 +14,7 @@ import Billing from './pages/Billing.js';
 import { TablePage, Connections, Reports, SendersPage } from './pages/Generic.js';
 import UsersPage from './pages/Users.js';
 import Traffic from './pages/Traffic.js';
+import ClientReports from './pages/ClientReports.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
 import ClientApi from './pages/ClientApi.js';
@@ -23,7 +24,7 @@ import { token } from './api.js';
 
 initTheme(); // saved light/dark before first paint — no theme flash
 import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
-import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage } from './portal-pages.js';
+import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage, PortalApiPage } from './portal-pages.js';
 
 function Guard({ children }: { children: JSX.Element }): JSX.Element {
   return token() ? children : <Navigate to="/login" replace />;
@@ -122,6 +123,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             }
           />
           <Route path="reports" element={<Reports />} />
+          <Route path="client-reports" element={<ClientReports />} />
           <Route
             path="senders"
             element={
@@ -196,6 +198,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="history" element={<PortalHistory />} />
           <Route path="reports" element={<PortalReports />} />
           <Route path="reports/:id" element={<PortalReportDetail />} />
+          <Route path="api" element={<PortalApiPage />} />
           <Route path="wallet" element={<PortalWallet />} />
         </Route>
       </Routes>

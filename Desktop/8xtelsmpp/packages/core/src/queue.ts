@@ -23,7 +23,11 @@ export const QUEUES = {
   vendorSend: 'sms-vendor-send',
   dlr: 'sms-dlr',
   billing: 'sms-billing',
-  clientDlr: 'sms-client-dlr',
+  // Split fan-out: SMPP receipts must reach smpp-server (it owns the live
+  // client sockets) and HTTP callbacks must reach dlr-worker. Sharing one
+  // queue let each consumer steal — and silently drop — the other's jobs.
+  clientDlr: 'sms-client-dlr', // SMPP deliver_sm → smpp-server ONLY
+  clientDlrHttp: 'sms-client-dlr-http', // HTTP callbacks → dlr-worker ONLY
 } as const;
 
 export type QueueName = (typeof QUEUES)[keyof typeof QUEUES];
@@ -51,10 +55,21 @@ export function createWorker<T>(
   name: QueueName,
   processor: (job: { data: T; attemptsMade: number; name: string }) => Promise<void>,
   concurrency = 10,
+  opts: { lockDuration?: number; stalledInterval?: number; maxStalledCount?: number } = {},
 ): Worker {
   return new Worker(name, async (job) => processor(job as never), {
     connection: getRedis(),
     concurrency,
+    // Jobs that stall past the lock (slow vendor RTT under load) get re-run
+    // as duplicates — 60s headroom keeps high-TPS bursts idempotent-safe.
+    lockDuration: opts.lockDuration ?? 60_000,
+    // Stalled-job guard: BullMQ's stalled-check reclaims a job whose worker
+    // died WITHOUT completing it. Default maxStalledCount=1 + attempts=0 on
+    // requeued jobs = killed on the FIRST stall with no retry, leaving the
+    // message `submitted` forever (seen live Sept 2026: 8k stuck rows, zero
+    // worker errors). Generous settings: only truly dead jobs are reaped.
+    stalledInterval: opts.stalledInterval ?? 60_000,
+    maxStalledCount: opts.maxStalledCount ?? 3,
   });
 }
 

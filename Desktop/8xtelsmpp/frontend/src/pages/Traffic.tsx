@@ -29,7 +29,7 @@ export default function Traffic(): JSX.Element {
   const [clients, setClients] = useState<Opt[]>([]);
   const [vendors, setVendors] = useState<Opt[]>([]);
   const [countries, setCountries] = useState<Opt[]>([]);
-  const [f, setF] = useState({ client_id: '', country_id: '', vendor_id: '', minutes: '15' });
+  const [f, setF] = useState({ client_id: '', country_id: '', vendor_id: '', window: '15' });
   const [paused, setPaused] = useState(false);
   const [showContent, setShowContent] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -44,7 +44,10 @@ export default function Traffic(): JSX.Element {
     let dead = false;
     const load = (): void => {
       if (paused) return;
-      const p = new URLSearchParams({ minutes: f.minutes });
+      // Window value is either rolling minutes ("15") or "yesterday".
+      const p = f.window === 'yesterday'
+        ? new URLSearchParams({ day: 'yesterday' })
+        : new URLSearchParams({ minutes: f.window });
       if (f.client_id) p.set('client_id', f.client_id);
       if (f.country_id) p.set('country_id', f.country_id);
       if (f.vendor_id) p.set('vendor_id', f.vendor_id);
@@ -123,10 +126,16 @@ export default function Traffic(): JSX.Element {
             {vendors.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
         </div>
-        <div className="w-32">
+        <div className="w-40">
           <label className="label">Window</label>
-          <select className="input" value={f.minutes} onChange={(e) => setF({ ...f, minutes: e.target.value })}>
-            {['5', '15', '60', '240'].map((m) => <option key={m} value={m}>Last {m}m</option>)}
+          <select className="input" value={f.window} onChange={(e) => setF({ ...f, window: e.target.value })}>
+            <option value="5">Last 5m</option>
+            <option value="15">Last 15m</option>
+            <option value="60">Last 60m</option>
+            <option value="240">Last 240m</option>
+            <option value="1440">Last 24 hours</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="10080">Last 7 days</option>
           </select>
         </div>
         {(f.client_id || f.country_id || f.vendor_id) && (

@@ -54,7 +54,13 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
       { to: '/rates', label: 'Rates', icon: 'tag' },
     ],
   },
-  { name: 'Reports', items: [{ to: '/reports', label: 'Reports', icon: 'chart' }] },
+  {
+    name: 'Reports',
+    items: [
+      { to: '/reports', label: 'Reports', icon: 'chart' },
+      { to: '/client-reports', label: 'Client Reports', icon: 'users' },
+    ],
+  },
   { name: 'Help', items: [{ to: '/docs', label: 'Documentation', icon: 'globe' }] },
   {
     name: 'System',

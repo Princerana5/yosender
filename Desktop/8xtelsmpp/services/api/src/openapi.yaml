@@ -61,6 +61,14 @@ paths:
     get: { summary: Hourly traffic, responses: { '200': { description: ok } } }
   /reports/financial:
     get: { summary: Revenue/cost/profit, responses: { '200': { description: ok } } }
+  /reports/client/{id}/summary:
+    get: { summary: Per-client traffic + credit summary for a date range, responses: { '200': { description: ok } } }
+  /reports/client/{id}/daily:
+    get: { summary: Per-client date-wise traffic + credit usage, responses: { '200': { description: ok } } }
+  /reports/client/{id}/messages:
+    get: { summary: Per-client detailed traffic records, responses: { '200': { description: ok } } }
+  /reports/client/{id}/export:
+    get: { summary: Per-client traffic export (csv|xls), responses: { '200': { description: ok } } }
   /system/health:
     get: { summary: Health, responses: { '200': { description: ok } } }
   /connectors:
@@ -80,7 +88,23 @@ paths:
     post: { summary: Request a top-up, responses: { '201': { description: created } } }
   /portal/sender-requests:
     post: { summary: Request a sender ID, responses: { '201': { description: created } } }
+  /portal/api-keys:
+    get: { summary: Own API keys (portal token), responses: { '200': { description: ok } } }
+    post: { summary: Create own API key, plaintext shown once, responses: { '201': { description: created } } }
+  /portal/api-keys/{keyId}:
+    patch: { summary: Enable/disable own API key, responses: { '200': { description: ok } } }
+    delete: { summary: Revoke own API key, responses: { '200': { description: ok } } }
   /billing/topup-requests:
     get: { summary: All top-up requests (admin), responses: { '200': { description: ok } } }
   /system/sender-requests:
     get: { summary: All sender requests (admin), responses: { '200': { description: ok } } }
+  /client/v1/send:
+    post: { summary: Client send SMS (API key), responses: { '202': { description: accepted } } }
+  /client/v1/send-bulk:
+    post: { summary: Client bulk send, up to 5000 (API key), responses: { '202': { description: accepted } } }
+  /client/v1/status/{id}:
+    get: { summary: Client message status (API key), responses: { '200': { description: ok } } }
+  /client/v1/balance:
+    get: { summary: Client wallet (API key), responses: { '200': { description: ok } } }
+  /client/v1/docs:
+    get: { summary: Self-serve client docs, json or ?format=markdown (API key), responses: { '200': { description: ok } } }

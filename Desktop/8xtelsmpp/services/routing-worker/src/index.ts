@@ -11,10 +11,49 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   const msg = job.data;
   const pool = getPool();
 
-  // Per-client TPS guard (§18) — delay + retry, never drop. This is what paces
-  // bulk campaigns: 100k numbers queue instantly, drain at the client's rate.
-  // Uses tryAcquireTps (non-filling): denied attempts leave no window entry,
-  // so hundreds of retrying jobs can't saturate the window into deadlock.
+  // Balance pre-check FIRST: a client with no funds must never see their
+  // message sit `submitted` — reject immediately with a clear reason, before
+  // any TPS pacing or queue delay. Binds are checked once at bind time
+  // (smpp-server/auth.ts); this covers the balance running dry mid-session.
+  const gateRow = await pool.query(
+    `SELECT c.status, c.balance, c.credit_limit,
+            COALESCE(c.billing_mode,'prepay') AS billing_mode,
+            COALESCE(w.sms_credits,0) AS sms_credits
+     FROM clients c LEFT JOIN wallets w ON w.client_id=c.id WHERE c.id=$1`,
+    [msg.client_id],
+  );
+  const gate = gateRow.rows[0] as {
+    status: string; balance: string; credit_limit: string;
+    billing_mode: string; sms_credits: string;
+  } | undefined;
+  if (!gate || gate.status !== 'active') {
+    await pool.query(`UPDATE messages SET status='rejected', error_description=$1 WHERE id=$2`, [
+      !gate ? 'unknown client' : `account ${gate.status}`, msg.internal_id,
+    ]);
+    await recordEvent(msg.internal_id, null, 'failed', `balance gate: ${!gate ? 'unknown client' : gate.status}`);
+    await incrStat('rejected');
+    return;
+  }
+  if (gate.billing_mode === 'credit') {
+    if (Number(gate.sms_credits) < 1) {
+      await pool.query(
+        `UPDATE messages SET status='rejected', error_description='insufficient SMS credits — please top up' WHERE id=$1`,
+        [msg.internal_id],
+      );
+      await recordEvent(msg.internal_id, null, 'failed', 'balance gate: no SMS credits');
+      await incrStat('rejected');
+      return;
+    }
+  } else if (Number(gate.balance) + (gate.billing_mode === 'postpay' ? Number(gate.credit_limit) : 0) <= 0) {
+    await pool.query(
+      `UPDATE messages SET status='rejected', error_description='insufficient balance — please top up' WHERE id=$1`,
+      [msg.internal_id],
+    );
+    await recordEvent(msg.internal_id, null, 'failed', 'balance gate: insufficient balance');
+    await incrStat('rejected');
+    return;
+  }
+
   const clientRow = await pool.query(
     'SELECT tps_limit FROM clients WHERE id=$1', [msg.client_id],
   );
@@ -158,44 +197,42 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     );
     if ((wmode.rows[0]?.billing_mode ?? 'prepay') === 'credit') {
       reserveCredits = segments;
-      const db = await pool.connect();
-      try {
-        await db.query('BEGIN');
-        const w = await db.query(
-          'SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE', [msg.client_id],
-        );
-        if (!w.rowCount) {
-          await db.query('ROLLBACK');
-          await pool.query(`UPDATE messages SET status='failed', error_description='no wallet', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
-          await recordEvent(msg.internal_id, null, 'failed', 'no wallet for credit reservation');
-          await incrStat('failed');
-          return;
-        }
-        const have = Number(w.rows[0].sms_credits ?? 0);
-        if (have < reserveCredits) {
-          await db.query('ROLLBACK');
-          await pool.query(`UPDATE messages SET status='rejected', error_description='insufficient SMS credits at routing', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
-          await recordEvent(msg.internal_id, null, 'failed', `credit reservation failed: need ${reserveCredits}, have ${have}`);
-          await incrStat('rejected');
-          return;
-        }
-        const after = +(have - reserveCredits).toFixed(2);
-        await db.query('UPDATE wallets SET sms_credits=$1, updated_at=now() WHERE client_id=$2', [after, msg.client_id]);
-        await db.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [after, msg.client_id]);
-        await db.query(
-          `INSERT INTO credit_transactions (client_id, message_id, type, amount, balance_after, description, remark)
-           VALUES ($1,$2,'burn',$3,$4,$5,$6)`,
-          [msg.client_id, msg.internal_id, -reserveCredits, after,
-           `SMS credit hold ${msg.internal_id.slice(0, 8)} (${segments} seg)`,
-           `Reserved at submit · ${segments} credit(s)`],
-        );
-        await db.query('COMMIT');
-      } catch (e) {
-        await db.query('ROLLBACK').catch(() => undefined);
-        throw e;
-      } finally {
-        db.release();
+      // Single-statement CTE — same pool-starvation rationale as money below.
+      const held = await pool.query(
+        `WITH w AS (
+           SELECT sms_credits FROM wallets WHERE client_id=$1 FOR UPDATE
+         ), upd AS (
+           UPDATE wallets
+           SET sms_credits = (SELECT sms_credits FROM w) - $2, updated_at=now()
+           WHERE client_id=$1 AND (SELECT sms_credits FROM w) >= $2
+           RETURNING sms_credits
+         )
+         SELECT (SELECT sms_credits FROM upd) AS after,
+                (SELECT sms_credits FROM w) AS before`,
+        [msg.client_id, reserveCredits],
+      );
+      const cr = held.rows[0] as { after: string | null; before: string | null };
+      if (cr.before === null) {
+        await pool.query(`UPDATE messages SET status='failed', error_description='no wallet', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
+        await recordEvent(msg.internal_id, null, 'failed', 'no wallet for credit reservation');
+        await incrStat('failed');
+        return;
       }
+      if (cr.after === null) {
+        await pool.query(`UPDATE messages SET status='rejected', error_description='insufficient SMS credits — please top up', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
+        await recordEvent(msg.internal_id, null, 'failed', `credit reservation failed: need ${reserveCredits}, have ${cr.before}`);
+        await incrStat('rejected');
+        return;
+      }
+      const afterNum = +Number(cr.after).toFixed(2);
+      await pool.query('UPDATE clients SET sms_credits=$1 WHERE id=$2', [afterNum, msg.client_id]);
+      await pool.query(
+        `INSERT INTO credit_transactions (client_id, message_id, type, amount, balance_after, description, remark)
+         VALUES ($1,$2,'burn',$3,$4,$5,$6)`,
+        [msg.client_id, msg.internal_id, -reserveCredits, afterNum,
+         `SMS credit hold ${msg.internal_id.slice(0, 8)} (${segments} seg)`,
+         `Reserved at submit · ${segments} credit(s)`],
+      );
     }
   }
 
@@ -203,47 +240,48 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   // Atomic: only proceed if wallet covers the hold (prepay floor 0,
   // postpay floor -credit_limit). Concurrent submits serialize on the row lock.
   // Skipped for credit-mode clients (credits held above instead).
+  // Single-statement CTE: no pool.connect() checkout, so 20-way concurrency
+  // can never pool-starve (PG_POOL_MAX=5 + pool.connect() = 15 jobs hanging
+  // forever holding the BullMQ lock — the Sept 2026 8k-stuck incident).
   if (reserveAmount > 0 && reserveCredits === 0) {
-    const db = await pool.connect();
-    try {
-      await db.query('BEGIN');
-      const w = await db.query(
-        'SELECT balance, credit_limit, billing_mode, currency FROM wallets WHERE client_id=$1 FOR UPDATE',
-        [msg.client_id],
-      );
-      if (!w.rowCount) {
-        await db.query('ROLLBACK');
-        await pool.query(`UPDATE messages SET status='failed', error_description='no wallet', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
-        await recordEvent(msg.internal_id, null, 'failed', 'no wallet for reservation');
-        await incrStat('failed');
-        return;
-      }
-      const wallet = w.rows[0] as { balance: string; credit_limit: string; billing_mode: string; currency: string };
-      const after = Number(wallet.balance) - reserveAmount;
-      const floor = wallet.billing_mode === 'postpay' ? -Number(wallet.credit_limit) : 0;
-      if (after < floor) {
-        await db.query('ROLLBACK');
-        await pool.query(`UPDATE messages SET status='rejected', error_description='insufficient balance at routing', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
-        await recordEvent(msg.internal_id, null, 'failed', `reservation failed: need ${reserveAmount}, floor ${floor}`);
-        await incrStat('rejected');
-        return;
-      }
-      await db.query('UPDATE wallets SET balance=$1, updated_at=now() WHERE client_id=$2', [after, msg.client_id]);
-      await db.query('UPDATE clients SET balance=$1 WHERE id=$2', [after, msg.client_id]);
-      await db.query(
-        `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description, remark, currency)
-         VALUES ($1,$2,'debit',$3,$4,$5,$6,$7)`,
-        [msg.client_id, msg.internal_id, -reserveAmount, after,
-         `SMS hold ${msg.internal_id.slice(0, 8)} (${priceSource})`,
-         `Reserved at submit · ${priceSource}`, wallet.currency],
-      );
-      await db.query('COMMIT');
-    } catch (e) {
-      await db.query('ROLLBACK').catch(() => undefined);
-      throw e;
-    } finally {
-      db.release();
+    const held = await pool.query(
+      `WITH w AS (
+         SELECT balance, credit_limit, billing_mode, currency FROM wallets
+         WHERE client_id=$1 FOR UPDATE
+       ), upd AS (
+         UPDATE wallets
+         SET balance = (SELECT balance FROM w) - $2, updated_at=now()
+         WHERE client_id=$1
+           AND (SELECT balance FROM w) - $2 >=
+               CASE WHEN (SELECT billing_mode FROM w)='postpay'
+                    THEN -(SELECT credit_limit FROM w) ELSE 0 END
+         RETURNING balance
+       )
+       SELECT (SELECT balance FROM upd) AS after,
+              (SELECT balance FROM w) AS before,
+              (SELECT currency FROM w) AS currency,
+              (SELECT billing_mode FROM w) AS billing_mode,
+              (SELECT credit_limit FROM w) AS credit_limit`,
+      [msg.client_id, reserveAmount],
+    );
+    const r = held.rows[0] as {
+      after: string | null; before: string; currency: string;
+      billing_mode: string; credit_limit: string;
+    };
+    if (r.after === null) {
+      await pool.query(`UPDATE messages SET status='rejected', error_description='insufficient balance — please top up', country_id=$1 WHERE id=$2`, [countryId, msg.internal_id]);
+      await recordEvent(msg.internal_id, null, 'failed', `reservation failed: need ${reserveAmount}, have ${r.before}`);
+      await incrStat('rejected');
+      return;
     }
+    await pool.query('UPDATE clients SET balance=$1 WHERE id=$2', [r.after, msg.client_id]);
+    await pool.query(
+      `INSERT INTO transactions (client_id, message_id, type, amount, balance_after, description, remark, currency)
+       VALUES ($1,$2,'debit',$3,$4,$5,$6,$7)`,
+      [msg.client_id, msg.internal_id, -reserveAmount, r.after,
+       `SMS hold ${msg.internal_id.slice(0, 8)} (${priceSource})`,
+       `Reserved at submit · ${priceSource}`, r.currency],
+    );
   }
 
   await pool.query(

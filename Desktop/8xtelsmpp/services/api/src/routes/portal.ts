@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { randomUUID } from 'node:crypto';
+import crypto, { randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { parse as parseCsv } from 'csv-parse/sync';
 import {
@@ -714,6 +714,115 @@ router.get('/senders', async (req, res) => {
     [cid(req)],
   );
   res.json({ senders: approved, requests });
+});
+
+// ── Connect via API: self-serve keys for /client/v1/* ───────────────────────
+// Same table the admin console manages (client_api_keys). Plaintext shown
+// ONCE at creation; only sha256 stored. Scoped to own client_id.
+router.get('/api-keys', async (req, res) => {
+  const rows = await query(
+    `SELECT id, key_prefix, label, is_active, last_used_at, created_at
+     FROM client_api_keys WHERE client_id=$1 ORDER BY created_at DESC`,
+    [cid(req)],
+  );
+  res.json({ keys: rows });
+});
+
+router.post('/api-keys', async (req, res) => {
+  const parsed = z.object({ label: z.string().max(100).optional() }).safeParse(req.body ?? {});
+  const label = parsed.success ? (parsed.data.label ?? null) : null;
+  const plain = `x8_${crypto.randomBytes(24).toString('base64url')}`;
+  const keyHash = crypto.createHash('sha256').update(plain).digest('hex');
+  const { rows } = await getPool().query(
+    `INSERT INTO client_api_keys (client_id, key_hash, key_prefix, label)
+     VALUES ($1,$2,$3,$4) RETURNING id, key_prefix, label, created_at`,
+    [cid(req), keyHash, plain.slice(0, 11), label],
+  );
+  res.status(201).json({ key: { ...rows[0], value: plain } });
+});
+
+router.patch('/api-keys/:keyId', async (req, res) => {
+  if (typeof req.body?.is_active !== 'boolean') {
+    res.status(400).json({ error: 'provide body.is_active boolean' });
+    return;
+  }
+  const rows = await query(
+    'UPDATE client_api_keys SET is_active=$1 WHERE id=$2 AND client_id=$3 RETURNING id, is_active',
+    [req.body.is_active, req.params.keyId, cid(req)],
+  );
+  if (!rows.length) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  res.json({ key: rows[0] });
+});
+
+// Markdown integration doc for the portal (portal token, no API key needed)
+router.get('/api-docs', async (_req, res) => {
+  const md = [
+    '# 8xtelSMPP Client HTTP API (v1)', '',
+    'Send SMS over HTTPS, check status, check balance, receive delivery callbacks.', '',
+    '## 1. Authentication', '',
+    'Create a key in the portal (API tab → + New key). Send it on every request:', '',
+    '```http', 'Authorization: Bearer <api_key>', '```', '',
+    'Alternative: `?api_key=<key>` as a query param. Keep keys secret — anyone with',
+    'a key can spend your balance. Disable / revoke unused keys in the portal.', '',
+    '## 2. Base URL', '',
+    '```', '{PANEL}/api/client/v1', '```', '',
+    'Replace `{PANEL}` with your panel origin (shown in the portal samples).', '',
+    '## 3. Send one SMS', '',
+    '```http', 'POST /client/v1/send', 'Content-Type: application/json', 'Authorization: Bearer <api_key>', '',
+    '{', '  "from": "SENDER",', '  "to": "919876543210",', '  "text": "Hello via API",', '  "dlr_url": "https://you.com/dlr (optional, stored as your default)"', '}', '```', '',
+    'Success `202`:', '',
+    '```json', '{ "id": "<message-id>", "client_msg_id": "h-xxxxxxxx", "to": "919876543210", "status": "submitted" }', '```', '',
+    'Save `id` — you need it for status checks and it arrives back in callbacks.', '',
+    '## 4. Send bulk (up to 5000 per request)', '',
+    '```http', 'POST /client/v1/send-bulk', 'Content-Type: application/json', 'Authorization: Bearer <api_key>', '',
+    '{', '  "from": "SENDER",', '  "to": ["919876543210", "918888888888"],', '  "text": "Hello"', '}', '```', '',
+    '`to` also accepts a comma/space/newline separated string. Success `202`:', '',
+    '```json', '{ "accepted": 2, "invalid": [], "messages": [{ "to": "919876543210", "id": "<message-id>" }] }', '```', '',
+    '## 5. Delivery status', '',
+    '```http', 'GET /client/v1/status/:id', 'Authorization: Bearer <api_key>', '```', '',
+    '```json', '{ "message": { "id": "...", "source": "SENDER", "destination": "919876543210", "status": "delivered", "error_code": null, "submit_time": "...", "dlr_time": "..." } }', '```', '',
+    'Statuses: `submitted` → `delivered` / `undelivered` / `expired` / `rejected` / `failed`.',
+    'Poll this endpoint, or (better) use callbacks below for push updates.', '',
+    '## 6. Balance', '',
+    '```http', 'GET /client/v1/balance', 'Authorization: Bearer <api_key>', '```', '',
+    '```json', '{ "balance": "12.50", "credit_limit": "0", "currency": "EUR" }', '```', '',
+    '## 7. Delivery callbacks (DLR push to you)', '',
+    'Pass `dlr_url` on any send (or ask support to set a default). We POST JSON to',
+    'that URL on EVERY status change until a final state:', '',
+    '```json', '{ "message_id": "<id from send>", "vendor_msg_id": "<upstream id or null>", "status": "delivered", "ts": "2026-01-01T00:00:00.000Z" }', '```', '',
+    '- Method: `POST`, body: JSON, `Content-Type: application/json`.',
+    '- Your endpoint must answer HTTP `2xx` within ~10s. Anything else → we retry with backoff.',
+    '- Match on `message_id` (our id returned by /send). `status` is one of the values in §5.',
+    '- Tip: reply `200` immediately, then process async — avoids duplicate retries.',
+    '- PHP receiver example:', '',
+    '```php', '<?php', '$dlr = json_decode(file_get_contents("php://input"), true);',
+    '// $dlr["message_id"], $dlr["status"], $dlr["ts"] → update your DB', 'http_response_code(200);', '```', '',
+    '## 8. Errors', '',
+    '| Code | Meaning |',
+    '|------|---------|',
+    '| 400 | invalid payload / no valid destinations |',
+    '| 401 | missing or bad api key |',
+    '| 422 | account not active, insufficient balance, sender id blocked |',
+    '| 429 | over your TPS limit — wait a second and retry |',
+    '',
+    'Guards mirror portal sends: active account, balance/credit, TPS, blocked sender ids.',
+    'Accepted messages flow through the same pipeline (routing → vendor → DLR → billing).',
+  ].join('\n');
+  res.type('text/markdown').send(md);
+});
+
+router.delete('/api-keys/:keyId', async (req, res) => {
+  const r = await getPool().query(
+    'DELETE FROM client_api_keys WHERE id=$1 AND client_id=$2', [req.params.keyId, cid(req)],
+  );
+  if (!r.rowCount) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  res.json({ ok: true });
 });
 
 router.post('/sender-requests', async (req, res) => {

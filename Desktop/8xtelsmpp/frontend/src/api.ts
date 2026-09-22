@@ -26,13 +26,15 @@ export async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// EUR-only billing: every money value renders with €. Unknown/missing codes
+// fall back to € (never $) — the backend only stores EUR since migration 021.
 export const CUR_SYM: Record<string, string> = { EUR: '€' };
 
 export const fmtMoney = (
   n: number | string | null | undefined,
   currency = 'EUR',
   decimals = 2,
-): string => `${CUR_SYM[currency] ?? '$'}${Number(n ?? 0).toFixed(decimals)}`;
+): string => `€${Number(n ?? 0).toFixed(decimals)}`;
 
 export const statusColor = (s: string): string => {
   switch (s) {

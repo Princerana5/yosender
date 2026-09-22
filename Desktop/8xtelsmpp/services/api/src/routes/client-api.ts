@@ -215,6 +215,39 @@ router.get('/status/:id', async (req, res) => {
   res.json({ message: msg });
 });
 
+// ── Self-serve docs (§33): clients fetch integration docs with their own
+// API key — no panel login needed. Returns endpoints + curl samples so a
+// client can integrate from one call. Format: ?format=json (default) | markdown.
+router.get('/docs', async (req, res) => {
+  const format = String((req.query as Record<string, string>).format ?? 'json').toLowerCase();
+  const docs = {
+    version: 'v1',
+    auth: 'Authorization: Bearer <api_key>  (or ?api_key=<key>)',
+    base_url: '/client/v1',
+    endpoints: [
+      { method: 'POST', path: '/send', body: { from: 'SENDER', to: '919876543210', text: 'Hello', dlr_url: 'https://you.com/dlr (optional)' }, response: '202 { id, client_msg_id, to, status: "submitted" }' },
+      { method: 'POST', path: '/send-bulk', body: { from: 'SENDER', to: ['919876543210', '918888888888'], text: 'Hello' }, response: '202 { accepted, invalid, messages: [{ to, id }] } — up to 5000 per request' },
+      { method: 'GET', path: '/status/:id', response: '{ message: { id, source, destination, status, error_code, submit_time, dlr_time } }' },
+      { method: 'GET', path: '/balance', response: '{ balance, credit_limit, currency }' },
+      { method: 'GET', path: '/docs?format=markdown', response: 'this document as markdown' },
+    ],
+    statuses: 'submitted → delivered / undelivered / expired / rejected / failed',
+    errors: { 400: 'invalid payload', 401: 'bad api key', 422: 'account/balance/sender issue', 429: 'over TPS — retry in a second' },
+    curl: 'curl -X POST {base}/send -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d \'{"from":"SENDER","to":"919876543210","text":"Hello"}\'',
+  };
+  if (format === 'markdown' || format === 'md') {
+    const md = [
+      '# 8xtelSMPP Client API (v1)', '',
+      `Auth: \`${docs.auth}\``, '',
+      ...docs.endpoints.flatMap((e) => [`## ${e.method} ${docs.base_url}${e.path}`, '', '```json', JSON.stringify(e.body ?? e.response, null, 2), '```', '']),
+      `Statuses: ${docs.statuses}`,
+    ].join('\n');
+    res.type('text/markdown').send(md);
+    return;
+  }
+  res.json(docs);
+});
+
 router.get('/balance', async (req, res) => {
   const client = ac(req);
   res.json({

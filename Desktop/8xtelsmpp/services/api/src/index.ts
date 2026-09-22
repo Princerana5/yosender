@@ -53,6 +53,10 @@ app.use('/routes', requireAuth, routeRoutes);
 app.use('/messages', requireAuth, messageRoutes);
 app.use('/billing', requireAuth, billingRoutes);
 app.use('/reports', requireAuth, reportRoutes);
+// /system/health + /system/health/pipeline are public (counts only, no PII)
+// so the local watchdog/cron can poll without a JWT; everything else under
+// /system keeps requireAuth via the router's internal guard.
+app.use('/system/health', (await import('./routes/system-health.js')).default);
 app.use('/system', requireAuth, systemRoutes);
 
 // Channel connectors (§23)

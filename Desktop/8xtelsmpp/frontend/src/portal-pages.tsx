@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import { portalApi, API_BASE } from './portal';
+import { portalApi, API_BASE, portalToken } from './portal';
 import { PageHeader, DataTable, StatusBadge, Money, Modal, StatCard, Donut } from './components';
 
 // ── Portal: send SMS (single / bulk / file + segment meter) ───────────────────
@@ -1090,6 +1090,304 @@ export function PortalWallet(): JSX.Element {
             },
           ]}
         />
+      </div>
+    </div>
+  );
+}
+
+// ── Portal: connect via API (self-serve keys + samples) ──────────────────────
+interface PortalKey {
+  id: string; key_prefix: string; label: string | null;
+  is_active: boolean; last_used_at: string | null; created_at: string;
+}
+
+function portalSample(kind: 'curl' | 'php' | 'python' | 'js', key: string, base: string): string {
+  const url = `${base}/client/v1/send`;
+  if (kind === 'curl') {
+    return `curl -X POST ${url} \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"from":"SENDER","to":"919876543210","text":"Hello via API"}'`;
+  }
+  if (kind === 'php') {
+    return `<?php\n$ch = curl_init('${url}');\ncurl_setopt_array($ch, [\n  CURLOPT_POST => true,\n  CURLOPT_RETURNTRANSFER => true,\n  CURLOPT_HTTPHEADER => [\n    'Authorization: Bearer ${key}',\n    'Content-Type: application/json',\n  ],\n  CURLOPT_POSTFIELDS => json_encode([\n    'from' => 'SENDER',\n    'to' => '919876543210',\n    'text' => 'Hello via API',\n  ]),\n]);\n$res = curl_exec($ch);\necho $res;`;
+  }
+  if (kind === 'js') {
+    return `const res = await fetch('${url}', {\n  method: 'POST',\n  headers: {\n    'Authorization': 'Bearer ${key}',\n    'Content-Type': 'application/json',\n  },\n  body: JSON.stringify({\n    from: 'SENDER',\n    to: '919876543210',\n    text: 'Hello via API',\n  }),\n});\nconsole.log(res.status, await res.json());`;
+  }
+  return `import requests\n\nr = requests.post(\n    "${url}",\n    headers={"Authorization": "Bearer ${key}"},\n    json={"from": "SENDER", "to": "919876543210",\n          "text": "Hello via API"},\n    timeout=15,\n)\nprint(r.status_code, r.json())`;
+}
+
+export function PortalApiPage(): JSX.Element {
+  const [docTab, setDocTab] = useState<'send' | 'bulk' | 'status' | 'balance' | 'callback' | 'errors'>('send');
+  return (
+    <div className="space-y-5">
+      <PageHeader title="Connect via API" sub="Send SMS over HTTPS from your website or app" />
+      <div className="card card-pad">
+        <div className="card-title">⚙️ Setup in 3 steps</div>
+        <ol className="mt-2 space-y-2 text-sm leading-relaxed list-decimal list-inside">
+          <li><b>Create a key</b> below (label it e.g. “website”) and <b>copy it now</b> — it is shown once, then only a hash is stored.</li>
+          <li><b>Send your first SMS</b> — copy the cURL / PHP / Python / JS sample below, replace <span className="font-mono">SENDER</span> with your approved sender ID, and run it.</li>
+          <li><b>Track delivery</b> — use <span className="font-mono">GET /client/v1/status/:id</span> with the returned id, or pass <span className="font-mono">dlr_url</span> per request and we POST {'{message_id, status, ts}'} to you on every status change.</li>
+        </ol>
+        <div className="mt-2 text-[11px] text-muted">Base URL: <span className="font-mono">/client/v1</span> · Auth: <span className="font-mono">Authorization: Bearer &lt;key&gt;</span> (or <span className="font-mono">?api_key=</span>) · Bulk: up to 5000 per request · Balance & TPS guards apply exactly like portal sends.</div>
+      </div>
+      <PortalApiKeys />
+      {/* ── Full HTTP API reference (what the client asked for) ── */}
+      <div className="card card-pad space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="card-title">📖 HTTP API reference</div>
+            <div className="card-sub">Every endpoint, the callback format, and error codes — pick a tab</div>
+          </div>
+          <button className="btn-ghost !py-1.5 !text-xs" onClick={() => {
+            const token = localStorage.getItem('xtel_portal_token');
+            fetch(`${API_BASE}/portal/api-docs`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+              .then((r) => { if (!r.ok) throw new Error(); return r.blob(); })
+              .then((b) => {
+                const url = URL.createObjectURL(b);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'client-api-v1.md'; a.click();
+                URL.revokeObjectURL(url);
+              }).catch(() => undefined);
+          }}>⬇ Full doc (.md)</button>
+        </div>
+        <div className="flex gap-1.5 flex-wrap">
+          {([['send', 'Send SMS'], ['bulk', 'Bulk'], ['status', 'Status'], ['balance', 'Balance'], ['callback', 'Callback (DLR)'], ['errors', 'Errors']] as Array<[typeof docTab, string]>).map(([v, l]) => (
+            <button key={v} onClick={() => setDocTab(v)}
+              className={`btn-ghost !py-1 !px-2.5 !text-xs ${docTab === v ? '!border-brand/50 !text-emerald-300' : ''}`}>
+              {l}
+            </button>
+          ))}
+        </div>
+        {docTab === 'send' && (
+          <div className="space-y-2 text-sm">
+            <div><span className="font-mono text-emerald-300">POST /client/v1/send</span> — send one SMS</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`Content-Type: application/json
+Authorization: Bearer <API_KEY>
+
+{
+  "from": "SENDER",
+  "to": "919876543210",
+  "text": "Hello via API",
+  "dlr_url": "https://you.com/dlr (optional)"
+}`}</pre>
+            <div className="text-xs text-muted">Success <span className="font-mono">202</span>: <span className="font-mono">{'{ "id": "<message-id>", "client_msg_id": "h-…", "to": "…", "status": "submitted" }'}</span> — save <span className="font-mono">id</span>, it comes back in status + callbacks.</div>
+          </div>
+        )}
+        {docTab === 'bulk' && (
+          <div className="space-y-2 text-sm">
+            <div><span className="font-mono text-emerald-300">POST /client/v1/send-bulk</span> — up to 5000 numbers per request</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`{
+  "from": "SENDER",
+  "to": ["919876543210", "918888888888"],
+  "text": "Hello"
+}`}</pre>
+            <div className="text-xs text-muted"><span className="font-mono">to</span> also accepts a comma/space/newline string. Success <span className="font-mono">202</span>: <span className="font-mono">{'{ "accepted": 2, "invalid": [], "messages": [{ "to": "…", "id": "…" }] }'}</span></div>
+          </div>
+        )}
+        {docTab === 'status' && (
+          <div className="space-y-2 text-sm">
+            <div><span className="font-mono text-emerald-300">GET /client/v1/status/:id</span> — delivery status of one message</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`{ "message": {
+  "id": "...", "source": "SENDER", "destination": "919876543210",
+  "status": "delivered", "error_code": null,
+  "submit_time": "...", "dlr_time": "..."
+} }`}</pre>
+            <div className="text-xs text-muted">Statuses: <span className="font-mono">submitted → delivered / undelivered / expired / rejected / failed</span>. Poll this, or use callbacks for push updates.</div>
+          </div>
+        )}
+        {docTab === 'balance' && (
+          <div className="space-y-2 text-sm">
+            <div><span className="font-mono text-emerald-300">GET /client/v1/balance</span> — wallet</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`{ "balance": "12.50", "credit_limit": "0", "currency": "EUR" }`}</pre>
+          </div>
+        )}
+        {docTab === 'callback' && (
+          <div className="space-y-2 text-sm">
+            <div><span className="font-mono text-emerald-300">Delivery callback (DLR push to you)</span> — pass <span className="font-mono">dlr_url</span> on any send; we POST on <b>every</b> status change until final.</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`POST https://you.com/dlr
+Content-Type: application/json
+
+{
+  "message_id": "<id returned by /send>",
+  "vendor_msg_id": "<upstream id or null>",
+  "status": "delivered",
+  "ts": "2026-01-01T00:00:00.000Z"
+}`}</pre>
+            <ul className="text-xs text-muted space-y-1 list-disc list-inside">
+              <li>Your endpoint must answer HTTP <span className="font-mono">2xx</span> within ~10s — anything else → we retry with backoff.</li>
+              <li>Match on <span className="font-mono">message_id</span>. <span className="font-mono">status</span> is one of the Status-tab values.</li>
+              <li>Tip: reply <span className="font-mono">200</span> immediately, then process async — avoids duplicate retries.</li>
+            </ul>
+            <div className="text-xs font-semibold">PHP receiver example:</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`<?php
+$dlr = json_decode(file_get_contents('php://input'), true);
+// $dlr['message_id'], $dlr['status'], $dlr['ts'] → update your DB
+http_response_code(200);`}</pre>
+          </div>
+        )}
+        {docTab === 'errors' && (
+          <div className="space-y-2 text-sm">
+            <div className="text-xs text-muted">Guards mirror portal sends: active account, balance/credit, TPS, blocked sender ids. Accepted messages use the same pipeline (routing → vendor → DLR → billing).</div>
+            <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">{`400  invalid payload / no valid destinations
+401  missing or bad api key
+422  account not active · insufficient balance · sender id blocked
+429  over your TPS limit — wait a second and retry`}</pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PortalApiKeys(): JSX.Element {
+  const [keys, setKeys] = useState<PortalKey[]>([]);
+  const [label, setLabel] = useState('');
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [sample, setSample] = useState<'curl' | 'php' | 'python' | 'js'>('curl');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = (): void => {
+    portalApi<{ keys: PortalKey[] }>('/portal/api-keys').then((r) => setKeys(r.keys)).catch(() => undefined);
+  };
+  useEffect(load, []);
+
+  async function create(): Promise<void> {
+    setMsg('');
+    setBusy(true);
+    try {
+      const r = await portalApi<{ key: { value: string } }>('/portal/api-keys', {
+        method: 'POST',
+        body: JSON.stringify({ label: label || undefined }),
+      });
+      setFresh(r.key.value);
+      setLabel('');
+      load();
+    } catch (e) {
+      setMsg((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggle(k: PortalKey): Promise<void> {
+    try {
+      await portalApi(`/portal/api-keys/${k.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: !k.is_active }),
+      });
+      setKeys((ks) => ks.map((x) => (x.id === k.id ? { ...x, is_active: !x.is_active } : x)));
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  }
+
+  async function revoke(k: PortalKey): Promise<void> {
+    if (!window.confirm(`Revoke key ${k.key_prefix}…? Apps using it stop working immediately.`)) return;
+    try {
+      await portalApi(`/portal/api-keys/${k.id}`, { method: 'DELETE' });
+      setKeys((ks) => ks.filter((x) => x.id !== k.id));
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  }
+
+  function downloadDocs(): void {
+    fetch(`${API_BASE}/portal/api-docs`, {
+      headers: portalToken() ? { authorization: `Bearer ${portalToken()}` } : {},
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error('download failed');
+        return r.blob();
+      })
+      .then((b) => {
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'client-api-v1.md';
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(() => setMsg('Docs download failed — please retry.'));
+  }
+
+  const base = API_BASE || (typeof window !== 'undefined' ? `${window.location.origin}/api` : '/api');
+
+  return (
+    <div className="card card-pad space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <div className="card-title">🔌 Connect via API</div>
+          <div className="card-sub">Send SMS over HTTPS from your website or app · keys shown once</div>
+        </div>
+        <button className="btn-ghost !py-1.5 !text-xs" onClick={downloadDocs}>⬇ API docs (.md)</button>
+      </div>
+      <div className="flex gap-2 max-w-lg">
+        <input className="input" placeholder="Key label (e.g. website)" value={label}
+          onChange={(e) => setLabel(e.target.value)} maxLength={100} />
+        <button className="btn shrink-0" onClick={() => void create()} disabled={busy}>
+          {busy ? '…' : '+ New key'}
+        </button>
+      </div>
+      {msg && <div className="text-sm text-red-300">{msg}</div>}
+      {fresh && (
+        <div className="rounded-xl bg-emerald-500/10 border border-emerald-500/30 px-4 py-3">
+          <div className="text-sm text-emerald-300 font-semibold mb-1">New key — copy now, shown once:</div>
+          <div className="font-mono text-sm break-all select-all">{fresh}</div>
+          <button className="btn-ghost !py-1 !px-2.5 !text-xs mt-2" onClick={() => setFresh(null)}>Done</button>
+        </div>
+      )}
+      <DataTable
+        keyOf={(r) => r.id}
+        rows={keys}
+        empty="No API keys yet — create one above."
+        columns={[
+          { key: 'key_prefix', label: 'Key', mono: true, render: (r) => <span>{r.key_prefix}…</span> },
+          { key: 'label', label: 'Label', render: (r) => r.label ?? <span className="text-muted">—</span> },
+          {
+            key: 'is_active', label: 'Status',
+            render: (r) => (
+              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${r.is_active ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-500/15 text-gray-400'}`}>
+                {r.is_active ? 'active' : 'disabled'}
+              </span>
+            ),
+          },
+          {
+            key: 'last_used_at', label: 'Last used',
+            render: (r) => <span className="text-xs text-muted">{r.last_used_at ? new Date(r.last_used_at).toLocaleString() : 'never'}</span>,
+          },
+          {
+            key: 'actions', label: '',
+            render: (r) => (
+              <span className="flex gap-1 justify-end">
+                <button className="btn-ghost !py-1 !px-2 !text-xs" onClick={() => void toggle(r)}>
+                  {r.is_active ? 'Disable' : 'Enable'}
+                </button>
+                <button className="btn-ghost !py-1 !px-2 !text-xs text-red-300" onClick={() => void revoke(r)}>Revoke</button>
+              </span>
+            ),
+          },
+        ]}
+      />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold text-muted">Integration sample</div>
+          <div className="flex gap-1.5">
+            {(['curl', 'php', 'python', 'js'] as const).map((s) => (
+              <button key={s} onClick={() => setSample(s)}
+                className={`btn-ghost !py-1 !px-2.5 !text-xs ${sample === s ? '!border-brand/50 !text-emerald-300' : ''}`}>
+                {s === 'curl' ? 'cURL' : s === 'php' ? 'PHP' : s === 'python' ? 'Python' : 'JS'}
+              </button>
+            ))}
+          </div>
+        </div>
+        <pre className="text-xs font-mono bg-ink border border-line rounded-lg p-3 overflow-x-auto whitespace-pre">
+          {portalSample(sample, fresh ?? '<API_KEY>', base)}
+        </pre>
+        <div className="text-[11px] text-muted space-y-1">
+          <div><span className="font-mono">POST /client/v1/send</span> — single · <span className="font-mono">POST /client/v1/send-bulk</span> — up to 5000</div>
+          <div><span className="font-mono">GET /client/v1/status/:id</span> — delivery status · <span className="font-mono">GET /client/v1/balance</span> — wallet</div>
+          <div>DLRs: pass <span className="font-mono">dlr_url</span> per request — we POST {'{message_id, status, ts}'} on every status change.</div>
+        </div>
       </div>
     </div>
   );

@@ -80,6 +80,30 @@ function webhookBase(): string {
   return base.replace(/\/$/, '');
 }
 
+/** Fetch (or create) this vendor's DLR push token, so {dlr_url} always
+    resolves to a live webhook URL without operator copy-paste. The plaintext
+    token lives only here in worker memory (only the hash is stored) — cached
+    per vendor so every send reuses the same URL. */
+const dlrTokenCache = new Map<string, string>();
+async function vendorDlrToken(vendorId: string): Promise<string | null> {
+  const hit = dlrTokenCache.get(vendorId);
+  if (hit) return hit;
+  const pool = getPool();
+  const existing = await pool.query(
+    'SELECT 1 FROM vendor_dlr_tokens WHERE vendor_id=$1 LIMIT 1',
+    [vendorId],
+  ).catch(() => ({ rows: [] as unknown[] }));
+  if (existing.rows.length) return null; // operator-created token exists; they paste the URL into the template
+  const token = `vdlr_${crypto.randomBytes(24).toString('base64url')}`;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  await pool.query(
+    'INSERT INTO vendor_dlr_tokens (vendor_id, token_hash, label) VALUES ($1,$2,$3)',
+    [vendorId, tokenHash, 'auto:http-sender'],
+  ).catch(() => undefined);
+  dlrTokenCache.set(vendorId, token);
+  return token;
+}
+
 export class HttpVendorSender {
   /** Always "connected" when config exists — no persistent socket to track. */
   connected = true;
@@ -165,12 +189,17 @@ export class HttpVendorSender {
       [this.vendorId],
     );
     const multiSid = senderRows.length > 0;
+    // Auto-provision a push token so {dlr_url} resolves even when the
+    // caller passes none (vendor-worker passes null today). Fortis-style
+    // vendors then push DLRs in realtime instead of waiting for poll rounds.
+    let dlrToken = opts.dlr_token;
+    if (!dlrToken) dlrToken = await vendorDlrToken(this.vendorId);
     const vars: Record<string, string> = {
       to: opts.destination,
       from: applied.from,
       text: applied.text,
       msg_id: opts.internal_id,
-      dlr_url: opts.dlr_token ? `${webhookBase()}/vendor-dlr/${opts.dlr_token}` : '',
+      dlr_url: dlrToken ? `${webhookBase()}/vendor-dlr/${dlrToken}` : '',
     };
     // GET vendors (e.g. SamparkHub V2) take params in the URL — encode values
     // like their PHP doc's urlencode($message). POST vendors keep raw values

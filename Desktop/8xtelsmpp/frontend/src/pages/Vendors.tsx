@@ -393,7 +393,7 @@ function HttpConfigEditor({ vendorId }: { vendorId: string }): JSX.Element {
   const [cfg, setCfg] = useState({
     url_template: '', method: 'POST', body_template: '',
     headers: '', msgid_json_path: '', timeout_ms: '10000',
-    dlr_poll_url_template: '', dlr_poll_interval_sec: '30',
+    dlr_poll_url_template: '', dlr_poll_interval_sec: '5',
   });
   const [hasHeaders, setHasHeaders] = useState(false);
   const [tokens, setTokens] = useState<Array<{ id: string; label: string | null; created_at: string }>>([]);
@@ -414,7 +414,7 @@ function HttpConfigEditor({ vendorId }: { vendorId: string }): JSX.Element {
           msgid_json_path: String(h.msgid_json_path ?? ''),
           timeout_ms: String(h.timeout_ms ?? '10000'),
           dlr_poll_url_template: String(h.dlr_poll_url_template ?? ''),
-          dlr_poll_interval_sec: String(h.dlr_poll_interval_sec ?? '30'),
+          dlr_poll_interval_sec: String(h.dlr_poll_interval_sec ?? '5'),
         });
         setHasHeaders(Boolean(h.has_headers));
       })
@@ -453,7 +453,7 @@ function HttpConfigEditor({ vendorId }: { vendorId: string }): JSX.Element {
           msgid_json_path: cfg.msgid_json_path || null,
           timeout_ms: Math.min(60000, Math.max(1000, Number(cfg.timeout_ms) || 10000)),
           dlr_poll_url_template: cfg.dlr_poll_url_template.trim() || null,
-          dlr_poll_interval_sec: Math.min(600, Math.max(10, Number(cfg.dlr_poll_interval_sec) || 30)),
+          dlr_poll_interval_sec: Math.min(600, Math.max(5, Number(cfg.dlr_poll_interval_sec) || 5)),
         }),
       });
       setCfg({ ...cfg, headers: '' });

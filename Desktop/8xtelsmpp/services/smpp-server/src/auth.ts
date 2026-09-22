@@ -21,12 +21,22 @@ export async function authenticateBind(
   remoteIp: string,
   bindType: string,
 ): Promise<{ ok: true; principal: BindPrincipal } | { ok: false; reason: string }> {
-  const client = await queryOne<{
+  // Case-insensitive: client UIs capitalize system_ids unpredictably
+    // (Snakesms vs snakesms). Exact match first, then case-insensitive.
+  let client = await queryOne<{
     id: string; system_id: string; password_hash: string; status: string;
     balance: string; credit_limit: string; tps_limit: number; is_house: boolean;
   }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house FROM clients WHERE system_id=$1', [
     systemId,
   ]);
+  if (!client) {
+    client = await queryOne<{
+      id: string; system_id: string; password_hash: string; status: string;
+      balance: string; credit_limit: string; tps_limit: number; is_house: boolean;
+    }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house FROM clients WHERE lower(system_id)=lower($1)', [
+      systemId,
+    ]);
+  }
 
   const log = (result: string, reason: string, clientId?: string): void => {
     void getPool().query(

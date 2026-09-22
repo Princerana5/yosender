@@ -54,8 +54,10 @@ function timeAgo(iso: string | null): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-function curSym(_c: string): string {
-  return '€'; // EUR-only billing
+// EUR-only billing: always € (param kept for call-site compat).
+function curSym(_c?: string | null): string {
+  void _c;
+  return '€';
 }
 
 export default function ClientDetail(): JSX.Element {
@@ -94,6 +96,26 @@ export default function ClientDetail(): JSX.Element {
   const [copied, setCopied] = useState(false);
   const [portalEmail, setPortalEmail] = useState('');
   const [portalIssued, setPortalIssued] = useState<{ portal_email: string; password: string } | null>(null);
+  const [exporting, setExporting] = useState<string | null>(null);
+
+  const downloadExport = (range: string): void => {
+    setExporting(range);
+    const t = localStorage.getItem('xtel_token');
+    const base = import.meta.env.VITE_API_URL ?? '';
+    fetch(`${base}/reports/client-export?client_id=${id}&range=${range}`, {
+      headers: t ? { authorization: `Bearer ${t}` } : {},
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+      const blob = await res.blob();
+      const disp = res.headers.get('content-disposition') ?? '';
+      const m = disp.match(/filename="([^"]+)"/);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = m?.[1] ?? `traffic-${range}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }).catch(() => undefined).finally(() => setExporting(null));
+  };
 
   const load = (): void => {
     api<NonNullable<typeof data>>(`/clients/${id}`).then(setData).catch(() => undefined);
@@ -388,6 +410,24 @@ export default function ClientDetail(): JSX.Element {
           <div className="stat-label">Throughput</div>
           <div className="stat-value tabular-nums">{c.tps_limit} <span className="text-sm font-medium text-muted">TPS</span></div>
           <div className="text-xs text-muted mt-1">Daily {c.daily_limit ?? '∞'} · Monthly {c.monthly_limit ?? '∞'}</div>
+        </div>
+      </div>
+
+      {/* ── Traffic export (Excel-compatible CSV, max 30 days) ── */}
+      <div className="card card-pad">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <div className="card-title">Export traffic</div>
+            <div className="card-sub">Downloads as .csv — opens directly in Excel · max last 30 days</div>
+          </div>
+          <div className="flex gap-2">
+            {([['today', 'Today'], ['yesterday', 'Yesterday'], ['last30', 'Last 30 days']] as const).map(([range, label]) => (
+              <button key={range} className="btn-ghost !py-1.5 !text-xs" disabled={exporting !== null}
+                onClick={() => downloadExport(range)}>
+                {exporting === range ? 'Preparing…' : `⬇ ${label}`}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

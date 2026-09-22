@@ -1,8 +1,10 @@
 import {
   createWorker, getQueue, QUEUES, getPool, queryOne,
-  checkTps, incrStat, type MessageJob,
+  tryAcquireTps, incrStat, type MessageJob,
 } from '@8xtel/core';
 import { loadConnectors, listenControl, syncConnectors, type ConnectorRegistry, VendorConnector } from './connector.js';
+import { HttpVendorSender } from './http-sender.js';
+import { startDlrPoller } from './dlr-poller.js';
 
 // ── Vendor worker: sms:vendor-send → upstream submit_sm (§15, §37) ───────────
 // Walks the vendor_chain; on failure records the hop and tries the next vendor
@@ -70,76 +72,122 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
     return;
   }
 
-  const conn = pick(vendorId);
-  if (!conn) {
-    // Vendor temporarily down → wait + retry SAME vendor, don't burn the chain.
-    // Only fail over on real submit errors (handled below). Attempts cap the
-    // wait so a dead vendor eventually fails over instead of looping forever.
-    const attempts = msg.attempts ?? 0;
-    if (attempts < 120) {
-      await getQueue(QUEUES.vendorSend).add('send', { ...msg, attempts: attempts + 1 }, { delay: 2000 });
-      return;
-    }
-    await pool.query(
-      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover','vendor not connected after retries')`,
-      [msg.internal_id, vendorId],
-    );
-    await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1 });
-    return;
-  }
-
-  // Vendor TPS guard — delay, don't drop (§18)
-  const vRow = await queryOne<{ tps: number; source_ton: number; source_npi: number; dest_ton: number; dest_npi: number }>(
-    'SELECT tps, source_ton, source_npi, dest_ton, dest_npi FROM vendors WHERE id=$1', [vendorId],
+  // Vendor TPS guard — delay, don't drop (§18).
+  // Non-filling acquire: denied jobs leave no window entry, so a 1000-TPS
+  // burst retrying against a small vendor cap can't saturate its own window
+  // into a self-inflicted stall (same deadlock class as the client guard).
+  // Runs BEFORE the transport branch so SMPP and HTTP vendors share pacing.
+  const vRow = await queryOne<{
+    tps: number; protocol: string; name: string;
+    source_ton: number; source_npi: number; dest_ton: number; dest_npi: number;
+  }>(
+    `SELECT tps, COALESCE(protocol,'smpp') AS protocol, name,
+            source_ton, source_npi, dest_ton, dest_npi FROM vendors WHERE id=$1`, [vendorId],
   );
-  if (vRow && !(await checkTps(`vendor:${vendorId}`, vRow.tps))) {
+  if (vRow && !(await tryAcquireTps(`vendor:${vendorId}`, vRow.tps))) {
     await getQueue(QUEUES.vendorSend).add('send', msg, { delay: 500 });
     return;
   }
 
-  try {
-    const vendorMsgId = await conn.submit({
-      source: msg.source,
-      destination: msg.destination,
-      text: msg.text,
-      data_coding: msg.data_coding,
-      source_ton: vRow?.source_ton ?? 0,
-      source_npi: vRow?.source_npi ?? 1,
-      dest_ton: vRow?.dest_ton ?? 0,
-      dest_npi: vRow?.dest_npi ?? 1,
-      registered_delivery: 1,
-    });
-    await pool.query(
-      `UPDATE messages SET vendor_id=$1, vendor_msg_id=$2, attempts=attempts+1 WHERE id=$3`,
-      [vendorId, vendorMsgId, msg.internal_id],
-    );
-    await pool.query(
-      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'sent',$3)`,
-      [msg.internal_id, vendorId, `vendor_msg_id=${vendorMsgId}`],
-    );
+  // ── HTTP vendors: no SMPP bind — one HTTPS request per message ──────────
+  // SMPP vendors skip this block entirely (protocol='smpp' → conn path below,
+  // byte-identical to before). HTTP failures fall through to the same
+  // failover catch as SMPP submit errors.
+  let vendorMsgId: string;
+  let httpSender: HttpVendorSender | null = null;
+  if ((vRow?.protocol ?? 'smpp') === 'http') {
+    httpSender = new HttpVendorSender(vendorId, vRow?.name ?? vendorId);
+    try {
+      vendorMsgId = await httpSender.submit({
+        source: msg.source,
+        destination: msg.destination,
+        text: msg.text,
+        internal_id: msg.internal_id,
+        dlr_token: null, // operator pastes full webhook URL into template if needed
+      });
+    } catch (e) {
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover',$3)`,
+        [msg.internal_id, vendorId, `http submit error: ${(e as Error).message}`],
+      );
+      await getQueue(QUEUES.vendorSend).add('send', {
+        ...msg,
+        vendor_index: msg.vendor_index + 1,
+        attempts: msg.attempts + 1,
+      });
+      return;
+    }
+  } else {
+    const conn = pick(vendorId);
+    if (!conn) {
+      // Vendor temporarily down → wait + retry SAME vendor, don't burn the chain.
+      // Only fail over on real submit errors (handled below). Attempts cap the
+      // wait so a dead vendor eventually fails over instead of looping forever.
+      const attempts = msg.attempts ?? 0;
+      if (attempts < 120) {
+        await getQueue(QUEUES.vendorSend).add('send', { ...msg, attempts: attempts + 1 }, { delay: 2000 });
+        return;
+      }
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover','vendor not connected after retries')`,
+        [msg.internal_id, vendorId],
+      );
+      await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1 });
+      return;
+    }
+    try {
+      vendorMsgId = await conn.submit({
+        source: msg.source,
+        destination: msg.destination,
+        text: msg.text,
+        data_coding: msg.data_coding,
+        source_ton: vRow?.source_ton ?? 0,
+        source_npi: vRow?.source_npi ?? 1,
+        dest_ton: vRow?.dest_ton ?? 0,
+        dest_npi: vRow?.dest_npi ?? 1,
+        registered_delivery: 1,
+      });
+    } catch (e) {
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover',$3)`,
+        [msg.internal_id, vendorId, `submit error: ${(e as Error).message}`],
+      );
+      await getQueue(QUEUES.vendorSend).add('send', {
+        ...msg,
+        vendor_index: msg.vendor_index + 1,
+        attempts: msg.attempts + 1,
+      });
+      return;
+    }
+  }
+
+  // ── Post-submit bookkeeping (shared by both transports) ─────────────────
+  // The vendor has ACCEPTED the message at this point — a DB error here must
+  // NOT fail over (that would double-send). Throw so BullMQ retries the
+  // bookkeeping; all writes are idempotent on message id.
+  await pool.query(
+    `UPDATE messages SET vendor_id=$1, vendor_msg_id=$2, attempts=attempts+1 WHERE id=$3`,
+    [vendorId, vendorMsgId, msg.internal_id],
+  );
+  await pool.query(
+    `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'sent',$3)`,
+    [msg.internal_id, vendorId, `vendor_msg_id=${vendorMsgId}`],
+  );
+  if (httpSender) await httpSender.markSent();
+  else {
     await pool.query(
       'UPDATE vendor_connections SET messages_sent = messages_sent + 1 WHERE vendor_id=$1',
       [vendorId],
     );
-    await incrStat('sent');
-    // Charge client + record vendor cost (async, idempotent on message id)
-    await getQueue(QUEUES.billing).add('charge', {
-      internal_id: msg.internal_id,
-      client_id: msg.client_id,
-      vendor_id: vendorId,
-      client_price: msg.client_price,
-    });
-  } catch (e) {
-    await pool.query(
-      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover',$3)`,
-      [msg.internal_id, vendorId, `submit error: ${(e as Error).message}`],
-    );
-    await getQueue(QUEUES.vendorSend).add('send', {
-      ...msg,
-      vendor_index: msg.vendor_index + 1,
-      attempts: msg.attempts + 1,
-    });
   }
+  await incrStat('sent');
+  // Charge client + record vendor cost (async, idempotent on message id)
+  await getQueue(QUEUES.billing).add('charge', {
+    internal_id: msg.internal_id,
+    client_id: msg.client_id,
+    vendor_id: vendorId,
+    client_price: msg.client_price,
+  });
 }
 
 async function main(): Promise<void> {
@@ -160,6 +208,7 @@ async function main(): Promise<void> {
     syncConnectors(byVendor).catch((e) => console.error('[vendor] periodic sync failed', (e as Error).message));
   }, 60_000).unref();
   createWorker(QUEUES.vendorSend, handleJob, 30);
+  startDlrPoller(); // pull-style DLR polling for HTTP vendors (no-op when none configured)
   console.log(`[8xtelSMPP vendor-worker] started with ${n} connector(s)`);
 }
 

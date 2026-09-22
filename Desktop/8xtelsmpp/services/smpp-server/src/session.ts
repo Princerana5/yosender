@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  queryOne, getPool, getQueue, QUEUES, checkTps, incrStat,
+  queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat,
   type MessageJob,
 } from '@8xtel/core';
 import { authenticateBind, BindPrincipal } from './auth.js';
@@ -56,7 +56,10 @@ const ST = {
 export function handleSession(
   session: SmppSession,
   remoteIp: string,
-  hooks: { onBind?: (clientId: string, s: SmppSession) => void; onClose?: (clientId: string) => void } = {},
+  hooks: {
+    onBind?: (clientId: string, s: SmppSession, bindType: string) => void;
+    onClose?: (clientId: string, s: SmppSession) => void;
+  } = {},
 ): void {
   const state: SessionState = { principal: null, bindType: null, remoteIp, bindRowId: null };
 
@@ -101,7 +104,7 @@ export function handleSession(
       }
       session.send(pdu.response({ command_status: ST.ROK, system_id: '8xtelSMPP' }));
       session.resume();
-      hooks.onBind?.(state.principal.client_id, session);
+      hooks.onBind?.(state.principal.client_id, session, type);
       console.log(`[smpp] bind ${type} ${state.principal.system_id} from ${remoteIp}`);
     };
   }
@@ -113,8 +116,11 @@ export function handleSession(
     }
     const principal = state.principal;
 
-    // TPS guard — throttle instead of drop (§18)
-    const tpsOk = await checkTps(`client:${principal.client_id}`, principal.tps_limit);
+    // TPS guard — throttle instead of drop (§18).
+    // Non-filling acquire: a denied submit leaves no window entry, so a
+    // burst over the limit can't saturate the window and throttle the client
+    // even after it drops back under its limit.
+    const tpsOk = await tryAcquireTps(`client:${principal.client_id}`, principal.tps_limit);
     if (!tpsOk) {
       respond(pdu, ST.RTHROTTLED);
       return;
@@ -201,7 +207,7 @@ export function handleSession(
     }
     if (state.principal) {
       console.log(`[smpp] unbind ${state.principal.system_id}`);
-      hooks.onClose?.(state.principal.client_id);
+      hooks.onClose?.(state.principal.client_id, session);
     }
   });
 

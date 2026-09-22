@@ -37,6 +37,30 @@ interface SendResult {
   status: string;
 }
 
+interface SenderTpl {
+  id: string;
+  sender_id: string;
+  template: string;
+  is_default: boolean;
+}
+
+/** Highest {vN} placeholder in a template = number of var inputs to show. */
+function templateVarCount(tpl: string): number {
+  let max = 0;
+  const re = /\{v(\d+)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(tpl))) max = Math.max(max, Number(m[1]));
+  return max;
+}
+
+/** Preview: fill {v1}… with entered vars, leave missing ones literal. */
+function fillPreview(tpl: string, vals: string[]): string {
+  return tpl.replace(/\{v(\d+)\}/g, (_m, n: string) => {
+    const v = vals[Number(n) - 1];
+    return v ? v : `{v${n}}`;
+  });
+}
+
 interface MsgDetail {
   message: {
     id: string; status: string; vendor_msg_id: string | null;
@@ -64,6 +88,10 @@ export default function SendSms(): JSX.Element {
   const [err, setErr] = useState('');
   const [sent, setSent] = useState<SendResult | null>(null);
   const [detail, setDetail] = useState<MsgDetail | null>(null);
+  // Vendor template picker: whitelisted SIDs + templates for the chosen vendor
+  const [tpls, setTpls] = useState<SenderTpl[]>([]);
+  const [tplId, setTplId] = useState('');
+  const [varVals, setVarVals] = useState<string[]>([]);
 
   useEffect(() => {
     api<{ clients: ClientOpt[] }>('/clients')
@@ -80,6 +108,47 @@ export default function SendSms(): JSX.Element {
     api<{ vendors: VendorOpt[] }>('/vendors').then((r) => setVendors(r.vendors)).catch(() => undefined);
     api<{ countries: CountryOpt[] }>('/system/countries').then((r) => setCountries(r.countries)).catch(() => undefined);
   }, []);
+
+  // Load whitelisted SID templates whenever the forced vendor changes
+  useEffect(() => {
+    setTpls([]);
+    setTplId('');
+    setVarVals([]);
+    if (!vendorId) return;
+    api<{ templates: SenderTpl[] }>(`/vendors/${vendorId}/sender-templates`)
+      .then((r) => {
+        setTpls(r.templates);
+        const def = r.templates.find((t) => t.is_default) ?? r.templates[0];
+        if (def) {
+          setTplId(def.id);
+          setSource(def.sender_id);
+          setVarVals(Array(templateVarCount(def.template)).fill(''));
+        }
+      })
+      .catch(() => undefined);
+  }, [vendorId]);
+
+  const activeTpl = tpls.find((t) => t.id === tplId) ?? null;
+  const varCount = activeTpl ? templateVarCount(activeTpl.template) : 0;
+
+  function pickTpl(id: string): void {
+    setTplId(id);
+    const t = tpls.find((x) => x.id === id);
+    if (t) {
+      setSource(t.sender_id);
+      setVarVals(Array(templateVarCount(t.template)).fill(''));
+    } else {
+      setVarVals([]);
+    }
+  }
+
+  function setVar(i: number, v: string): void {
+    setVarVals((prev) => {
+      const next = [...prev];
+      next[i] = v;
+      return next;
+    });
+  }
 
   // Track the sent message until it reaches a terminal state
   useEffect(() => {
@@ -117,13 +186,16 @@ export default function SendSms(): JSX.Element {
     }
     setSending(true);
     try {
+      // Template mode: sender comes from the picked template, message is the
+      // vars joined by "|" — the worker fills {v1}… into the stored template.
+      const useTpl = Boolean(activeTpl);
       const r = await api<SendResult>('/messages/send', {
         method: 'POST',
         body: JSON.stringify({
           client_id: clientId,
-          source,
+          source: useTpl ? activeTpl!.sender_id : source,
           destination,
-          text,
+          text: useTpl ? varVals.map((v) => v.trim()).join('|') : text,
           route_id: routeId || null,
           vendor_id: vendorId || null,
         }),
@@ -219,8 +291,44 @@ export default function SendSms(): JSX.Element {
               . Block/reject filters still apply.
             </div>
           )}
+          {tpls.length > 0 && (
+            <div className="rounded-lg border border-brand/30 bg-brand/5 px-3 py-2.5 space-y-2.5">
+              <div className="card-title">
+                Vendor template{' '}
+                <span className="text-gray-600 font-normal">(whitelisted SIDs for this vendor)</span>
+              </div>
+              <div>
+                <label className="label">Sender ID</label>
+                <select className="input font-mono" value={tplId} onChange={(e) => pickTpl(e.target.value)}>
+                  {tpls.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.sender_id}{t.is_default ? ' ★ default' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {activeTpl && (
+                <>
+                  <div className="text-[11px] text-muted font-mono break-words rounded bg-ink/60 border border-line/60 px-2 py-1.5">
+                    {activeTpl.template}
+                  </div>
+                  {Array.from({ length: varCount }, (_, i) => (
+                    <div key={i}>
+                      <label className="label">Variable {i + 1} <span className="text-gray-600">{`{v${i + 1}} · max 30 chars`}</span></label>
+                      <input className="input font-mono text-xs" value={varVals[i] ?? ''}
+                        onChange={(e) => setVar(i, e.target.value.slice(0, 30))}
+                        placeholder={`Value for {v${i + 1}}`} maxLength={30} />
+                    </div>
+                  ))}
+                  <div className="text-[11px] text-muted">
+                    Preview: <span className="font-mono text-white/80">{fillPreview(activeTpl.template, varVals)}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <div>
-            <label className="label">Message</label>
+            <label className="label">Message {tpls.length > 0 && <span className="text-muted font-normal">(free text — ignored when a vendor template is picked above)</span>}</label>
             <textarea className="input min-h-[120px]" value={text}
               onChange={(e) => setText(e.target.value)} maxLength={2000} />
             <div className="flex justify-between text-[11px] text-muted mt-1 tabular-nums">
@@ -233,7 +341,8 @@ export default function SendSms(): JSX.Element {
               {err}
             </div>
           )}
-          <button className="btn w-full" onClick={send} disabled={sending || !clientId || !destination || !text}>
+          <button className="btn w-full" onClick={send}
+            disabled={sending || !clientId || !destination || (activeTpl ? varVals.every((v) => !v.trim()) : !text)}>
             {sending ? 'Sending…' : '✉ Send test SMS'}
           </button>
         </div>
