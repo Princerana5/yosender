@@ -26,6 +26,8 @@ router.get('/', async (req, res) => {
   if (q.client_id) add('m.client_id = ?', q.client_id);
   if (q.vendor_id) add('m.vendor_id = ?', q.vendor_id);
   if (q.country_id) add('m.country_id = ?', q.country_id);
+  if (q.billing_mode) add('m.billing_mode = ?', q.billing_mode);
+  if (q.billing_status) add('m.billing_status = ?', q.billing_status);
   if (q.destination) add('m.destination LIKE ?', `%${q.destination}%`);
   if (q.sender) add('m.source ILIKE ?', `%${q.sender}%`);
   if (q.message_id) {
@@ -49,6 +51,7 @@ router.get('/', async (req, res) => {
     `SELECT m.id, ${textCol} m.client_id, c.name AS client_name, m.vendor_id, v.name AS vendor_name,
             m.route_id, m.channel, m.client_msg_id, m.vendor_msg_id, m.source, m.destination,
             co.name AS country_name, co.iso_code, m.status, m.client_price, m.vendor_cost,
+            m.billing_mode, m.billing_status, m.billed_amount,
             m.submit_time, m.dlr_time, m.error_code, m.attempts, m.created_at
      FROM messages m
      LEFT JOIN clients c ON c.id=m.client_id
@@ -193,7 +196,8 @@ router.get('/:id', async (req, res) => {
 router.get('/dlr/logs', async (req, res) => {
   const q = req.query as Record<string, string>;
   const rows = await query(
-    `SELECT d.*, m.destination, m.source, c.name AS client_name, v.name AS vendor_name
+    `SELECT d.*, m.destination, m.source, c.name AS client_name, v.name AS vendor_name,
+            m.billing_mode, m.billing_status, m.billed_amount
      FROM dlrs d JOIN messages m ON m.id=d.message_id
      LEFT JOIN clients c ON c.id=m.client_id LEFT JOIN vendors v ON v.id=m.vendor_id
      WHERE ($1::text IS NULL OR d.client_status=$1)

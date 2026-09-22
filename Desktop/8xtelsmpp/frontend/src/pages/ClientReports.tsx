@@ -29,8 +29,16 @@ interface Msg {
   status: string; text: string | null; country_name: string | null;
   iso_code: string | null; vendor_name: string | null; route_name: string | null;
   segments: number | null; client_price: string | null;
+  billing_mode: string | null; billing_status: string | null; billed_amount: string | null;
   credits_charged: string | null; error_description: string | null;
 }
+
+const BM_SHORT: Record<string, string> = {
+  on_submission: 'Submission', on_delivery: 'Delivery Only',
+  submission_delivery: 'Sub + Deliv', operator_submission: 'Op Submission',
+  operator_delivery: 'Op Delivery', hybrid: 'Hybrid',
+  on_attempt: 'Attempt', on_accepted: 'Accepted',
+};
 
 type Preset = 'today' | 'yesterday' | 'last7' | 'last30' | 'month' | 'custom';
 
@@ -58,7 +66,7 @@ export default function ClientReports(): JSX.Element {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [msgTotal, setMsgTotal] = useState(0);
   const [msgOffset, setMsgOffset] = useState(0);
-  const [mf, setMf] = useState({ destination: '', sender: '', status: '' });
+  const [mf, setMf] = useState({ destination: '', sender: '', status: '', billing_mode: '' });
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
   const [showContent, setShowContent] = useState(false);
@@ -111,6 +119,7 @@ export default function ClientReports(): JSX.Element {
     if (mf.destination) mp.set('destination', mf.destination);
     if (mf.sender) mp.set('sender', mf.sender);
     if (mf.status) mp.set('status', mf.status);
+    if (mf.billing_mode) mp.set('billing_mode', mf.billing_mode);
     mp.set('limit', '50');
     mp.set('offset', String(offset));
     Promise.all([
@@ -390,9 +399,23 @@ export default function ClientReports(): JSX.Element {
                   ))}
                 </select>
               </div>
+              <div className="w-48">
+                <label className="label">Billing Mode</label>
+                <select className="input" value={mf.billing_mode} onChange={(e) => setMf({ ...mf, billing_mode: e.target.value })}>
+                  <option value="">All</option>
+                  <option value="on_submission">On Submission</option>
+                  <option value="on_delivery">On Delivery Only</option>
+                  <option value="submission_delivery">Submission + Delivery</option>
+                  <option value="operator_submission">Operator Submission</option>
+                  <option value="operator_delivery">Operator Delivery</option>
+                  <option value="hybrid">Hybrid: Sub + Op Deliv</option>
+                  <option value="on_attempt">On Attempt</option>
+                  <option value="on_accepted">On Accepted</option>
+                </select>
+              </div>
               <button className="btn" onClick={() => load(0)} disabled={loading}>{loading ? 'Searching…' : 'Search'}</button>
-              {(mf.destination || mf.sender || mf.status) && (
-                <button className="btn-ghost" onClick={() => { setMf({ destination: '', sender: '', status: '' }); }}>Clear</button>
+              {(mf.destination || mf.sender || mf.status || mf.billing_mode) && (
+                <button className="btn-ghost" onClick={() => { setMf({ destination: '', sender: '', status: '', billing_mode: '' }); }}>Clear</button>
               )}
             </div>
             <DataTable
@@ -422,6 +445,10 @@ export default function ClientReports(): JSX.Element {
                 },
                 { key: 'vendor_name', label: 'Vendor', render: (m) => m.vendor_name ?? <span className="text-muted">…</span> },
                 { key: 'status', label: 'Status', render: (m) => <StatusBadge status={m.status} /> },
+                {
+                  key: 'billing_mode', label: 'Billing Mode',
+                  render: (m) => <span className="text-xs whitespace-nowrap">{m.billing_mode ? (BM_SHORT[m.billing_mode] ?? m.billing_mode) : <span className="text-muted">—</span>}{m.billing_status && m.billing_status !== 'billed' ? <span className="block text-[10px] text-muted">{m.billing_status}</span> : null}</span>,
+                },
                 {
                   key: 'client_price', label: creditMode ? 'Credits' : 'Charged', right: true,
                   render: (m) => <span className="tabular-nums">{creditMode ? Number(m.credits_charged ?? 0).toLocaleString() : fmtMoney(m.client_price, info?.currency)}</span>,

@@ -126,6 +126,10 @@ export interface MessageJob {
   /** Test override (Send Test SMS page): skip route matching, force path */
   force_route_id?: string | null;
   force_vendor_id?: string | null;
+  /** Billing mode stamped by routing (WHEN the client is charged) */
+  billing_mode?: string | null;
+  /** Delivery-component rate for split modes (submission_delivery/hybrid) */
+  delivery_rate?: number | null;
 }
 
 export interface DlrEvent {

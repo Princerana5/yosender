@@ -214,7 +214,43 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
       priceSource = `client_rates × ${segments}seg`;
     }
   }
-  const reserveAmount = Number(clientPrice ?? 0);
+  // ── Billing mode: longest-prefix match on the client's saved rate card ────
+  // (client → country → network/MCC/MNC → rate). Falls back to on_submission
+  // so old traffic bills exactly as before. Stamped on the message + passed
+  // down the chain so vendor-send and the billing engine honor it.
+  let billingMode = 'on_submission';
+  let deliveryRate: number | null = null;
+  {
+    const bm = await pool.query(
+      `SELECT billing_mode, delivery_rate FROM client_saved_rates
+       WHERE client_id=$1 AND ($2 LIKE country || '%' OR $2 LIKE '%' || mcc || '%' OR country_id IS NULL)
+       ORDER BY length(COALESCE(network_name,'')) DESC LIMIT 1`,
+      [msg.client_id, digits],
+    ).catch(() => ({ rows: [] as Array<{ billing_mode: string; delivery_rate: string | null }> }));
+    // Prefix match above is best-effort; do a precise longest match in code
+    // over the small per-client card (country name won't prefix-match digits,
+    // so match on MCC digits + network specificity instead).
+    const card = await pool.query(
+      `SELECT billing_mode, delivery_rate, mcc, mnc, network_name FROM client_saved_rates
+       WHERE client_id=$1`, [msg.client_id],
+    ).catch(() => ({ rows: [] as Array<{ billing_mode: string; delivery_rate: string | null; mcc: string; mnc: string; network_name: string }> }));
+    let best = -1;
+    for (const r of card.rows) {
+      const mccHit = r.mcc && digits.includes(r.mcc) ? r.mcc.length + 10 : -1;
+      const score = mccHit + (r.mnc && r.mnc !== 'ALL' ? 5 : 0) + Math.min((r.network_name ?? '').length, 10) / 10;
+      if (mccHit >= 0 && score > best) {
+        best = score;
+        billingMode = r.billing_mode ?? 'on_submission';
+        deliveryRate = r.delivery_rate !== null && r.delivery_rate !== undefined ? Number(r.delivery_rate) : null;
+      }
+    }
+    void bm;
+  }
+  // Delivery-only modes must NOT hold funds at submit — nothing is owed until
+  // the delivered DLR lands. Submit-billed modes keep the existing hold.
+  const { billsOnSubmit } = await import('@8xtel/core');
+  const submitBilled = billsOnSubmit(billingMode as never);
+  const reserveAmount = submitBilled ? Number(clientPrice ?? 0) : 0;
 
   // ── Credit-mode reservation: 1 credit per segment, no money moves ─────────
   // Clients with billing_mode='credit' burn SMS credits instead of funds.
@@ -315,8 +351,9 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   }
 
   await pool.query(
-    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6 WHERE id=$7',
-    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, reserveCredits, msg.internal_id],
+    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6, billing_mode=$7, billing_status=$8 WHERE id=$9',
+    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, reserveCredits,
+     billingMode, submitBilled ? 'submitted' : 'awaiting_delivery', msg.internal_id],
   );
   await recordEvent(
     msg.internal_id, chain[0]?.vendor_id ?? null, 'routed',
@@ -332,6 +369,8 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     vendor_chain: chain.map((v) => v.vendor_id),
     vendor_index: 0,
     client_price: clientPrice,
+    billing_mode: billingMode,
+    delivery_rate: deliveryRate,
   });
   await incrStat('routed');
 }

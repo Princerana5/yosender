@@ -14,6 +14,7 @@ interface RecentMsg {
   text: string | null;
   client_name: string; country_name: string | null; iso_code: string | null;
   vendor_name: string | null; route_name: string | null;
+  billing_mode: string | null; billing_status: string | null; billed_amount: string | null;
 }
 
 interface Opt {
@@ -223,6 +224,10 @@ export default function Traffic(): JSX.Element {
             { key: 'vendor_name', label: 'Vendor', render: (r) => r.vendor_name ?? <span className="text-muted">…</span> },
             { key: 'route_name', label: 'Route', render: (r) => <span className="text-xs text-muted">{r.route_name ?? '—'}</span> },
             { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
+            {
+              key: 'billing_mode', label: 'Billing',
+              render: (r) => <span className="text-[11px] text-muted whitespace-nowrap">{r.billing_mode ? String(r.billing_mode).replace(/^on_/, '').replace(/_/g, ' ') : '—'}{r.billed_amount ? <span className="block tabular-nums">{r.billed_amount}</span> : null}</span>,
+            },
           ]}
         />
       </div>

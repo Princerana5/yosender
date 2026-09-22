@@ -134,6 +134,24 @@ GET  /api/client/v1/balance          # wallet`}</Code>
     ),
   },
   {
+    id: 'billing-modes',
+    title: 'Billing modes',
+    body: (
+      <div className="space-y-2">
+        <P>Billing Mode defines <b>when</b> a client is charged — set per client → country → network/MCC/MNC in Rate Notifications (destinations prefill from the client's saved rate card). Default: <span className="font-mono">On Submission</span>.</P>
+        <Code>{`On Submission              SUBMITTED            charge at vendor accept (default)
+On Delivery Only           DELIVERED            charge only on delivered DLR; failures cost nothing
+Submission + Delivery      SUBMITTED+DELIVERED  split: submission rate now + delivery rate on DLR
+Operator Submission        OPERATOR_SUBMITTED   charge when the operator accepts
+Operator Delivery          OPERATOR_DELIVERED   charge only on operator-confirmed delivery
+Hybrid                     OP_SUBMITTED+OP_DEL  base fee on accept + extra on delivery
+On Attempt                 ROUTE_ATTEMPT        charge when 8xtel attempts the route
+On Accepted                ACCEPTED             charge at platform accept (post-validation)`}</Code>
+        <P>Failed / expired / rejected messages bill nothing under delivery-only modes (<span className="font-mono">billing_status=not_billed</span>). Duplicate DLRs never double-charge — one ledger row per message per component (<span className="font-mono">billing_charges</span> PK). Message Logs, DLR Logs, Live Traffic and Client Reports all show the mode + billed amount, and reports filter by both.</P>
+      </div>
+    ),
+  },
+  {
     id: 'faq',
     title: 'Troubleshooting',
     body: (

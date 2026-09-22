@@ -147,7 +147,8 @@ router.get('/live', async (req, res) => {
   const recent = await query(
     `SELECT m.id, m.created_at, m.source, m.destination, m.status, m.text,
             c.name AS client_name, co.name AS country_name, co.iso_code,
-            v.name AS vendor_name, r.name AS route_name
+            v.name AS vendor_name, r.name AS route_name,
+            m.billing_mode, m.billing_status, m.billed_amount
      FROM messages m
      LEFT JOIN clients c ON c.id=m.client_id
      LEFT JOIN countries co ON co.id=m.country_id
@@ -376,6 +377,14 @@ router.get('/client/:id/messages', async (req, res) => {
     params.push(`%${q.sender}%`);
     extra += ` AND m.source ILIKE $${params.length}`;
   }
+  if (q.billing_mode) {
+    params.push(q.billing_mode);
+    extra += ` AND m.billing_mode=$${params.length}`;
+  }
+  if (q.billing_status) {
+    params.push(q.billing_status);
+    extra += ` AND m.billing_status=$${params.length}`;
+  }
   const limit = Math.min(Number(q.limit ?? 50), 500);
   const offset = Math.max(0, Number(q.offset ?? 0));
   params.push(limit, offset);
@@ -383,6 +392,7 @@ router.get('/client/:id/messages', async (req, res) => {
     `SELECT m.id, m.created_at, m.source, m.destination, m.status, m.text,
             co.name AS country_name, co.iso_code, v.name AS vendor_name,
             r.name AS route_name, m.segments, m.client_price,
+            m.billing_mode, m.billing_status, m.billed_amount,
             COALESCE(m.credits_charged, m.reserved_credits, 0) AS credits_charged,
             m.error_description
      FROM messages m

@@ -11,15 +11,34 @@ interface RnClient {
 
 interface Country { name: string; iso_code: string; calling_code: string; mccs: string[]; }
 
+const BILLING_MODES = [
+  { v: 'on_submission', label: 'On Submission' },
+  { v: 'on_delivery', label: 'On Delivery Only' },
+  { v: 'submission_delivery', label: 'Submission + Delivery' },
+  { v: 'operator_submission', label: 'Operator Submission' },
+  { v: 'operator_delivery', label: 'Operator Delivery' },
+  { v: 'hybrid', label: 'Hybrid: Submission + Operator Delivery' },
+  { v: 'on_attempt', label: 'On Attempt' },
+  { v: 'on_accepted', label: 'On Accepted' },
+] as const;
+
+type BillingModeV = (typeof BILLING_MODES)[number]['v'];
+
+function bmLabel(v: string): string {
+  return BILLING_MODES.find((b) => b.v === v)?.label ?? 'On Submission';
+}
+
 interface Dest {
   country: string; country_code: string;
   network_name: string; mcc: string; mncMode: 'all' | 'specific'; mnc: string;
   currency: 'EUR' | 'USD'; rate: string;
+  billing_mode: BillingModeV; delivery_rate: string;
 }
 
 interface SavedRate {
   id: string; country: string; country_code: string | null; network_name: string;
-  mcc: string; mnc: string; currency: string; rate: string; updated_at: string;
+  mcc: string; mnc: string; currency: string; rate: string;
+  billing_mode: string; delivery_rate: string | null; updated_at: string;
 }
 
 interface Preview {
@@ -37,6 +56,7 @@ interface RnRow {
 const emptyDest = (): Dest => ({
   country: '', country_code: '', network_name: '',
   mcc: '', mncMode: 'all', mnc: 'ALL', currency: 'EUR', rate: '',
+  billing_mode: 'on_submission', delivery_rate: '',
 });
 
 function toLocalInput(d: Date): string {
@@ -118,9 +138,9 @@ export function RateNotificationDetail(): JSX.Element {
       {n.error_message && <div className="card card-pad mb-3 text-sm text-red-300">Error: {n.error_message}</div>}
       <div className="card card-pad mb-3">
         <div className="card-title mb-2">Destinations ({data.rates.length})</div>
-        <table className="table"><thead><tr><th>Country</th><th>Network</th><th>MCC</th><th>MNC</th><th className="text-right">Rate</th></tr></thead>
+        <table className="table"><thead><tr><th>Country</th><th>Network</th><th>MCC</th><th>MNC</th><th className="text-right">Rate</th><th>Billing Mode</th></tr></thead>
           <tbody>{data.rates.map((r, i) => (
-            <tr key={i}><td>{r.country}</td><td>{r.network_name}</td><td className="text-center">{r.mcc}</td><td className="text-center">{r.mnc}</td><td className="text-right mono">{Number(r.rate).toFixed(3)} {r.currency}</td></tr>
+            <tr key={i}><td>{r.country}</td><td>{r.network_name}</td><td className="text-center">{r.mcc}</td><td className="text-center">{r.mnc}</td><td className="text-right mono">{Number(r.rate).toFixed(3)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(3)}` : ''} {r.currency}</td><td className="text-xs">{bmLabel(r.billing_mode ?? 'on_submission')}</td></tr>
           ))}</tbody></table>
       </div>
       <div className="card card-pad">
@@ -149,11 +169,13 @@ export function RateNotificationCreate(): JSX.Element {
 
   function toDest(r: SavedRate): Dest {
     const all = r.mnc.toUpperCase() === 'ALL';
+    const bm = (BILLING_MODES.some((b) => b.v === r.billing_mode) ? r.billing_mode : 'on_submission') as BillingModeV;
     return {
       country: r.country, country_code: r.country_code ?? '',
       network_name: r.network_name, mcc: r.mcc,
       mncMode: all ? 'all' : 'specific', mnc: all ? 'ALL' : r.mnc,
       currency: (r.currency === 'USD' ? 'USD' : 'EUR'), rate: String(r.rate),
+      billing_mode: bm, delivery_rate: r.delivery_rate ?? '',
     };
   }
 
@@ -191,6 +213,9 @@ export function RateNotificationCreate(): JSX.Element {
     if (!client) return;
     const d = dests[i];
     const mnc = d.mncMode === 'all' ? 'ALL' : d.mnc.trim().toUpperCase();
+    const split = d.billing_mode === 'submission_delivery' || d.billing_mode === 'hybrid';
+    const dr = split ? Number(d.delivery_rate) : NaN;
+    if (split && (!Number.isFinite(dr) || dr <= 0)) { setMsg(`Destination ${i + 1}: ${bmLabel(d.billing_mode)} needs a delivery rate.`); return; }
     setBusy(true); setMsg('');
     try {
       await api(`/rate-notifications/saved-rates/${client.id}`, {
@@ -199,6 +224,7 @@ export function RateNotificationCreate(): JSX.Element {
           country: d.country, country_code: d.country_code || null,
           network_name: d.network_name.trim(), mcc: d.mcc, mnc,
           currency: d.currency, rate: Number(d.rate),
+          billing_mode: d.billing_mode, delivery_rate: split ? dr : null,
         }),
       });
       const r = await api<{ rates: SavedRate[] }>(`/rate-notifications/saved-rates/${client.id}`);
@@ -256,10 +282,14 @@ export function RateNotificationCreate(): JSX.Element {
       if (!/^(\d{1,3}|ALL)$/.test(mnc)) return fail(`Destination ${i + 1}: MNC must be digits or ALL.`);
       const rate = Number(d.rate);
       if (!Number.isFinite(rate) || rate <= 0) return fail(`Destination ${i + 1}: rate must be a positive number.`);
+      const split = d.billing_mode === 'submission_delivery' || d.billing_mode === 'hybrid';
+      const dr = split ? Number(d.delivery_rate) : NaN;
+      if (split && (!Number.isFinite(dr) || dr <= 0)) return fail(`Destination ${i + 1}: ${bmLabel(d.billing_mode)} needs a delivery rate.`);
       rates.push({
         country: d.country, country_code: d.country_code || null,
         network_name: d.network_name.trim(), mcc: d.mcc, mnc,
         currency: d.currency, rate,
+        billing_mode: d.billing_mode, delivery_rate: split ? dr : null,
       });
     }
     const vf = new Date(validFrom);
@@ -376,6 +406,15 @@ export function RateNotificationCreate(): JSX.Element {
                 </select>
               </div>
               <div className="col-span-2"><label className="label">Rate (exact, no conversion)</label><input className="input mono" value={d.rate} onChange={(e) => setDest(i, { rate: e.target.value.replace(/[^0-9.]/g, '') })} placeholder="0.017" inputMode="decimal" /></div>
+              <div className="col-span-2">
+                <label className="label">Billing Mode</label>
+                <select className="input" value={d.billing_mode} onChange={(e) => setDest(i, { billing_mode: e.target.value as BillingModeV })}>
+                  {BILLING_MODES.map((b) => <option key={b.v} value={b.v}>{b.label}</option>)}
+                </select>
+              </div>
+              {(d.billing_mode === 'submission_delivery' || d.billing_mode === 'hybrid') && (
+                <div><label className="label">Delivery Rate ({d.currency})</label><input className="input mono" value={d.delivery_rate} onChange={(e) => setDest(i, { delivery_rate: e.target.value.replace(/[^0-9.]/g, '') })} placeholder="0.002" inputMode="decimal" /></div>
+              )}
             </div>
           </div>
         ))}
@@ -395,7 +434,7 @@ export function RateNotificationCreate(): JSX.Element {
           <p className="text-[11px] text-muted mb-2">Saved rates prefill automatically next time you select this client. Sending a notification also auto-saves.</p>
           {dests.map((d, i) => (
             <div key={i} className="flex items-center gap-2 py-1.5 border-b border-line/40 text-xs">
-              <span className="flex-1">{d.country || '—'} · {d.network_name || '—'} · {d.mcc || '—'}/{d.mncMode === 'all' ? 'ALL' : d.mnc || '—'} · {d.currency} {d.rate || '—'}</span>
+              <span className="flex-1">{d.country || '—'} · {d.network_name || '—'} · {d.mcc || '—'}/{d.mncMode === 'all' ? 'ALL' : d.mnc || '—'} · {d.currency} {d.rate || '—'} · {bmLabel(d.billing_mode)}{(d.billing_mode === 'submission_delivery' || d.billing_mode === 'hybrid') && d.delivery_rate ? ` +${d.delivery_rate}` : ''}</span>
               <button className="btn-ghost !py-0.5 !px-2 !text-[11px]" onClick={() => void saveRate(i)} disabled={busy || !d.country || !d.rate}>Save rate</button>
             </div>
           ))}
@@ -404,7 +443,7 @@ export function RateNotificationCreate(): JSX.Element {
               <div className="label">Saved ({saved.length})</div>
               {saved.map((r) => (
                 <div key={r.id} className="flex items-center gap-2 py-1 text-xs">
-                  <span className="flex-1">{r.country} · {r.network_name} · {r.mcc}/{r.mnc} · {r.currency} {Number(r.rate).toFixed(3)}</span>
+                  <span className="flex-1">{r.country} · {r.network_name} · {r.mcc}/{r.mnc} · {r.currency} {Number(r.rate).toFixed(3)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(3)}` : ''} · {bmLabel(r.billing_mode)}</span>
                   <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300" onClick={() => void deleteSaved(r.id)}>Remove</button>
                 </div>
               ))}

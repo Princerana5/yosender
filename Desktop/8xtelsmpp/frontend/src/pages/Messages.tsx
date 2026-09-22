@@ -3,10 +3,18 @@ import { useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { PageHeader, DataTable, StatusBadge, Money } from '../components';
 
+const BM_LABELS: Record<string, string> = {
+  on_submission: 'On Submission', on_delivery: 'On Delivery Only',
+  submission_delivery: 'Submission + Delivery', operator_submission: 'Operator Submission',
+  operator_delivery: 'Operator Delivery', hybrid: 'Hybrid: Sub + Op Deliv',
+  on_attempt: 'On Attempt', on_accepted: 'On Accepted',
+};
+
 interface Msg {
   id: string; client_name: string; vendor_name: string | null; source: string;
   destination: string; country_name: string | null; status: string;
   client_price: string | null; vendor_cost: string | null;
+  billing_mode: string | null; billing_status: string | null; billed_amount: string | null;
   submit_time: string; dlr_time: string | null;
 }
 
@@ -89,6 +97,14 @@ export default function Messages(): JSX.Element {
           { key: 'status', label: 'Status', render: (m) => <StatusBadge status={m.status} /> },
           { key: 'client_price', label: 'Price', right: true, render: (m) => <Money value={m.client_price} /> },
           { key: 'vendor_cost', label: 'Cost', right: true, render: (m) => <Money value={m.vendor_cost} /> },
+          {
+            key: 'billing_mode', label: 'Billing Mode',
+            render: (m) => <span className="text-xs whitespace-nowrap">{BM_LABELS[m.billing_mode ?? ''] ?? <span className="text-muted">—</span>}</span>,
+          },
+          {
+            key: 'billing_status', label: 'Billed',
+            render: (m) => <span className="text-xs whitespace-nowrap">{m.billing_status ?? '—'}{m.billed_amount ? ` (${m.billed_amount})` : ''}</span>,
+          },
           {
             key: 'submit_time', label: 'Submitted',
             render: (m) => <span className="text-xs text-muted whitespace-nowrap">{new Date(m.submit_time).toLocaleString()}</span>,

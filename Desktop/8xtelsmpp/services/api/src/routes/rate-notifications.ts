@@ -101,6 +101,8 @@ function esc(s: unknown): string {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+const BILLING_MODE_VALUES = ['on_submission', 'on_delivery', 'submission_delivery', 'operator_submission', 'operator_delivery', 'hybrid', 'on_attempt', 'on_accepted'] as const;
+
 const rateSchema = z.object({
   country: z.string().min(1).max(100),
   country_code: z.string().length(2).nullable().optional(),
@@ -109,6 +111,8 @@ const rateSchema = z.object({
   mnc: z.string().regex(/^(\d{1,3}|ALL)$/i, 'MNC must be digits or ALL'),
   currency: z.enum(['EUR', 'USD']),
   rate: z.number().positive().max(999999),
+  billing_mode: z.enum(BILLING_MODE_VALUES).default('on_submission'),
+  delivery_rate: z.number().positive().max(999999).nullable().optional(),
 });
 
 const createSchema = z.object({
@@ -127,18 +131,30 @@ function fmtValidFrom(d: Date): string {
   return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} GMT ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} hours`;
 }
 
+const BILLING_MODE_LABELS: Record<string, string> = {
+  on_submission: 'On Submission', on_delivery: 'On Delivery Only',
+  submission_delivery: 'Submission + Delivery', operator_submission: 'Operator Submission',
+  operator_delivery: 'Operator Delivery', hybrid: 'Hybrid: Submission + Operator Delivery',
+  on_attempt: 'On Attempt', on_accepted: 'On Accepted',
+};
+
 export function buildEmailHtml(args: {
   validFrom: Date; systemId: string;
-  rates: Array<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string }>;
+  rates: Array<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode?: string; delivery_rate?: string | null }>;
 }): string {
   const rows = args.rates.map((r) => {
     const sym = r.currency === 'EUR' ? '€' : '$';
+    const bm = BILLING_MODE_LABELS[String(r.billing_mode ?? 'on_submission')] ?? 'On Submission';
+    const rateCell = r.delivery_rate !== null && r.delivery_rate !== undefined && String(r.delivery_rate) !== ''
+      ? `${sym}${esc(Number(r.rate).toFixed(3))} + ${sym}${esc(Number(r.delivery_rate).toFixed(3))} ${esc(r.currency)}`
+      : `${sym}${esc(Number(r.rate).toFixed(3))} ${esc(r.currency)}`;
     return `<tr>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(r.country)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(r.network_name)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:center;">${esc(r.mcc)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:center;">${esc(r.mnc)}</td>
-      <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:right;white-space:nowrap;">${sym}${esc(Number(r.rate).toFixed(3))} ${esc(r.currency)}</td>
+      <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:right;white-space:nowrap;">${rateCell}</td>
+      <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(bm)}</td>
     </tr>`;
   }).join('');
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
@@ -157,6 +173,7 @@ export function buildEmailHtml(args: {
 <th style="padding:10px 12px;border:1px solid #0f172a;">MCC</th>
 <th style="padding:10px 12px;border:1px solid #0f172a;">MNC</th>
 <th style="padding:10px 12px;border:1px solid #0f172a;text-align:right;">Price, Currency</th>
+<th style="padding:10px 12px;border:1px solid #0f172a;text-align:left;">Billing Mode</th>
 </tr></thead><tbody>${rows}</tbody></table>
 <p>It is set on: <strong>${esc(args.systemId)}</strong></p>
 <p style="font-size:12px;color:#64748b;"><strong>Note</strong> - SMS sent to any destination not included in this price list will be charged according to the applicable default rate.</p>
@@ -217,9 +234,11 @@ router.patch('/clients/:clientId/rate-email', audit('set_client_rate_email', 'cl
 router.get('/saved-rates/:clientId', async (req, res) => {
   const rows = await query<{
     id: string; country: string; country_code: string | null; network_name: string;
-    mcc: string; mnc: string; currency: string; rate: string; updated_at: string;
+    mcc: string; mnc: string; currency: string; rate: string;
+    billing_mode: string; delivery_rate: string | null; updated_at: string;
   }>(
-    `SELECT id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at
+    `SELECT id, country, country_code, network_name, mcc, mnc, currency, rate,
+            billing_mode, delivery_rate, updated_at
      FROM client_saved_rates WHERE client_id=$1 ORDER BY country, network_name`,
     [req.params.clientId],
   );
@@ -235,6 +254,8 @@ const savedRateSchema = z.object({
   mnc: z.string().regex(/^(\d{1,3}|ALL)$/i),
   currency: z.enum(['EUR', 'USD']),
   rate: z.number().positive().max(999999),
+  billing_mode: z.enum(BILLING_MODE_VALUES).default('on_submission'),
+  delivery_rate: z.number().positive().max(999999).nullable().optional(),
 });
 
 router.post('/saved-rates/:clientId', audit('saved_client_rate', 'client_saved_rate'), async (req, res) => {
@@ -248,13 +269,15 @@ router.post('/saved-rates/:clientId', audit('saved_client_rate', 'client_saved_r
   const r = parsed.data;
   const { rows } = await getPool().query(
     `INSERT INTO client_saved_rates
-       (client_id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+       (client_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
      ON CONFLICT (client_id, country, network_name, mcc, mnc, currency)
-     DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate, updated_at=now()
+     DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate,
+       billing_mode=EXCLUDED.billing_mode, delivery_rate=EXCLUDED.delivery_rate, updated_at=now()
      RETURNING id`,
     [req.params.clientId, r.country, r.country_code ?? null, r.network_name,
-     r.mcc, r.mnc.toUpperCase(), r.currency, r.rate],
+     r.mcc, r.mnc.toUpperCase(), r.currency, r.rate, r.billing_mode,
+     r.delivery_rate ?? null],
   );
   res.status(201).json({ id: rows[0].id });
 });
@@ -300,7 +323,10 @@ router.post('/preview', async (req, res) => {
   const html = buildEmailHtml({
     validFrom,
     systemId: client.system_id,
-    rates: parsed.data.rates.map((r) => ({ ...r, rate: String(r.rate) })),
+    rates: parsed.data.rates.map((r) => ({
+      ...r, rate: String(r.rate),
+      delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
+    })),
   });
   res.json({
     to,
@@ -332,10 +358,22 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
   const subject = buildSubject(client.system_id, client.system_id);
   const validFrom = new Date(parsed.data.valid_from);
   if (Number.isNaN(validFrom.getTime())) { res.status(400).json({ error: 'invalid valid_from' }); return; }
+  // Split modes need both components; single modes use rate only.
+  for (let i = 0; i < parsed.data.rates.length; i++) {
+    const r = parsed.data.rates[i];
+    if ((r.billing_mode === 'submission_delivery' || r.billing_mode === 'hybrid') &&
+        (r.delivery_rate === null || r.delivery_rate === undefined)) {
+      res.status(422).json({ error: `destination ${i + 1}: ${r.billing_mode} needs a delivery rate` });
+      return;
+    }
+  }
   const html = buildEmailHtml({
     validFrom,
     systemId: client.system_id,
-    rates: parsed.data.rates.map((r) => ({ ...r, rate: String(r.rate) })),
+    rates: parsed.data.rates.map((r) => ({
+      ...r, rate: String(r.rate),
+      delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
+    })),
   });
   const actor = (req as unknown as { user?: { id?: string; email?: string } }).user;
   const { rows } = await pool.query(
@@ -351,21 +389,24 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
   for (const r of parsed.data.rates) {
     await pool.query(
       `INSERT INTO rate_notification_rates
-         (rate_notification_id, country, country_code, network_name, mcc, mnc, currency, rate)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+         (rate_notification_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [rnId, r.country, r.country_code ?? null, r.network_name, r.mcc,
-       r.mnc.toUpperCase(), r.currency, r.rate],
+       r.mnc.toUpperCase(), r.currency, r.rate, r.billing_mode,
+       r.delivery_rate ?? null],
     );
     // Auto-save the rate card: next time the admin picks this client the
     // destinations prefill. Upsert on the natural key so re-sends update.
     await pool.query(
       `INSERT INTO client_saved_rates
-         (client_id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+         (client_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
        ON CONFLICT (client_id, country, network_name, mcc, mnc, currency)
-       DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate, updated_at=now()`,
+       DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate,
+         billing_mode=EXCLUDED.billing_mode, delivery_rate=EXCLUDED.delivery_rate, updated_at=now()`,
       [parsed.data.client_id, r.country, r.country_code ?? null, r.network_name,
-       r.mcc, r.mnc.toUpperCase(), r.currency, r.rate],
+       r.mcc, r.mnc.toUpperCase(), r.currency, r.rate, r.billing_mode,
+       r.delivery_rate ?? null],
     );
   }
   try {
@@ -416,8 +457,10 @@ router.get('/:id', async (req, res) => {
   const rates = await query<{
     country: string; country_code: string | null; network_name: string;
     mcc: string; mnc: string; currency: string; rate: string;
+    billing_mode: string; delivery_rate: string | null;
   }>(
-    `SELECT country, country_code, network_name, mcc, mnc, currency, rate
+    `SELECT country, country_code, network_name, mcc, mnc, currency, rate,
+            billing_mode, delivery_rate
      FROM rate_notification_rates WHERE rate_notification_id=$1 ORDER BY country, network_name`,
     [rn.id],
   );
@@ -433,8 +476,8 @@ router.post('/:id/retry', audit('retried_rate_notification', 'rate_notification'
   );
   if (!rn) { res.status(404).json({ error: 'not found' }); return; }
   if (rn.status !== 'failed') { res.status(422).json({ error: `only failed notifications can be retried (status=${rn.status})` }); return; }
-  const rates = await query<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string }>(
-    `SELECT country, network_name, mcc, mnc, currency, rate
+  const rates = await query<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode: string; delivery_rate: string | null }>(
+    `SELECT country, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate
      FROM rate_notification_rates WHERE rate_notification_id=$1 ORDER BY country, network_name`,
     [rn.id],
   );

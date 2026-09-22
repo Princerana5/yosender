@@ -178,6 +178,44 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
       }
     }
   }
+  // ── Billing-mode settlement ──────────────────────────────────────────────
+  // Delivery-billed modes (on_delivery / operator_delivery / split seconds)
+  // charge HERE on the delivered DLR — idempotent via billing_charges PK, so
+  // duplicate receipts never double-bill. Non-delivered outcomes bill nothing
+  // under these modes (no hold was taken at submit).
+  if (clientStatus === 'delivered') {
+    const bill = await queryOne<{
+      billing_mode: string; client_id: string; vendor_id: string;
+      client_price: string | null; delivery_rate: string | null;
+    }>(
+      `SELECT m.billing_mode, m.client_id, m.vendor_id, m.client_price,
+              (SELECT csr.delivery_rate FROM client_saved_rates csr
+               WHERE csr.client_id=m.client_id LIMIT 1) AS delivery_rate
+       FROM messages m WHERE m.id=$1`, [msg.id],
+    );
+    if (bill) {
+      const { billsOnDelivery } = await import('@8xtel/core');
+      if (billsOnDelivery(bill.billing_mode as never)) {
+        await getQueue(QUEUES.billing).add('charge', {
+          internal_id: msg.id,
+          client_id: bill.client_id,
+          vendor_id: bill.vendor_id ?? vendor_id,
+          client_price: bill.client_price,
+          billing_mode: bill.billing_mode,
+          delivery_rate: bill.delivery_rate !== null ? Number(bill.delivery_rate) : null,
+          component: 'delivery',
+        });
+      }
+    }
+  } else {
+    // Non-delivered outcome on a delivery-billed mode: mark it so reports can
+    // distinguish "never owed" from "owed then refunded".
+    await pool.query(
+      `UPDATE messages SET billing_status='not_billed'
+       WHERE id=$1 AND billing_mode IN ('on_delivery','operator_delivery')
+       AND billing_status='awaiting_delivery'`, [msg.id],
+    ).catch(() => undefined);
+  }
   await pool.query(
     'INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,$3,$4)',
     [msg.id, vendor_id, 'dlr', `vendor=${vendorStatus} client=${clientStatus}`],

@@ -103,6 +103,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
                     key: 'client_status', label: 'Client',
                     render: (r) => <StatusBadge status={String(r.client_status ?? 'unknown')} />,
                   },
+                  {
+                    key: 'billing_mode', label: 'Billing',
+                    render: (r) => <span className="text-[11px] text-muted whitespace-nowrap">{r.billing_mode ? String(r.billing_mode).replace(/^on_/, '').replace(/_/g, ' ') : '—'}{r.billed_amount ? <span className="block tabular-nums">{String(r.billed_amount)}</span> : null}</span>,
+                  },
                   timeCol('created_at', 'Time'),
                 ]}
               />
