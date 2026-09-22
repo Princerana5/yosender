@@ -326,17 +326,47 @@ async function pollOne(
   const SEND_TIME_FIELDS = ['senton', 'sent_on', 'send_time', 'submit_date', 'created', 'created_at', ...TIME_FIELDS];
   const msgCreated = new Date(msg.created_at).getTime();
   let hit: Record<string, unknown> | undefined;
-  if (reportMode && byNumber.length > 1 && !Number.isNaN(msgCreated)) {
-    // Closest vendor send-time to our own submit — ties broken toward the
-    // LATEST entry (a retry supersedes the original attempt).
-    let best = Infinity;
-    for (const e of byNumber) {
-      const t = parseVendorTime(pickField(e, SEND_TIME_FIELDS));
-      if (t < 0) continue;
-      const gap = Math.abs(t - msgCreated);
-      if (gap < best) {
-        best = gap;
-        hit = e;
+  if (reportMode && byNumber.length && !Number.isNaN(msgCreated)) {
+    // Prefer OUR OWN row: the entry whose message text matches what WE sent
+    // upstream (sent-audit detail holds the first 160 chars). Repeated tests
+    // to the same number share close send-times, so time-proximity alone picks
+    // a sibling's row — text match disambiguates. Falls back to closest time.
+    const myText = await pool.query(
+      `SELECT detail FROM message_events WHERE message_id=$1 AND event='sent-audit' LIMIT 1`,
+      [msg.id],
+    ).then((x) => {
+      const d = String(x.rows[0]?.detail ?? '');
+      const m = d.match(/text=(.*?) resp=/);
+      return (m?.[1] ?? '').slice(0, 60);
+    }).catch(() => '');
+    if (myText) {
+      let bestText = Infinity;
+      for (const e of byNumber) {
+        const et = String(pickField(e, ['message', 'msg', 'text', 'content']) ?? '').slice(0, 60);
+        if (!et) continue;
+        // OTP digits drift per send — compare with digits stripped so the
+        // template shape matches, not the code.
+        const norm = (s: string): string => s.replace(/\d{4,6}/g, '#N#');
+        if (norm(et) !== norm(myText)) continue;
+        const t = parseVendorTime(pickField(e, SEND_TIME_FIELDS));
+        if (t < 0) continue;
+        const gap = Math.abs(t - msgCreated);
+        if (gap < bestText) {
+          bestText = gap;
+          hit = e;
+        }
+      }
+    }
+    if (!hit) {
+      let best = Infinity;
+      for (const e of byNumber) {
+        const t = parseVendorTime(pickField(e, SEND_TIME_FIELDS));
+        if (t < 0) continue;
+        const gap = Math.abs(t - msgCreated);
+        if (gap < best) {
+          best = gap;
+          hit = e;
+        }
       }
     }
   }
