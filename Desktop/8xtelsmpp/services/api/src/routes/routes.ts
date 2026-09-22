@@ -20,6 +20,7 @@ const SCOPE_SQL = `
 router.get('/', async (_req, res) => {
   const rows = await query(
     `SELECT r.*, c.name AS country_name, cl.name AS client_name,
+       (SELECT t.name FROM otp_templates t WHERE t.id=r.otp_default_template_id) AS otp_default_template_name,
        (SELECT json_agg(t ORDER BY t.priority) FROM (
           SELECT rv.priority, rv.weight, rv.vendor_id, v.name AS vendor_name, v.status AS vendor_status
           FROM route_vendors rv JOIN vendors v ON v.id=rv.vendor_id WHERE rv.route_id=r.id

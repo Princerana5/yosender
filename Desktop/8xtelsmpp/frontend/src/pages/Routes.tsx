@@ -121,7 +121,10 @@ const STRATEGY_HINT: Record<string, string> = {
   percentage: 'Weighted random pick per message (weight = % share). Full chain kept behind the pick for failover.',
 };
 
-// ── OTP transformation panel (India HSP): ON/OFF + default template + fallbacks ──
+// ── OTP transformation panel (India HSP): one-screen setup ─────────────────
+// Step 1: pick a template (or create one inline) · Step 2: flip ON · done.
+// Fallbacks stay on safe defaults (reject with reason) unless changed.
+
 interface OtpTemplateOpt {
   id: string; name: string; sender_id: string; status: string; is_default: boolean;
 }
@@ -136,13 +139,17 @@ function OtpTransformPanel({ route, onChange }: {
   const [templates, setTemplates] = useState<OtpTemplateOpt[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [showNew, setShowNew] = useState(false);
+  const [showAdv, setShowAdv] = useState(false);
+  const [draft, setDraft] = useState({ name: '', sender_id: '', content: '' });
   const enabled = !!route.otp_transform_enabled;
 
-  useEffect(() => {
+  const reloadTemplates = (): void => {
     api<{ templates: OtpTemplateOpt[] }>('/routes/otp-templates')
       .then((r) => setTemplates(r.templates))
       .catch(() => undefined);
-  }, []);
+  };
+  useEffect(reloadTemplates, []);
 
   async function patch(body: Record<string, unknown>): Promise<void> {
     setBusy(true);
@@ -157,75 +164,159 @@ function OtpTransformPanel({ route, onChange }: {
     }
   }
 
+  // One-click setup: create template inline AND enable the route in one go.
+  async function createAndEnable(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    setBusy(true);
+    setErr('');
+    try {
+      const t = await api<{ template: OtpTemplateOpt }>('/routes/otp-templates', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: draft.name, sender_id: draft.sender_id, content: draft.content,
+          otp_placeholder: '{OTP}', status: 'active', is_default: false,
+        }),
+      });
+      await api(`/routes/${route.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ otp_default_template_id: t.template.id, otp_transform_enabled: true }),
+      });
+      setShowNew(false);
+      setDraft({ name: '', sender_id: '', content: '' });
+      reloadTemplates();
+      onChange();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const active = templates.filter((t) => t.status === 'active');
   const current = templates.find((t) => t.id === route.otp_default_template_id);
+  // Setup is complete when ON + a template is picked. Everything else is detail.
+  const ready = enabled && !!route.otp_default_template_id;
 
   return (
-    <div className="rounded-lg border border-line bg-ink/50 px-3.5 py-3 text-[13px] space-y-2.5">
+    <div className={`rounded-lg border px-3.5 py-3 text-[13px] space-y-2.5 ${ready ? 'border-brand/40 bg-brand/5' : 'border-line bg-ink/50'}`}>
       <div className="flex items-center gap-2">
-        <span className="text-muted font-semibold">OTP Transformation</span>
-        <button
-          className={`ml-auto rounded-full border px-3 py-1 text-xs font-bold transition ${enabled
-            ? 'border-brand/50 bg-brand/10 text-emerald-300'
-            : 'border-line text-muted hover:text-white'}`}
-          disabled={busy}
-          onClick={() => void patch({ otp_transform_enabled: !enabled })}
-          title="When ON: any client SID + OTP text is rewritten to the approved template + SID before vendor submit"
-        >
-          {enabled ? '● ON' : '○ OFF'}
-        </button>
+        <span className="font-semibold">⚡ OTP Mode {ready && <span className="text-emerald-300">· working ✓</span>}</span>
+        {ready && (
+          <button
+            className="ml-auto rounded-full border border-brand/50 bg-brand/10 text-emerald-300 px-3 py-1 text-xs font-bold"
+            disabled={busy}
+            onClick={() => void patch({ otp_transform_enabled: false })}
+          >
+            ● ON — turn off
+          </button>
+        )}
       </div>
-      {enabled && (
-        <>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="label">Default template</label>
+
+      {!ready ? (
+        <div className="space-y-2.5">
+          <div className="text-xs text-muted">
+            Client sends <b className="text-gray-300">any Sender ID + any OTP text</b> → we rewrite it to your
+            approved template + Sender ID → HSP vendor. Pick a template, flip the switch, done.
+          </div>
+          <div>
+            <label className="label">Step 1 — approved template</label>
+            <div className="flex gap-2">
               <select
-                className="input font-mono !text-xs"
+                className="input font-mono !text-xs flex-1"
                 value={route.otp_default_template_id ?? ''}
                 onChange={(e) => void patch({ otp_default_template_id: e.target.value || null })}
               >
-                <option value="">— none (rejects) —</option>
+                <option value="">— choose template —</option>
                 {active.map((t) => (
                   <option key={t.id} value={t.id}>{t.name} · {t.sender_id}{t.is_default ? ' ★' : ''}</option>
                 ))}
               </select>
-            </div>
-            <div>
-              <label className="label">If OTP not found</label>
-              <select
-                className="input !text-xs"
-                value={route.otp_on_no_otp ?? 'reject'}
-                onChange={(e) => void patch({ otp_on_no_otp: e.target.value })}
-              >
-                <option value="reject">Reject with reason</option>
-                <option value="passthrough">Send through normal route</option>
-              </select>
+              <button className="btn-ghost !text-xs shrink-0" onClick={() => setShowNew((s) => !s)}>
+                + New
+              </button>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="label">If no template</label>
-              <select
-                className="input !text-xs"
-                value={route.otp_on_no_template ?? 'reject'}
-                onChange={(e) => void patch({ otp_on_no_template: e.target.value })}
-              >
-                <option value="reject">Reject with reason</option>
-                <option value="passthrough">Send through normal route</option>
-              </select>
-            </div>
-            <div className="flex items-end">
-              <span className="text-[11px] text-muted pb-2">
-                {current ? <>Vendor sees <b className="text-gray-200 font-mono">{current.sender_id}</b> + “{current.name}”</> : '⚠ no template — OTP traffic will reject'}
-              </span>
-            </div>
+          {showNew && (
+            <form onSubmit={(e) => void createAndEnable(e)} className="rounded-lg border border-line bg-ink/60 p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <input className="input !text-xs" placeholder="Template name (e.g. Login OTP)" value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })} maxLength={120} required />
+                <input className="input font-mono !text-xs" placeholder="Approved SID (e.g. MYBANK)" value={draft.sender_id}
+                  onChange={(e) => setDraft({ ...draft, sender_id: e.target.value })} maxLength={21} required />
+              </div>
+              <textarea className="input !text-xs min-h-[60px]" placeholder="Template text with {OTP} — e.g. Your code is {OTP}. Valid 10 min." value={draft.content}
+                onChange={(e) => setDraft({ ...draft, content: e.target.value })} maxLength={1000} required />
+              <div className="text-[11px] text-muted">Creating also flips OTP mode ON for this route.</div>
+              <button className="btn w-full !py-1.5 !text-xs" type="submit" disabled={busy}>
+                {busy ? 'Saving…' : '✓ Create + turn ON'}
+              </button>
+            </form>
+          )}
+          <div>
+            <label className="label">Step 2 — turn it on</label>
+            <button
+              className="btn w-full !py-2"
+              disabled={busy || !route.otp_default_template_id}
+              title={!route.otp_default_template_id ? 'Pick a template first' : 'Start transforming OTP traffic on this route'}
+              onClick={() => void patch({ otp_transform_enabled: true })}
+            >
+              {busy ? 'Saving…' : '⚡ Turn ON OTP mode'}
+            </button>
+            {!route.otp_default_template_id && (
+              <div className="text-[11px] text-amber-300 mt-1">Pick (or create) a template first — then turn it on.</div>
+            )}
           </div>
           {err && <div className="text-xs text-red-300">{err}</div>}
-          <div className="text-[11px] text-muted">
-            Client submits any SID + OTP text → OTP extracted → <b className="text-gray-300">approved template + SID</b> → HSP vendor. Original kept in message log.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="text-xs">
+            Vendor receives <b className="font-mono text-gray-200">{current?.sender_id ?? '…'}</b>
+            {' '}with “{current?.name ?? '…'}” — no matter what SID/text the client sends.
           </div>
-        </>
+          <div className="flex gap-2">
+            <select
+              className="input font-mono !text-xs flex-1"
+              value={route.otp_default_template_id ?? ''}
+              onChange={(e) => void patch({ otp_default_template_id: e.target.value || null })}
+              title="Swap template"
+            >
+              {active.map((t) => (
+                <option key={t.id} value={t.id}>{t.name} · {t.sender_id}{t.is_default ? ' ★' : ''}</option>
+              ))}
+            </select>
+            <button className="btn-ghost !text-xs shrink-0" onClick={() => setShowAdv((s) => !s)}>
+              {showAdv ? 'Hide options' : 'Options'}
+            </button>
+          </div>
+          {showAdv && (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label">If OTP not found</label>
+                <select
+                  className="input !text-xs"
+                  value={route.otp_on_no_otp ?? 'reject'}
+                  onChange={(e) => void patch({ otp_on_no_otp: e.target.value })}
+                >
+                  <option value="reject">Reject with reason</option>
+                  <option value="passthrough">Send normally</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">If no template</label>
+                <select
+                  className="input !text-xs"
+                  value={route.otp_on_no_template ?? 'reject'}
+                  onChange={(e) => void patch({ otp_on_no_template: e.target.value })}
+                >
+                  <option value="reject">Reject with reason</option>
+                  <option value="passthrough">Send normally</option>
+                </select>
+              </div>
+            </div>
+          )}
+          {err && <div className="text-xs text-red-300">{err}</div>}
+        </div>
       )}
     </div>
   );
@@ -650,6 +741,26 @@ export default function Routes(): JSX.Element {
               ),
             },
             { key: 'status', label: 'Status', render: (r) => <StatusBadge status={r.status} /> },
+            {
+              key: 'otp', label: 'OTP',
+              render: (r) => {
+                const on = !!(r as { otp_transform_enabled?: boolean }).otp_transform_enabled;
+                const tpl = (r as { otp_default_template_name?: string; otp_default_template_id?: string | null });
+                return (
+                  <button
+                    className={`text-[11px] font-bold px-2 py-0.5 rounded-full border transition ${on
+                      ? 'border-brand/50 bg-brand/10 text-emerald-300'
+                      : 'border-line text-muted hover:text-white'}`}
+                    title={on
+                      ? `OTP transform ON${tpl.otp_default_template_name ? ` → ${tpl.otp_default_template_name}` : ' (no template!)'} — click to open route settings`
+                      : 'OTP transform OFF — click to set up'}
+                    onClick={() => openDetail(r.id)}
+                  >
+                    {on ? '⚡ ON' : 'OFF'}
+                  </button>
+                );
+              },
+            },
             {
               key: 'actions', label: '', right: true,
               render: (r) => (
