@@ -3,6 +3,7 @@ import { z } from 'zod';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { query, queryOne, getPool } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
+import { getClientActiveRates, buildClientRatesXlsx, attachmentFilename } from './rate-excel.js';
 
 const router = Router();
 // All RN endpoints need an admin-level permission; reuse clients.update so no
@@ -12,13 +13,12 @@ router.use(requirePerm('clients.update'));
 const SENDER_NAME = '8xtel Rate Notification';
 const SENDER_EMAIL = 'rates@8xtel.com';
 
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const norm = (e: string): string => e.trim().toLowerCase();
+
 // ── Mail sender (env-only credentials, never frontend) ────────────────────────
-// Primary: SMTP (RN_SMTP_*). Fallback: Roundcube webmail HTTP on the same
-// cPanel host — same mailbox creds, but a different auth path that works even
-// when Exim's SMTP AUTH rejects the password (observed live: webmail login OK,
-// SMTP 535 on every port/method). RN_MAIL_MODE=roundcube forces the fallback;
-// default is smtp → roundcube automatic failover.
-async function sendRnMail(opts: { to: string; subject: string; html: string }): Promise<void> {
+export interface RnAttachment { filename: string; content: Buffer; }
+async function sendRnMail(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
   const mode = (process.env.RN_MAIL_MODE ?? 'auto').toLowerCase();
   const smtpErr = await trySmtp(opts).catch((e) => e as Error);
   if (!smtpErr) return;
@@ -29,7 +29,7 @@ async function sendRnMail(opts: { to: string; subject: string; html: string }): 
 }
 
 let transporter: Transporter | null = null;
-function trySmtp(opts: { to: string; subject: string; html: string }): Promise<void> {
+function trySmtp(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
   const { RN_SMTP_HOST, RN_SMTP_PORT, RN_SMTP_USER, RN_SMTP_PASS, RN_SMTP_SECURE } = process.env;
   if (!RN_SMTP_HOST || !RN_SMTP_USER || !RN_SMTP_PASS) {
     return Promise.reject(new Error('rate-notification SMTP not configured (RN_SMTP_HOST/RN_SMTP_USER/RN_SMTP_PASS)'));
@@ -46,15 +46,16 @@ function trySmtp(opts: { to: string; subject: string; html: string }): Promise<v
   return t.sendMail({
     from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
     to: opts.to,
+    cc: opts.cc?.length ? opts.cc.join(', ') : undefined,
+    bcc: opts.bcc?.length ? opts.bcc.join(', ') : undefined,
     replyTo: SENDER_EMAIL,
     subject: opts.subject,
     html: opts.html,
+    attachments: (opts.attachments ?? []).map((a) => ({ filename: a.filename, content: a.content, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })),
   }).then(() => undefined);
 }
 
-// Roundcube HTTP send: logs into webmail with the mailbox creds, opens a
-// compose window and submits it. Session cookies live only in this call.
-async function sendViaRoundcube(opts: { to: string; subject: string; html: string }): Promise<void> {
+async function sendViaRoundcube(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
   const base = (process.env.RN_WEBMAIL_BASE ?? 'https://nvme05.netcloudns.com:2096').replace(/\/$/, '');
   const user = process.env.RN_SMTP_USER ?? SENDER_EMAIL;
   const pass = process.env.RN_SMTP_PASS;
@@ -85,7 +86,9 @@ async function sendViaRoundcube(opts: { to: string; subject: string; html: strin
   if (!cid) throw new Error('roundcube compose id not found');
   const body = new URLSearchParams({
     _task: 'mail', _action: 'send', _id: cid, _token: token, _from: '2',
-    _to: opts.to, _subject: opts.subject,
+    _to: [opts.to, ...(opts.cc ?? [])].join(', '),
+    _bcc: (opts.bcc ?? []).join(', '),
+    _subject: opts.subject,
     _message: `Rate notification — please view this email in an HTML-capable client.\n\n${opts.html.replace(/<[^>]*>/g, ' ')}`,
   });
   const send = await req(`${rc}/?_task=mail&_action=send`, { method: 'POST', body });
@@ -103,6 +106,17 @@ function esc(s: unknown): string {
 
 const BILLING_MODE_VALUES = ['on_submission', 'on_delivery', 'submission_delivery', 'operator_submission', 'operator_delivery', 'hybrid', 'on_attempt', 'on_accepted'] as const;
 
+export const BILLING_MODE_HELP: Record<string, string> = {
+  on_submission: 'Client is charged when the message is submitted to 8xtel.',
+  on_delivery: 'Client is charged only after a successful delivery confirmation.',
+  submission_delivery: 'Split charge: one part on submission, the rest on delivery.',
+  operator_submission: 'Charged when the operator accepts the submission.',
+  operator_delivery: 'Charged when the operator confirms delivery.',
+  hybrid: 'Submission charge plus operator delivery charge.',
+  on_attempt: 'Charged on every routing attempt, even if retried.',
+  on_accepted: 'Charged when 8xtel accepts the message for processing.',
+};
+
 const rateSchema = z.object({
   country: z.string().min(1).max(100),
   country_code: z.string().length(2).nullable().optional(),
@@ -115,10 +129,15 @@ const rateSchema = z.object({
   delivery_rate: z.number().positive().max(999999).nullable().optional(),
 });
 
+const emailList = z.array(z.string().email().max(254)).max(20).default([]);
+
 const createSchema = z.object({
   client_id: z.string().uuid(),
   valid_from: z.string().datetime({ offset: true }),
   timezone: z.string().max(32).default('GMT'),
+  cc: emailList,
+  bcc: emailList,
+  include_attachment: z.boolean().default(true),
   rates: z.array(rateSchema).min(1).max(200),
 });
 
@@ -138,13 +157,27 @@ const BILLING_MODE_LABELS: Record<string, string> = {
   on_attempt: 'On Attempt', on_accepted: 'On Accepted',
 };
 
+// Distinct billing-mode pill colors so modes read differently at a glance.
+const BILLING_MODE_STYLES: Record<string, string> = {
+  on_submission: 'background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;',
+  on_delivery: 'background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;',
+  submission_delivery: 'background:#eef2ff;color:#4338ca;border:1px solid #c7d2fe;',
+  operator_submission: 'background:#fffbeb;color:#b45309;border:1px solid #fde68a;',
+  operator_delivery: 'background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;',
+  hybrid: 'background:#fdf2f8;color:#be185d;border:1px solid #f9a8d4;',
+  on_attempt: 'background:#f5f3ff;color:#6d28d9;border:1px solid #ddd6fe;',
+  on_accepted: 'background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4;',
+};
+
 export function buildEmailHtml(args: {
-  validFrom: Date; systemId: string;
+  validFrom: Date; systemId: string; attachmentFilename?: string | null;
   rates: Array<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode?: string; delivery_rate?: string | null }>;
 }): string {
   const rows = args.rates.map((r) => {
     const sym = r.currency === 'EUR' ? '€' : '$';
-    const bm = BILLING_MODE_LABELS[String(r.billing_mode ?? 'on_submission')] ?? 'On Submission';
+    const bmKey = String(r.billing_mode ?? 'on_submission');
+    const bm = BILLING_MODE_LABELS[bmKey] ?? 'On Submission';
+    const bmStyle = BILLING_MODE_STYLES[bmKey] ?? BILLING_MODE_STYLES.on_submission;
     const rateCell = r.delivery_rate !== null && r.delivery_rate !== undefined && String(r.delivery_rate) !== ''
       ? `${sym}${esc(Number(r.rate).toFixed(3))} + ${sym}${esc(Number(r.delivery_rate).toFixed(3))} ${esc(r.currency)}`
       : `${sym}${esc(Number(r.rate).toFixed(3))} ${esc(r.currency)}`;
@@ -154,7 +187,7 @@ export function buildEmailHtml(args: {
       <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:center;">${esc(r.mcc)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:center;">${esc(r.mnc)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;text-align:right;white-space:nowrap;">${rateCell}</td>
-      <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(bm)}</td>
+      <td style="padding:10px 12px;border:1px solid #e2e8f0;"><span style="display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;${bmStyle}">${esc(bm)}</span></td>
     </tr>`;
   }).join('');
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
@@ -175,12 +208,87 @@ export function buildEmailHtml(args: {
 <th style="padding:10px 12px;border:1px solid #0f172a;text-align:right;">Price, Currency</th>
 <th style="padding:10px 12px;border:1px solid #0f172a;text-align:left;">Billing Mode</th>
 </tr></thead><tbody>${rows}</tbody></table>
+${args.attachmentFilename ? `<p>The complete current rate list for your account is attached as an Excel file.<br>Attachment: <strong>${esc(args.attachmentFilename)}</strong></p>` : ''}
 <p>It is set on: <strong>${esc(args.systemId)}</strong></p>
 <p style="font-size:12px;color:#64748b;"><strong>Note</strong> - SMS sent to any destination not included in this price list will be charged according to the applicable default rate.</p>
 <p>Regards,<br><strong>8xtel</strong></p>
 </div>
 <div style="background:#f8fafc;padding:12px 28px;font-size:11px;color:#94a3b8;">This is an automated rate notification from 8xtel. Please reply to ${esc(SENDER_EMAIL)} with any questions.</div>
 </div></body></html>`;
+}
+
+/** Validate + dedupe TO/CC/BCC. Returns error string or normalized lists. */
+function validateRecipients(to: string, cc: string[], bcc: string[]): { error?: string; cc?: string[]; bcc?: string[] } {
+  const t = norm(to);
+  if (!EMAIL_RE.test(t)) return { error: 'primary TO email is invalid' };
+  const seen = new Set([t]);
+  const clean = (list: string[]): string[] => {
+    const out: string[] = [];
+    for (const e of list) {
+      const v = norm(e);
+      if (!EMAIL_RE.test(v)) return [] as unknown as string[];
+      if (!seen.has(v)) { seen.add(v); out.push(v); }
+    }
+    return out;
+  };
+  const ccClean = clean(cc);
+  if (ccClean.length !== new Set(cc.map(norm)).size || cc.some((e) => !EMAIL_RE.test(norm(e)))) {
+    // distinguish invalid vs duplicate-with-TO
+    for (const e of cc) {
+      const v = norm(e);
+      if (!EMAIL_RE.test(v)) return { error: `invalid CC email: ${e}` };
+      if (v === t) return { error: `TO email must not appear in CC: ${e}` };
+    }
+  }
+  const bccClean = clean(bcc);
+  for (const e of bcc) {
+    const v = norm(e);
+    if (!EMAIL_RE.test(v)) return { error: `invalid BCC email: ${e}` };
+    if (v === t) return { error: `TO email must not appear in BCC: ${e}` };
+  }
+  const ccSet = new Set(ccClean);
+  for (const v of bccClean) {
+    if (ccSet.has(v)) return { error: `email must not be in both CC and BCC: ${v}` };
+  }
+  return { cc: ccClean, bcc: bccClean };
+}
+
+async function autoSaveContacts(emails: string[], actorId: string | null): Promise<void> {
+  for (const email of emails) {
+    const name = email.split('@')[0]!.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    await getPool().query(
+      `INSERT INTO rate_notification_email_contacts (display_name, email, created_by)
+       VALUES ($1,$2,$3) ON CONFLICT (email) DO UPDATE SET last_used_at=now(), updated_at=now()`,
+      [name, email, actorId],
+    );
+  }
+}
+
+async function storeRecipients(rnId: string, to: string, cc: string[], bcc: string[]): Promise<void> {
+  const pool = getPool();
+  const rows: Array<[string, string, string]> = [
+    [rnId, to, 'TO'],
+    ...cc.map((e): [string, string, string] => [rnId, e, 'CC']),
+    ...bcc.map((e): [string, string, string] => [rnId, e, 'BCC']),
+  ];
+  for (const [id, email, type] of rows) {
+    await pool.query(
+      'INSERT INTO rate_notification_recipients (rate_notification_id, email, recipient_type) VALUES ($1,$2,$3)',
+      [id, email, type],
+    );
+  }
+}
+
+async function recipientsFor(rnId: string): Promise<{ to: string[]; cc: string[]; bcc: string[] }> {
+  const rows = await query<{ email: string; recipient_type: string }>(
+    'SELECT email, recipient_type FROM rate_notification_recipients WHERE rate_notification_id=$1 ORDER BY created_at',
+    [rnId],
+  );
+  return {
+    to: rows.filter((r) => r.recipient_type === 'TO').map((r) => r.email),
+    cc: rows.filter((r) => r.recipient_type === 'CC').map((r) => r.email),
+    bcc: rows.filter((r) => r.recipient_type === 'BCC').map((r) => r.email),
+  };
 }
 
 // ── Client lookup for the searchable dropdown ────────────────────────────────
@@ -228,6 +336,105 @@ router.patch('/clients/:clientId/rate-email', audit('set_client_rate_email', 'cl
   );
   if (!r.rowCount) { res.status(404).json({ error: 'client not found' }); return; }
   res.json({ id: r.rows[0].id, rate_email: r.rows[0].rate_email });
+});
+
+// ── Saved email contacts ─────────────────────────────────────────────────────
+router.get('/contacts', async (req, res) => {
+  const q = String(req.query.q ?? '').trim();
+  const params: unknown[] = [];
+  let where = 'active=true';
+  if (q) {
+    params.push(`%${q}%`);
+    where += ` AND (display_name ILIKE $1 OR email ILIKE $1)`;
+  }
+  const rows = await query<{
+    id: string; display_name: string; email: string;
+    is_default_cc: boolean; is_default_bcc: boolean; last_used_at: string | null;
+  }>(
+    `SELECT id, display_name, email, is_default_cc, is_default_bcc, last_used_at
+     FROM rate_notification_email_contacts WHERE ${where}
+     ORDER BY last_used_at DESC NULLS LAST, display_name LIMIT 50`,
+    params,
+  );
+  res.json({ contacts: rows });
+});
+
+router.get('/contacts/defaults', async (_req, res) => {
+  const rows = await query<{ id: string; display_name: string; email: string; is_default_cc: boolean; is_default_bcc: boolean }>(
+    `SELECT id, display_name, email, is_default_cc, is_default_bcc
+     FROM rate_notification_email_contacts WHERE active=true AND (is_default_cc OR is_default_bcc)
+     ORDER BY display_name`,
+  );
+  res.json({
+    default_cc: rows.filter((r) => r.is_default_cc),
+    default_bcc: rows.filter((r) => r.is_default_bcc),
+  });
+});
+
+router.post('/contacts', audit('created_rn_contact', 'rn_contact'), async (req, res) => {
+  const parsed = z.object({
+    display_name: z.string().min(1).max(120),
+    email: z.string().email().max(254),
+    is_default_cc: z.boolean().optional(),
+    is_default_bcc: z.boolean().optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const actor = (req as unknown as { user?: { id?: string } }).user;
+  try {
+    const { rows } = await getPool().query(
+      `INSERT INTO rate_notification_email_contacts (display_name, email, is_default_cc, is_default_bcc, created_by)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (email) DO UPDATE SET display_name=EXCLUDED.display_name,
+         is_default_cc=EXCLUDED.is_default_cc, is_default_bcc=EXCLUDED.is_default_bcc, updated_at=now()
+       RETURNING id, display_name, email, is_default_cc, is_default_bcc`,
+      [parsed.data.display_name.trim(), norm(parsed.data.email),
+       parsed.data.is_default_cc ?? false, parsed.data.is_default_bcc ?? false,
+       actor?.id ?? null],
+    );
+    res.status(201).json({ contact: rows[0] });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message.slice(0, 200) });
+  }
+});
+
+router.patch('/contacts/:id', audit('updated_rn_contact', 'rn_contact'), async (req, res) => {
+  const parsed = z.object({
+    display_name: z.string().min(1).max(120).optional(),
+    is_default_cc: z.boolean().optional(),
+    is_default_bcc: z.boolean().optional(),
+    active: z.boolean().optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const sets: string[] = ['updated_at=now()'];
+  const vals: unknown[] = [];
+  let i = 1;
+  for (const [k, v] of Object.entries(parsed.data)) {
+    if (v === undefined) continue;
+    sets.push(`${k}=$${i++}`);
+    vals.push(typeof v === 'string' ? v.trim() : v);
+  }
+  if (vals.length === 0) { res.status(400).json({ error: 'nothing to update' }); return; }
+  vals.push(req.params.id);
+  const { rows } = await getPool().query(
+    `UPDATE rate_notification_email_contacts SET ${sets.join(', ')} WHERE id=$${i} RETURNING id, display_name, email, is_default_cc, is_default_bcc, active`,
+    vals,
+  );
+  if (!rows.length) { res.status(404).json({ error: 'contact not found' }); return; }
+  res.json({ contact: rows[0] });
+});
+
+router.delete('/contacts/:id', audit('deleted_rn_contact', 'rn_contact'), async (req, res) => {
+  const r = await getPool().query(
+    'UPDATE rate_notification_email_contacts SET active=false, updated_at=now() WHERE id=$1', [req.params.id],
+  );
+  if (!r.rowCount) { res.status(404).json({ error: 'contact not found' }); return; }
+  res.json({ ok: true });
 });
 
 // ── Saved rate card for a client (prefills the create form) ──────────────────
@@ -305,6 +512,23 @@ router.get('/countries', async (_req, res) => {
   });
 });
 
+// ── Stats for summary cards ──────────────────────────────────────────────────
+router.get('/stats', async (_req, res) => {
+  const r = await queryOne<{ total: string; sent: string; failed: string; drafts: string; month: string }>(
+    `SELECT COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE status='sent') AS sent,
+            COUNT(*) FILTER (WHERE status='failed') AS failed,
+            COUNT(*) FILTER (WHERE status IN ('draft','sending')) AS drafts,
+            COUNT(*) FILTER (WHERE created_at >= date_trunc('month', now())) AS month
+     FROM rate_notifications`,
+  );
+  res.json({
+    total: Number(r?.total ?? 0), sent: Number(r?.sent ?? 0),
+    failed: Number(r?.failed ?? 0), drafts: Number(r?.drafts ?? 0),
+    month: Number(r?.month ?? 0),
+  });
+});
+
 // ── Preview (no DB write, no send) ───────────────────────────────────────────
 router.post('/preview', async (req, res) => {
   const parsed = createSchema.safeParse(req.body);
@@ -318,18 +542,29 @@ router.post('/preview', async (req, res) => {
   if (!client) { res.status(404).json({ error: 'client not found' }); return; }
   const to = client.rate_email ?? client.portal_email;
   if (!to) { res.status(422).json({ error: 'client has no rates email on file — set "Send mail to" first' }); return; }
+  const v = validateRecipients(to, parsed.data.cc, parsed.data.bcc);
+  if (v.error) { res.status(422).json({ error: v.error }); return; }
   const subject = buildSubject(client.system_id, client.system_id);
   const validFrom = new Date(parsed.data.valid_from);
+  const filename = attachmentFilename(client.system_id, client.system_id);
+  let attachment = null;
+  if (parsed.data.include_attachment) {
+    try {
+      const list = await getClientActiveRates(parsed.data.client_id);
+      attachment = { filename, route_count: list.rows.length, countries: list.countries, networks: list.networks, currency: list.currency, empty: list.rows.length === 0 };
+    } catch (e) { attachment = { filename, error: (e as Error).message.slice(0, 200), empty: true, route_count: 0, countries: 0, networks: 0, currency: '' }; }
+  }
   const html = buildEmailHtml({
     validFrom,
     systemId: client.system_id,
+    attachmentFilename: parsed.data.include_attachment ? filename : null,
     rates: parsed.data.rates.map((r) => ({
       ...r, rate: String(r.rate),
       delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
     })),
   });
   res.json({
-    to,
+    to: norm(to), cc: v.cc, bcc: v.bcc, attachment,
     from: SENDER_EMAIL,
     from_name: SENDER_NAME,
     subject,
@@ -349,16 +584,20 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     'SELECT name, system_id, portal_email, rate_email FROM clients WHERE id=$1', [parsed.data.client_id],
   );
   if (!client) { res.status(404).json({ error: 'client not found' }); return; }
-  const recipient = client.rate_email ?? client.portal_email;
-  if (!recipient || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(recipient)) {
+  const rawTo = client.rate_email ?? client.portal_email;
+  if (!rawTo || !EMAIL_RE.test(norm(rawTo))) {
     res.status(422).json({ error: 'client has no valid rates email — set "Send mail to" first' });
     return;
   }
+  const to = norm(rawTo);
+  const v = validateRecipients(to, parsed.data.cc, parsed.data.bcc);
+  if (v.error) { res.status(422).json({ error: v.error }); return; }
+  const cc = v.cc ?? [];
+  const bcc = v.bcc ?? [];
   const pool = getPool();
   const subject = buildSubject(client.system_id, client.system_id);
   const validFrom = new Date(parsed.data.valid_from);
   if (Number.isNaN(validFrom.getTime())) { res.status(400).json({ error: 'invalid valid_from' }); return; }
-  // Split modes need both components; single modes use rate only.
   for (let i = 0; i < parsed.data.rates.length; i++) {
     const r = parsed.data.rates[i];
     if ((r.billing_mode === 'submission_delivery' || r.billing_mode === 'hybrid') &&
@@ -367,9 +606,34 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
       return;
     }
   }
+  const filename = attachmentFilename(client.system_id, client.system_id);
+  // Generate the client's COMPLETE active rate list BEFORE the insert, so a
+  // failure blocks the send (email is only sent after the file exists).
+  let xlsx: Buffer | null = null;
+  let rateList: { rows: unknown[]; currency: string; countries: number; networks: number } | null = null;
+  if (parsed.data.include_attachment) {
+    try {
+      const list = await getClientActiveRates(parsed.data.client_id);
+      rateList = list;
+      if (!list.rows.length) {
+        res.status(422).json({ error: 'No active rates found for this client account. Verify the route/rate configuration before sending.' });
+        return;
+      }
+      const full = await queryOne<{ name: string; company_name: string | null }>('SELECT name, company_name FROM clients WHERE id=$1', [parsed.data.client_id]);
+      xlsx = await buildClientRatesXlsx({
+        clientName: full?.company_name ?? full?.name ?? client.name,
+        productName: client.system_id, accountId: client.system_id, systemId: client.system_id,
+        currency: list.currency, timezone: parsed.data.timezone, list,
+      });
+    } catch (e) {
+      res.status(502).json({ error: 'attachment generation failed: ' + (e as Error).message.slice(0, 200) });
+      return;
+    }
+  }
   const html = buildEmailHtml({
     validFrom,
     systemId: client.system_id,
+    attachmentFilename: xlsx ? filename : null,
     rates: parsed.data.rates.map((r) => ({
       ...r, rate: String(r.rate),
       delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
@@ -381,22 +645,30 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
        (client_id, account_id, system_id, recipient_email, sender_email, subject,
         valid_from, timezone, status, created_by, created_by_email)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending',$9,$10) RETURNING id`,
-    [parsed.data.client_id, client.system_id, client.system_id, recipient,
+    [parsed.data.client_id, client.system_id, client.system_id, to,
      SENDER_EMAIL, subject, validFrom.toISOString(), parsed.data.timezone,
      actor?.id ?? null, actor?.email ?? null],
   );
   const rnId: string = rows[0].id;
+  await storeRecipients(rnId, to, cc, bcc);
+  if (xlsx && rateList) {
+    await pool.query(
+      'INSERT INTO rate_notification_attachments (rate_notification_id, filename, content, route_count, country_count, network_count, currency) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (rate_notification_id) DO UPDATE SET filename=EXCLUDED.filename, content=EXCLUDED.content, route_count=EXCLUDED.route_count, country_count=EXCLUDED.country_count, network_count=EXCLUDED.network_count, currency=EXCLUDED.currency',
+      [rnId, filename, xlsx, rateList.rows.length, rateList.countries, rateList.networks, rateList.currency],
+    );
+    await pool.query('UPDATE rate_notifications SET attachment_filename=$1, attachment_route_count=$2 WHERE id=$3', [filename, rateList.rows.length, rnId]);
+  }
+  // Auto-save new CC/BCC contacts + touch last_used for existing ones.
+  await autoSaveContacts([...cc, ...bcc], actor?.id ?? null);
   for (const r of parsed.data.rates) {
     await pool.query(
       `INSERT INTO rate_notification_rates
-         (rate_notification_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         (rate_notification_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, valid_from)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [rnId, r.country, r.country_code ?? null, r.network_name, r.mcc,
        r.mnc.toUpperCase(), r.currency, r.rate, r.billing_mode,
-       r.delivery_rate ?? null],
+       r.delivery_rate ?? null, validFrom.toISOString()],
     );
-    // Auto-save the rate card: next time the admin picks this client the
-    // destinations prefill. Upsert on the natural key so re-sends update.
     await pool.query(
       `INSERT INTO client_saved_rates
          (client_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, updated_at)
@@ -410,11 +682,11 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     );
   }
   try {
-    await sendRnMail({ to: recipient, subject, html });
+    await sendRnMail({ to, cc, bcc, subject, html, attachments: xlsx ? [{ filename, content: xlsx }] : [] });
     await pool.query(
       `UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rnId],
     );
-    res.status(201).json({ id: rnId, status: 'sent', subject });
+    res.status(201).json({ id: rnId, status: 'sent', subject, to, cc, bcc, recipient_count: 1 + cc.length + bcc.length, dest_count: parsed.data.rates.length, attachment: xlsx ? { filename, route_count: rateList!.rows.length, countries: rateList!.countries, networks: rateList!.networks, currency: rateList!.currency } : null });
   } catch (e) {
     const msg = (e as Error).message.slice(0, 500);
     await pool.query(
@@ -424,22 +696,114 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
   }
 });
 
-// ── History list ─────────────────────────────────────────────────────────────
+// ── History list with filters ────────────────────────────────────────────────
 router.get('/', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  let i = 1;
+  if (q.from) { conds.push(`rn.created_at >= $${i++}`); params.push(q.from); }
+  if (q.to) { conds.push(`rn.created_at <= $${i++}`); params.push(q.to); }
+  if (q.client) { conds.push(`c.name ILIKE $${i++}`); params.push(`%${q.client}%`); }
+  if (q.account_id) { conds.push(`rn.account_id ILIKE $${i++}`); params.push(`%${q.account_id}%`); }
+  if (q.system_id) { conds.push(`rn.system_id ILIKE $${i++}`); params.push(`%${q.system_id}%`); }
+  if (q.status) { conds.push(`rn.status = $${i++}`); params.push(q.status); }
+  if (q.currency) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.currency=$${i++})`); params.push(q.currency); }
+  if (q.billing_mode) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.billing_mode=$${i++})`); params.push(q.billing_mode); }
+  if (q.country) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.country ILIKE $${i++})`); params.push(`%${q.country}%`); }
+  if (q.sent_by) { conds.push(`rn.created_by_email ILIKE $${i++}`); params.push(`%${q.sent_by}%`); }
+  if (q.search) {
+    conds.push(`(c.name ILIKE $${i} OR rn.account_id ILIKE $${i} OR rn.system_id ILIKE $${i} OR rn.subject ILIKE $${i} OR rn.recipient_email ILIKE $${i})`);
+    params.push(`%${q.search}%`); i++;
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const rows = await query<{
     id: string; client_name: string; account_id: string; system_id: string;
     recipient_email: string; subject: string; valid_from: string; status: string;
     created_by_email: string | null; created_at: string; sent_at: string | null;
-    dest_count: string;
+    dest_count: string; currencies: string[] | null; billing_modes: string[] | null;
+    to_list: string[] | null; cc_list: string[] | null; bcc_list: string[] | null;
   }>(
     `SELECT rn.id, c.name AS client_name, rn.account_id, rn.system_id,
             rn.recipient_email, rn.subject, rn.valid_from, rn.status,
             rn.created_by_email, rn.created_at, rn.sent_at,
-            (SELECT COUNT(*) FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id) AS dest_count
+            (SELECT COUNT(*) FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id) AS dest_count,
+            (SELECT array_agg(DISTINCT r.currency) FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id) AS currencies,
+            (SELECT array_agg(DISTINCT r.billing_mode) FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id) AS billing_modes,
+            (SELECT array_agg(rr.email) FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='TO') AS to_list,
+            (SELECT array_agg(rr.email) FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='CC') AS cc_list,
+            (SELECT array_agg(rr.email) FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='BCC') AS bcc_list,
+            (SELECT a.filename FROM rate_notification_attachments a WHERE a.rate_notification_id=rn.id) AS attachment_filename,
+            (SELECT a.route_count FROM rate_notification_attachments a WHERE a.rate_notification_id=rn.id) AS attachment_routes
      FROM rate_notifications rn JOIN clients c ON c.id=rn.client_id
-     ORDER BY rn.created_at DESC LIMIT 200`,
+     ${where}
+     ORDER BY rn.created_at DESC LIMIT 500`,
+    params,
   );
   res.json({ notifications: rows });
+});
+
+// ── Export (respects same filters) ───────────────────────────────────────────
+router.get('/export', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const format = q.format === 'xls' ? 'xls' : 'csv';
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  let i = 1;
+  if (q.from) { conds.push(`rn.created_at >= $${i++}`); params.push(q.from); }
+  if (q.to) { conds.push(`rn.created_at <= $${i++}`); params.push(q.to); }
+  if (q.client) { conds.push(`c.name ILIKE $${i++}`); params.push(`%${q.client}%`); }
+  if (q.account_id) { conds.push(`rn.account_id ILIKE $${i++}`); params.push(`%${q.account_id}%`); }
+  if (q.system_id) { conds.push(`rn.system_id ILIKE $${i++}`); params.push(`%${q.system_id}%`); }
+  if (q.status) { conds.push(`rn.status = $${i++}`); params.push(q.status); }
+  if (q.currency) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.currency=$${i++})`); params.push(q.currency); }
+  if (q.billing_mode) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.billing_mode=$${i++})`); params.push(q.billing_mode); }
+  if (q.country) { conds.push(`EXISTS (SELECT 1 FROM rate_notification_rates r WHERE r.rate_notification_id=rn.id AND r.country ILIKE $${i++})`); params.push(`%${q.country}%`); }
+  if (q.sent_by) { conds.push(`rn.created_by_email ILIKE $${i++}`); params.push(`%${q.sent_by}%`); }
+  if (q.search) {
+    conds.push(`(c.name ILIKE $${i} OR rn.account_id ILIKE $${i} OR rn.system_id ILIKE $${i} OR rn.subject ILIKE $${i})`);
+    params.push(`%${q.search}%`); i++;
+  }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+  const rows = await query<Record<string, unknown>>(
+    `SELECT rn.id, rn.created_at, c.name AS client, rn.account_id, rn.system_id,
+            (SELECT string_agg(rr.email, '; ') FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='TO') AS to_emails,
+            (SELECT string_agg(rr.email, '; ') FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='CC') AS cc_emails,
+            (SELECT string_agg(rr.email, '; ') FROM rate_notification_recipients rr WHERE rr.rate_notification_id=rn.id AND rr.recipient_type='BCC') AS bcc_emails,
+            r.country, r.network_name, r.mcc, r.mnc, r.currency, r.rate, r.billing_mode,
+            rn.status, rn.created_by_email, rn.sent_at
+     FROM rate_notifications rn
+     JOIN clients c ON c.id=rn.client_id
+     LEFT JOIN rate_notification_rates r ON r.rate_notification_id=rn.id
+     ${where}
+     ORDER BY rn.created_at DESC LIMIT 5000`,
+    params,
+  );
+  const cols = ['Notification ID', 'Date', 'Client', 'Account ID', 'System ID', 'TO', 'CC', 'BCC', 'Country', 'Network', 'MCC', 'MNC', 'Currency', 'Rate', 'Billing Mode', 'Status', 'Sent By', 'Sent At'];
+  const cell = (v: unknown): string[] => [String(v ?? '')];
+  if (format === 'xls') {
+    res.setHeader('content-type', 'application/vnd.ms-excel; charset=utf-8');
+    res.setHeader('content-disposition', 'attachment; filename="rate-notifications.xls"');
+    const h = (v: unknown): string => esc(v);
+    res.write(`<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"></head><body><table border="1"><tr>${cols.map((c) => `<th>${h(c)}</th>`).join('')}</tr>`);
+    for (const r of rows) {
+      res.write(`<tr>${cell(r.id).concat(cell(r.created_at), cell(r.client), cell(r.account_id), cell(r.system_id), cell(r.to_emails), cell(r.cc_emails), cell(r.bcc_emails), cell(r.country), cell(r.network_name), cell(r.mcc), cell(r.mnc), cell(r.currency), cell(r.rate), cell(BILLING_MODE_LABELS[String(r.billing_mode ?? 'on_submission')] ?? r.billing_mode), cell(r.status), cell(r.created_by_email), cell(r.sent_at)).map((v) => `<td>${h(v)}</td>`).join('')}</tr>`);
+    }
+    res.write('</table></body></html>');
+    res.end();
+    return;
+  }
+  const csvEsc = (v: unknown): string => {
+    const s = String(v ?? '');
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  res.setHeader('content-type', 'text/csv; charset=utf-8');
+  res.setHeader('content-disposition', 'attachment; filename="rate-notifications.csv"');
+  res.write(`${cols.join(',')}\n`);
+  for (const r of rows) {
+    res.write([r.id, r.created_at, r.client, r.account_id, r.system_id, r.to_emails, r.cc_emails, r.bcc_emails, r.country, r.network_name, r.mcc, r.mnc, r.currency, r.rate, BILLING_MODE_LABELS[String(r.billing_mode ?? 'on_submission')] ?? r.billing_mode, r.status, r.created_by_email, r.sent_at].map(csvEsc).join(',') + '\n');
+  }
+  res.end();
 });
 
 // ── Detail + email preview ───────────────────────────────────────────────────
@@ -464,28 +828,64 @@ router.get('/:id', async (req, res) => {
      FROM rate_notification_rates WHERE rate_notification_id=$1 ORDER BY country, network_name`,
     [rn.id],
   );
-  const html = buildEmailHtml({ validFrom: new Date(rn.valid_from), systemId: rn.system_id, rates });
-  res.json({ notification: rn, rates, html });
+  const recipients = await recipientsFor(rn.id);
+  const att = await queryOne<{ filename: string; route_count: number; country_count: number; network_count: number; currency: string | null }>(
+    'SELECT filename, route_count, country_count, network_count, currency FROM rate_notification_attachments WHERE rate_notification_id=$1', [rn.id],
+  ).catch(() => null);
+  const html = buildEmailHtml({ validFrom: new Date(rn.valid_from), systemId: rn.system_id, attachmentFilename: att?.filename ?? null, rates });
+  res.json({ notification: rn, rates, recipients, attachment: att, html });
 });
 
-// ── Retry failed ─────────────────────────────────────────────────────────────
-router.post('/:id/retry', audit('retried_rate_notification', 'rate_notification'), async (req, res) => {
-  const rn = await queryOne<{ id: string; recipient_email: string; subject: string; valid_from: string; system_id: string; status: string }>(
-    'SELECT id, recipient_email, subject, valid_from, system_id, status FROM rate_notifications WHERE id=$1',
+// ── Resend using stored data + stored recipients ─────────────────────────────
+router.post('/:id/resend', audit('resent_rate_notification', 'rate_notification'), async (req, res) => {
+  const rn = await queryOne<{ id: string; subject: string; valid_from: string; system_id: string; status: string }>(
+    'SELECT id, subject, valid_from, system_id, status FROM rate_notifications WHERE id=$1',
     [req.params.id],
   );
   if (!rn) { res.status(404).json({ error: 'not found' }); return; }
-  if (rn.status !== 'failed') { res.status(422).json({ error: `only failed notifications can be retried (status=${rn.status})` }); return; }
+  const full = await queryOne<{ client_id: string; account_id: string; timezone: string }>(
+    'SELECT client_id, account_id, timezone FROM rate_notifications WHERE id=$1', [rn.id],
+  );
+  const recipients = await recipientsFor(rn.id);
+  if (!recipients.to.length) { res.status(422).json({ error: 'no stored recipients' }); return; }
   const rates = await query<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode: string; delivery_rate: string | null }>(
     `SELECT country, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate
      FROM rate_notification_rates WHERE rate_notification_id=$1 ORDER BY country, network_name`,
     [rn.id],
   );
   const pool = getPool();
+  // mode=original (default): reuse the exact stored xlsx. mode=regenerate:
+  // rebuild from the client's CURRENT active rates and replace the snapshot.
+  const mode = String(req.query.mode ?? 'original').toLowerCase() === 'regenerate' ? 'regenerate' : 'original';
+  let attach = await queryOne<{ filename: string; content: Buffer }>(
+    'SELECT filename, content FROM rate_notification_attachments WHERE rate_notification_id=$1', [rn.id],
+  ).catch(() => null);
+  if (mode === 'regenerate') {
+    try {
+      const list = await getClientActiveRates(full!.client_id);
+      if (!list.rows.length) { res.status(422).json({ error: 'No active rates found for this client account.' }); return; }
+      const filename = attachmentFilename(full!.account_id, rn.system_id);
+      const info = await queryOne<{ name: string; company_name: string | null }>('SELECT name, company_name FROM clients WHERE id=$1', [full!.client_id]);
+      const xlsx = await buildClientRatesXlsx({
+        clientName: info?.company_name ?? info?.name ?? '', productName: rn.system_id,
+        accountId: full!.account_id, systemId: rn.system_id,
+        currency: list.currency, timezone: full!.timezone ?? 'GMT', list,
+      });
+      await pool.query(
+        'INSERT INTO rate_notification_attachments (rate_notification_id, filename, content, route_count, country_count, network_count, currency) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (rate_notification_id) DO UPDATE SET filename=EXCLUDED.filename, content=EXCLUDED.content, route_count=EXCLUDED.route_count, country_count=EXCLUDED.country_count, network_count=EXCLUDED.network_count, currency=EXCLUDED.currency',
+        [rn.id, filename, xlsx, list.rows.length, list.countries, list.networks, list.currency],
+      );
+      await pool.query('UPDATE rate_notifications SET attachment_filename=$1, attachment_route_count=$2 WHERE id=$3', [filename, list.rows.length, rn.id]);
+      attach = { filename, content: xlsx };
+    } catch (e) {
+      res.status(502).json({ error: 'attachment regeneration failed: ' + (e as Error).message.slice(0, 200) });
+      return;
+    }
+  }
   await pool.query(`UPDATE rate_notifications SET status='sending', error_message=NULL WHERE id=$1`, [rn.id]);
   try {
-    const html = buildEmailHtml({ validFrom: new Date(rn.valid_from), systemId: rn.system_id, rates });
-    await sendRnMail({ to: rn.recipient_email, subject: rn.subject, html });
+    const html = buildEmailHtml({ validFrom: new Date(rn.valid_from), systemId: rn.system_id, attachmentFilename: attach?.filename ?? null, rates });
+    await sendRnMail({ to: recipients.to[0]!, cc: recipients.cc, bcc: recipients.bcc, subject: rn.subject, html, attachments: attach ? [{ filename: attach.filename, content: attach.content }] : [] });
     await pool.query(`UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rn.id]);
     res.json({ id: rn.id, status: 'sent' });
   } catch (e) {
@@ -493,6 +893,122 @@ router.post('/:id/retry', audit('retried_rate_notification', 'rate_notification'
     await pool.query(`UPDATE rate_notifications SET status='failed', error_message=$1 WHERE id=$2`, [msg, rn.id]);
     res.status(502).json({ id: rn.id, status: 'failed', error: msg });
   }
+});
+
+// ── Retry failed (alias of resend, kept for backwards compat) ────────────────
+router.post('/:id/retry', audit('retried_rate_notification', 'rate_notification'), async (req, res) => {
+  const rn = await queryOne<{ id: string; status: string }>(
+    'SELECT id, status FROM rate_notifications WHERE id=$1', [req.params.id],
+  );
+  if (!rn) { res.status(404).json({ error: 'not found' }); return; }
+  if (rn.status !== 'failed') { res.status(422).json({ error: `only failed notifications can be retried (status=${rn.status})` }); return; }
+  // Forward to resend logic inline
+  const full = await queryOne<{ id: string; subject: string; valid_from: string; system_id: string }>(
+    'SELECT id, subject, valid_from, system_id FROM rate_notifications WHERE id=$1', [rn.id],
+  );
+  const recipients = await recipientsFor(rn.id);
+  if (!recipients.to.length) { res.status(422).json({ error: 'no stored recipients' }); return; }
+  const rates = await query<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode: string; delivery_rate: string | null }>(
+    `SELECT country, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate
+     FROM rate_notification_rates WHERE rate_notification_id=$1 ORDER BY country, network_name`,
+    [rn.id],
+  );
+  const pool = getPool();
+  const attach = await queryOne<{ filename: string; content: Buffer }>(
+    'SELECT filename, content FROM rate_notification_attachments WHERE rate_notification_id=$1', [rn.id],
+  ).catch(() => null);
+  await pool.query(`UPDATE rate_notifications SET status='sending', error_message=NULL WHERE id=$1`, [rn.id]);
+  try {
+    const html = buildEmailHtml({ validFrom: new Date(full!.valid_from), systemId: full!.system_id, attachmentFilename: attach?.filename ?? null, rates });
+    await sendRnMail({ to: recipients.to[0]!, cc: recipients.cc, bcc: recipients.bcc, subject: full!.subject, html, attachments: attach ? [{ filename: attach.filename, content: attach.content }] : [] });
+    await pool.query(`UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rn.id]);
+    res.json({ id: rn.id, status: 'sent' });
+  } catch (e) {
+    const msg = (e as Error).message.slice(0, 500);
+    await pool.query(`UPDATE rate_notifications SET status='failed', error_message=$1 WHERE id=$2`, [msg, rn.id]);
+    res.status(502).json({ id: rn.id, status: 'failed', error: msg });
+  }
+});
+
+// ── Download the exact stored xlsx (historical snapshot, never regenerated) ──
+router.get('/:id/attachment', async (req, res) => {
+  const att = await queryOne<{ filename: string; content: Buffer }>(
+    'SELECT filename, content FROM rate_notification_attachments WHERE rate_notification_id=$1', [req.params.id],
+  ).catch(() => null);
+  if (!att) { res.status(404).json({ error: 'no attachment stored for this notification' }); return; }
+  res.setHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('content-disposition', 'attachment; filename="' + att.filename + '"');
+  res.send(att.content);
+});
+
+// ── Attachment preview rows (first 25, server-side — browser never loads thousands) ──
+router.get('/:id/attachment-preview', async (req, res) => {
+  const ExcelJS = (await import('exceljs')).default;
+  const att = await queryOne<{ content: Buffer }>(
+    'SELECT content FROM rate_notification_attachments WHERE rate_notification_id=$1', [req.params.id],
+  ).catch(() => null);
+  if (!att) { res.status(404).json({ error: 'no attachment stored' }); return; }
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(att.content as unknown as ArrayBuffer);
+  const ws = wb.getWorksheet('Rates');
+  if (!ws) { res.status(404).json({ error: 'rates sheet missing' }); return; }
+  const headerRow = 10;
+  const headers = ws.getRow(headerRow).values as unknown[];
+  const rows = [];
+  for (let i = headerRow + 1; i <= Math.min(ws.rowCount, headerRow + 25); i++) {
+    const v = ws.getRow(i).values as unknown[];
+    if (!v || v.length < 2) continue;
+    rows.push(Array.isArray(v) ? v.slice(1, 8) : []);
+  }
+  res.json({ headers: Array.isArray(headers) ? headers.slice(1, 8) : [], rows, total: ws.rowCount - headerRow });
+});
+
+// ── Live attachment preview for the create form (server-side rows) ──
+router.get('/attachment-preview/:clientId', async (req, res) => {
+  try {
+    const list = await getClientActiveRates(req.params.clientId);
+    res.json({
+      filename: attachmentFilename(req.query.account_id ? String(req.query.account_id) : list.currency, req.query.system_id ? String(req.query.system_id) : ''),
+      route_count: list.rows.length, countries: list.countries, networks: list.networks,
+      currency: list.currency, empty: list.rows.length === 0,
+      sample: list.rows.slice(0, 25),
+    });
+  } catch (e) { res.status(422).json({ error: (e as Error).message.slice(0, 200) }); }
+});
+
+// ── Copy notification → new draft ────────────────────────────────────────────
+router.post('/:id/copy', audit('copied_rate_notification', 'rate_notification'), async (req, res) => {
+  const rn = await queryOne<{ client_id: string; account_id: string; system_id: string; recipient_email: string; subject: string; valid_from: string; timezone: string }>(
+    'SELECT client_id, account_id, system_id, recipient_email, subject, valid_from, timezone FROM rate_notifications WHERE id=$1',
+    [req.params.id],
+  );
+  if (!rn) { res.status(404).json({ error: 'not found' }); return; }
+  const actor = (req as unknown as { user?: { id?: string; email?: string } }).user;
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `INSERT INTO rate_notifications
+       (client_id, account_id, system_id, recipient_email, sender_email, subject, valid_from, timezone, status, created_by, created_by_email)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10) RETURNING id`,
+    [rn.client_id, rn.account_id, rn.system_id, rn.recipient_email, SENDER_EMAIL, rn.subject, rn.valid_from, rn.timezone, actor?.id ?? null, actor?.email ?? null],
+  );
+  const newId: string = rows[0].id;
+  await pool.query(
+    `INSERT INTO rate_notification_rates
+       (rate_notification_id, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, valid_from)
+     SELECT $1, country, country_code, network_name, mcc, mnc, currency, rate, billing_mode, delivery_rate, valid_from
+     FROM rate_notification_rates WHERE rate_notification_id=$2`,
+    [newId, req.params.id],
+  );
+  const recipients = await recipientsFor(req.params.id);
+  await storeRecipients(newId, recipients.to[0] ?? rn.recipient_email, recipients.cc, recipients.bcc);
+  res.status(201).json({ id: newId, status: 'draft' });
+});
+
+// ── Delete notification ──────────────────────────────────────────────────────
+router.delete('/:id', audit('deleted_rate_notification', 'rate_notification'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM rate_notifications WHERE id=$1', [req.params.id]);
+  if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ ok: true });
 });
 
 export default router;

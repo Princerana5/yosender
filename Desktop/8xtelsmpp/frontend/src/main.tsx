@@ -18,7 +18,7 @@ import ClientReports from './pages/ClientReports.js';
 import OtpTemplates from './pages/OtpTemplates.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
-import { RateNotificationHistory, RateNotificationDetail, RateNotificationCreate } from './pages/RateNotifications.js';
+import { RateNotificationHistory, RateNotificationDetail, RateNotificationCreate, RateNotificationContacts } from './pages/RateNotifications.js';
 import ClientApi from './pages/ClientApi.js';
 import Docs from './pages/Docs.js';
 import { StatusBadge, initTheme } from './components.js';
@@ -132,6 +132,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="client-reports" element={<ClientReports />} />
           <Route path="rate-notifications" element={<RateNotificationHistory />} />
           <Route path="rate-notifications/new" element={<RateNotificationCreate />} />
+          <Route path="rate-notifications/contacts" element={<RateNotificationContacts />} />
           <Route path="rate-notifications/:id" element={<RateNotificationDetail />} />
           <Route path="otp-templates" element={<OtpTemplates />} />
           <Route
