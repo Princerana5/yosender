@@ -238,19 +238,22 @@ export function RateNotificationCreate(): JSX.Element {
     });
   }
 
+  const [formError, setFormError] = useState('');
+
   function payload(): { client_id: string; valid_from: string; timezone: string; rates: unknown[] } | null {
-    if (!client) { setMsg('Select a client first.'); return null; }
-    if (!client.email) { setMsg('Selected client has no email on file.'); return null; }
+    const fail = (m: string): null => { setFormError(m); return null; };
+    if (!client) return fail('Select a client first.');
+    if (!client.email) return fail('Selected client has no email on file — set "Send mail to" in section 1.');
     const rates: unknown[] = [];
     for (let i = 0; i < dests.length; i++) {
       const d = dests[i];
-      if (!d.country) { setMsg(`Destination ${i + 1}: select a country.`); return null; }
-      if (!d.network_name.trim()) { setMsg(`Destination ${i + 1}: enter a network name.`); return null; }
-      if (!/^\d{3}$/.test(d.mcc)) { setMsg(`Destination ${i + 1}: MCC must be 3 digits.`); return null; }
+      if (!d.country) return fail(`Destination ${i + 1}: select a country.`);
+      if (!d.network_name.trim()) return fail(`Destination ${i + 1}: enter a network name.`);
+      if (!/^\d{3}$/.test(d.mcc)) return fail(`Destination ${i + 1}: MCC must be 3 digits.`);
       const mnc = d.mncMode === 'all' ? 'ALL' : d.mnc.trim().toUpperCase();
-      if (!/^(\d{1,3}|ALL)$/.test(mnc)) { setMsg(`Destination ${i + 1}: MNC must be digits or ALL.`); return null; }
+      if (!/^(\d{1,3}|ALL)$/.test(mnc)) return fail(`Destination ${i + 1}: MNC must be digits or ALL.`);
       const rate = Number(d.rate);
-      if (!Number.isFinite(rate) || rate <= 0) { setMsg(`Destination ${i + 1}: rate must be a positive number.`); return null; }
+      if (!Number.isFinite(rate) || rate <= 0) return fail(`Destination ${i + 1}: rate must be a positive number.`);
       rates.push({
         country: d.country, country_code: d.country_code || null,
         network_name: d.network_name.trim(), mcc: d.mcc, mnc,
@@ -258,7 +261,8 @@ export function RateNotificationCreate(): JSX.Element {
       });
     }
     const vf = new Date(validFrom);
-    if (Number.isNaN(vf.getTime())) { setMsg('Valid From is invalid.'); return null; }
+    if (Number.isNaN(vf.getTime())) return fail('Valid From is invalid.');
+    setFormError('');
     return { client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', rates };
   }
 
@@ -268,6 +272,18 @@ export function RateNotificationCreate(): JSX.Element {
     setBusy(true); setMsg('');
     try {
       setPreview(await api<Preview>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify(p) }));
+    } catch (e) { setMsg(`Preview failed: ${(e as Error).message}`); }
+    setBusy(false);
+  }
+
+  // Send button: validate → fetch a fresh preview → open the confirm popup.
+  // (Previously it required a preview to exist first, which made the button
+  // look dead when clicked before Preview Email.)
+  async function doPreviewThenConfirm(p: { client_id: string; valid_from: string; timezone: string; rates: unknown[] }): Promise<void> {
+    setBusy(true); setMsg('');
+    try {
+      setPreview(await api<Preview>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify(p) }));
+      setConfirming(true);
     } catch (e) { setMsg(`Preview failed: ${(e as Error).message}`); }
     setBusy(false);
   }
@@ -400,10 +416,11 @@ export function RateNotificationCreate(): JSX.Element {
         <input type="datetime-local" className="input max-w-[260px]" value={validFrom} onChange={(e) => setValidFrom(e.target.value)} />
       </div>
 
-      <div className="flex gap-2 mb-3">
+      <div className="flex gap-2 mb-1">
         <button className="btn-ghost" onClick={() => void doPreview()} disabled={busy}>{busy ? 'Working…' : 'Preview Email'}</button>
-        <button className="btn" onClick={() => { if (payload()) setConfirming(true); }} disabled={busy || !preview}>Send Rate Notification</button>
+        <button className="btn" onClick={() => { const p = payload(); if (p) { setFormError(''); void doPreviewThenConfirm(p); } }} disabled={busy}>Send Rate Notification</button>
       </div>
+      {formError && <div className="text-sm text-red-300 mb-3">⚠ {formError}</div>}
 
       {preview && (
         <div className="card card-pad mb-3">
