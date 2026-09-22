@@ -71,9 +71,15 @@ async function handleVendorDlr(req: express.Request, res: express.Response): Pro
   //   JSON {message_id,status} | {msgid,dlr_status} | {id,delivery_status}
   //   GET ?msgid=X&status=DELIVRD | ?id=X&stat=D | form-encoded equivalents
   // Merge query + body so GET and POST both work.
+  const rawBody = (req.body ?? {}) as Record<string, unknown>;
+  // Some vendors nest the report one level deep: {data:{id,status}} etc.
+  const nested = rawBody.data ?? rawBody.dlr ?? rawBody.result ?? rawBody.message;
+  const bodyObj = nested !== null && typeof nested === 'object' && !Array.isArray(nested)
+    ? nested as Record<string, unknown>
+    : rawBody;
   const merged: Record<string, unknown> = {
     ...(req.query as Record<string, unknown>),
-    ...((req.body ?? {}) as Record<string, unknown>),
+    ...bodyObj,
   };
   const lower: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(merged)) lower[k.toLowerCase()] = v;

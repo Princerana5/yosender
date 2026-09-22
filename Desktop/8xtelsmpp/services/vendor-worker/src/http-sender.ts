@@ -194,6 +194,9 @@ export class HttpVendorSender {
     // vendors then push DLRs in realtime instead of waiting for poll rounds.
     let dlrToken = opts.dlr_token;
     if (!dlrToken) dlrToken = await vendorDlrToken(this.vendorId);
+    if (!webhookBase()) {
+      console.warn(`[http-sender] ${this.vendorName}: HTTP_DLR_BASE/SMPP_PUBLIC_HOST unset — {dlr_url} is empty, vendor cannot push realtime DLRs (polling only)`);
+    }
     const vars: Record<string, string> = {
       to: opts.destination,
       from: applied.from,
