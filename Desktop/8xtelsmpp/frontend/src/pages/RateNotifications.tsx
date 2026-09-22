@@ -5,7 +5,8 @@ import { PageHeader, StatusBadge } from '../components';
 
 interface RnClient {
   id: string; name: string; company_name: string | null;
-  account_id: string; system_id: string; email: string | null; status: string;
+  account_id: string; system_id: string; email: string | null;
+  portal_email: string | null; rate_email: string | null; status: string;
 }
 
 interface Country { name: string; iso_code: string; calling_code: string; }
@@ -156,8 +157,28 @@ export function RateNotificationCreate(): JSX.Element {
     };
   }
 
+  const [rateEmailDraft, setRateEmailDraft] = useState('');
+
+  async function saveRateEmail(): Promise<void> {
+    if (!client) return;
+    const v = rateEmailDraft.trim();
+    if (v && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { setMsg('Rates email is not a valid email address.'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const r = await api<{ rate_email: string | null }>(`/rate-notifications/clients/${client.id}/rate-email`, {
+        method: 'PATCH', body: JSON.stringify({ rate_email: v || null }),
+      });
+      const eff = r.rate_email ?? client.portal_email;
+      setClient({ ...client, rate_email: r.rate_email, email: eff });
+      setRateEmailDraft('');
+      setMsg(v ? `Rates email set to ${r.rate_email} ✓` : 'Rates email cleared — portal email will be used.');
+    } catch (e) { setMsg(`Save failed: ${(e as Error).message}`); }
+    setBusy(false);
+  }
+
   function pickClient(c: RnClient): void {
     setClient(c); setPreview(null); setSaved([]); setSavedLoaded(false);
+    setRateEmailDraft(c.rate_email ?? '');
     api<{ rates: SavedRate[] }>(`/rate-notifications/saved-rates/${c.id}`)
       .then((r) => {
         setSaved(r.rates); setSavedLoaded(true);
@@ -285,12 +306,22 @@ export function RateNotificationCreate(): JSX.Element {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div><span className="label">Client</span><div className="font-semibold">{client.name}</div></div>
-            <div><span className="label">Email (recipient)</span><div className="mono">{client.email ?? '—'}</div></div>
-            <div><span className="label">Destination Account ID</span><div className="mono">{client.account_id}</div></div>
-            <div><span className="label">System ID</span><div className="mono">{client.system_id}</div></div>
-            <button className="btn-ghost !py-1 !text-xs justify-self-start" onClick={() => setClient(null)}>Change client</button>
+          <div className="text-sm">
+            <div className="grid grid-cols-2 gap-2">
+              <div><span className="label">Client</span><div className="font-semibold">{client.name}</div></div>
+              <div><span className="label">Destination Account ID</span><div className="mono">{client.account_id}</div></div>
+              <div><span className="label">System ID</span><div className="mono">{client.system_id}</div></div>
+              <div><span className="label">Portal email</span><div className="mono">{client.portal_email ?? '—'}</div></div>
+            </div>
+            <div className="mt-2 rounded-lg border border-line/60 p-2.5">
+              <label className="label">Send mail to (client's rates email) — add / update</label>
+              <div className="flex gap-2">
+                <input className="input mono" value={rateEmailDraft} onChange={(e) => setRateEmailDraft(e.target.value)} placeholder={client.portal_email ?? 'rates-client@example.com'} />
+                <button className="btn-ghost !text-xs whitespace-nowrap" onClick={() => void saveRateEmail()} disabled={busy}>Save email</button>
+              </div>
+              <div className="text-[11px] text-muted mt-1">Recipient: <span className="mono">{client.email ?? '— none set —'}</span>{client.rate_email ? '' : client.portal_email ? ' (falls back to portal email)' : ''}</div>
+            </div>
+            <button className="btn-ghost !py-1 !text-xs justify-self-start mt-2" onClick={() => setClient(null)}>Change client</button>
           </div>
         )}
         <div className="mt-2 text-xs text-muted">Subject: <span className="mono">{subject}</span></div>

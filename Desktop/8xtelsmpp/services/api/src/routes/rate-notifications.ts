@@ -173,13 +173,13 @@ router.get('/clients', async (req, res) => {
   let where = `COALESCE(c.is_house,false)=false`;
   if (q) {
     params.push(`%${q}%`);
-    where += ` AND (c.name ILIKE $1 OR c.company_name ILIKE $1 OR c.system_id ILIKE $1 OR c.portal_email ILIKE $1)`;
+    where += ` AND (c.name ILIKE $1 OR c.company_name ILIKE $1 OR c.system_id ILIKE $1 OR c.portal_email ILIKE $1 OR c.rate_email ILIKE $1)`;
   }
   const rows = await query<{
     id: string; name: string; company_name: string | null; system_id: string;
-    portal_email: string | null; status: string;
+    portal_email: string | null; rate_email: string | null; status: string;
   }>(
-    `SELECT c.id, c.name, c.company_name, c.system_id, c.portal_email, c.status
+    `SELECT c.id, c.name, c.company_name, c.system_id, c.portal_email, c.rate_email, c.status
      FROM clients c WHERE ${where} ORDER BY c.name LIMIT 30`,
     params,
   );
@@ -190,10 +190,27 @@ router.get('/clients', async (req, res) => {
       company_name: c.company_name,
       account_id: c.system_id,
       system_id: c.system_id,
-      email: c.portal_email,
+      email: c.rate_email ?? c.portal_email,
+      portal_email: c.portal_email,
+      rate_email: c.rate_email,
       status: c.status,
     })),
   });
+});
+
+// ── Set / update a client's rate-notification email ──────────────────────────
+router.patch('/clients/:clientId/rate-email', audit('set_client_rate_email', 'client'), async (req, res) => {
+  const parsed = z.object({ rate_email: z.string().email().max(254).nullable() }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const r = await getPool().query(
+    'UPDATE clients SET rate_email=$1, updated_at=now() WHERE id=$2 RETURNING id, rate_email',
+    [parsed.data.rate_email?.toLowerCase() ?? null, req.params.clientId],
+  );
+  if (!r.rowCount) { res.status(404).json({ error: 'client not found' }); return; }
+  res.json({ id: r.rows[0].id, rate_email: r.rows[0].rate_email });
 });
 
 // ── Saved rate card for a client (prefills the create form) ──────────────────
@@ -266,11 +283,12 @@ router.post('/preview', async (req, res) => {
     res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
     return;
   }
-  const client = await queryOne<{ name: string; system_id: string; portal_email: string | null }>(
-    'SELECT name, system_id, portal_email FROM clients WHERE id=$1', [parsed.data.client_id],
+  const client = await queryOne<{ name: string; system_id: string; portal_email: string | null; rate_email: string | null }>(
+    'SELECT name, system_id, portal_email, rate_email FROM clients WHERE id=$1', [parsed.data.client_id],
   );
   if (!client) { res.status(404).json({ error: 'client not found' }); return; }
-  if (!client.portal_email) { res.status(422).json({ error: 'client has no email on file (portal_email)' }); return; }
+  const to = client.rate_email ?? client.portal_email;
+  if (!to) { res.status(422).json({ error: 'client has no rates email on file — set "Send mail to" first' }); return; }
   const subject = buildSubject(client.system_id, client.system_id);
   const validFrom = new Date(parsed.data.valid_from);
   const html = buildEmailHtml({
@@ -279,7 +297,7 @@ router.post('/preview', async (req, res) => {
     rates: parsed.data.rates.map((r) => ({ ...r, rate: String(r.rate) })),
   });
   res.json({
-    to: client.portal_email,
+    to,
     from: SENDER_EMAIL,
     from_name: SENDER_NAME,
     subject,
@@ -295,12 +313,13 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
     return;
   }
-  const client = await queryOne<{ name: string; system_id: string; portal_email: string | null }>(
-    'SELECT name, system_id, portal_email FROM clients WHERE id=$1', [parsed.data.client_id],
+  const client = await queryOne<{ name: string; system_id: string; portal_email: string | null; rate_email: string | null }>(
+    'SELECT name, system_id, portal_email, rate_email FROM clients WHERE id=$1', [parsed.data.client_id],
   );
   if (!client) { res.status(404).json({ error: 'client not found' }); return; }
-  if (!client.portal_email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(client.portal_email)) {
-    res.status(422).json({ error: 'client has no valid email on file (portal_email)' });
+  const recipient = client.rate_email ?? client.portal_email;
+  if (!recipient || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(recipient)) {
+    res.status(422).json({ error: 'client has no valid rates email — set "Send mail to" first' });
     return;
   }
   const pool = getPool();
@@ -318,7 +337,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
        (client_id, account_id, system_id, recipient_email, sender_email, subject,
         valid_from, timezone, status, created_by, created_by_email)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending',$9,$10) RETURNING id`,
-    [parsed.data.client_id, client.system_id, client.system_id, client.portal_email,
+    [parsed.data.client_id, client.system_id, client.system_id, recipient,
      SENDER_EMAIL, subject, validFrom.toISOString(), parsed.data.timezone,
      actor?.id ?? null, actor?.email ?? null],
   );
@@ -344,7 +363,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     );
   }
   try {
-    await sendRnMail({ to: client.portal_email, subject, html });
+    await sendRnMail({ to: recipient, subject, html });
     await pool.query(
       `UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rnId],
     );
