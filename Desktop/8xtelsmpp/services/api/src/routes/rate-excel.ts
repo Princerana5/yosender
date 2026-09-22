@@ -3,12 +3,18 @@ import { query, queryOne } from '@8xtel/core';
 
 export interface ClientRateRow {
   country: string;
-  operator: string;
-  cc: string;
   mcc: string;
   mnc: string;
-  mccmnc: string;
   rate: number;
+  date: string;
+}
+
+export const RN_HEADER_ROW = 8;
+export const RN_COLUMNS = ['Country', 'MCC', 'MNC', 'Price', 'Date'];
+
+function fmtDate(d: Date): string {
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
 }
 
 export interface ClientRateList {
@@ -24,7 +30,7 @@ export interface ClientRateList {
 // engine's candidate set (same predicates as clients.ts detail + portal.ts).
 // Price priority per route: route.price_per_segment → client_rates longest
 // prefix match → skipped (no price = not billable = not listed).
-export async function getClientActiveRates(clientId: string): Promise<ClientRateList> {
+export async function getClientActiveRates(clientId: string, validFrom: Date = new Date()): Promise<ClientRateList> {
   const client = await queryOne<{ name: string; company_name: string | null; system_id: string; currency: string; pricing_profile_id: string | null }>(
     'SELECT name, company_name, system_id, COALESCE(currency,\'EUR\') AS currency, pricing_profile_id FROM clients WHERE id=$1',
     [clientId],
@@ -71,21 +77,22 @@ export async function getClientActiveRates(clientId: string): Promise<ClientRate
     if (currency !== client.currency) continue;
     const mccs: string[] = r.iso_code ? (mccsForIso as (iso: string) => string[])(r.iso_code) : [];
     const mcc = mccs[0] ?? '';
-    const mnc = 'ALL';
-    rows.push({
-      country: r.country_name ?? r.name,
-      operator: r.name,
-      cc: r.calling_code ?? '',
-      mcc,
-      mnc,
-      mccmnc: mcc ? `${mcc}${mnc === 'ALL' ? '' : mnc}` : '',
-      rate: price,
-    });
+    rows.push({ country: r.country_name ?? r.name, mcc, mnc: 'ALL', rate: price, date: fmtDate(validFrom) });
   }
-  rows.sort((a, b) =>
-    a.country.localeCompare(b.country) || a.operator.localeCompare(b.operator) ||
-    a.mcc.localeCompare(b.mcc) || a.mnc.localeCompare(b.mnc),
+  // Collapse identical rows (same country/MCC/MNC/rate/date) so the sheet
+  // lists each opened destination once instead of once per route.
+  const seen = new Set<string>();
+  const uniq = rows.filter((x) => {
+    const k = [x.country, x.mcc, x.mnc, x.rate, x.date].join('|');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  uniq.sort((a, b) =>
+    a.country.localeCompare(b.country) || a.mcc.localeCompare(b.mcc) || a.mnc.localeCompare(b.mnc),
   );
+  rows.length = 0;
+  rows.push(...uniq);
   return {
     rows,
     currency: client.currency,
@@ -108,45 +115,34 @@ export async function buildClientRatesXlsx(args: {
   wb.creator = '8xtel';
   wb.created = new Date();
   const ws = wb.addWorksheet('Rates');
-  const rateCol = `Rate(${args.currency})`;
-  // Header info block
-  const info: Array<[string, string]> = [
-    ['Client name:', args.clientName],
-    ['Product name:', args.productName],
-    ['Account ID:', args.accountId],
-    ['System ID:', args.systemId],
-    ['Currency:', args.currency],
-    ['Timezone:', args.timezone],
-    ['Generated:', new Date().toLocaleString('en-GB')],
-  ];
-  for (const [k, v] of info) {
-    const row = ws.addRow([k, v]);
-    row.getCell(1).font = { bold: true };
-  }
+  // Top block: brand + account context, then the 5-column table.
+  const title = ws.addRow(['8xtel']);
+  title.font = { bold: true, size: 16 };
+  ws.addRow([`System ID: ${args.systemId}   Client ID: ${args.accountId}`]);
+  ws.addRow([`Currency: ${args.currency}   Timezone: ${args.timezone}`]);
   ws.addRow([]);
-  const note = ws.addRow(['Peak/offpeak rate schedule provided on a separate worksheet. All destinations not mentioned there are flat-rate.']);
-  note.font = { italic: true, color: { argb: 'FF64748B' } };
   ws.addRow([]);
-  const header = ws.addRow(['CountryName', 'OperatorName', 'CC', 'MCC', 'MNC', 'MCCMNC', rateCol]);
+  ws.addRow([]);
+  ws.addRow([]);
+  const header = ws.addRow(RN_COLUMNS);
   header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
   header.alignment = { vertical: 'middle' };
   for (const r of args.list.rows) {
-    const row = ws.addRow([r.country, r.operator, r.cc, r.mcc, r.mnc, r.mccmnc, r.rate]);
-    row.getCell(7).numFmt = '0.0000';
+    const row = ws.addRow([r.country, r.mcc, r.mnc, r.rate, r.date]);
+    row.getCell(4).numFmt = '0.0000';
   }
   ws.columns = [
-    { width: 22 }, { width: 30 }, { width: 8 }, { width: 8 },
-    { width: 8 }, { width: 12 }, { width: 14 },
+    { width: 24 }, { width: 10 }, { width: 10 }, { width: 14 }, { width: 14 },
   ];
-  ws.views = [{ state: 'frozen', ySplit: info.length + 3 }];
+  ws.views = [{ state: 'frozen', ySplit: RN_HEADER_ROW }];
   ws.autoFilter = {
-    from: { row: info.length + 3, column: 1 },
-    to: { row: info.length + 2 + args.list.rows.length, column: 7 },
+    from: { row: RN_HEADER_ROW, column: 1 },
+    to: { row: RN_HEADER_ROW - 1 + args.list.rows.length, column: 5 },
   };
-  const lastRow = info.length + 2 + args.list.rows.length;
-  for (let i = info.length + 3; i <= lastRow; i++) {
-    for (let c = 1; c <= 7; c++) {
+  const lastRow = RN_HEADER_ROW - 1 + args.list.rows.length;
+  for (let i = RN_HEADER_ROW; i <= lastRow; i++) {
+    for (let c = 1; c <= 5; c++) {
       ws.getRow(i).getCell(c).border = {
         top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
         bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },

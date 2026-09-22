@@ -79,7 +79,7 @@ interface Preview {
 interface AttachSample {
   filename: string; route_count: number; countries: number; networks: number;
   currency: string; empty: boolean;
-  sample: Array<{ country: string; operator: string; cc: string; mcc: string; mnc: string; mccmnc: string; rate: number }>;
+  sample: Array<{ country: string; mcc: string; mnc: string; rate: number; date: string }>;
 }
 
 interface RnRow {
@@ -991,9 +991,9 @@ export function RateNotificationCreate(): JSX.Element {
             {includeAttachment && attachSample && !attachSample.empty && (
               <div className="overflow-x-auto mt-2">
                 <table className="tbl">
-                  <thead><tr><th>Country</th><th>Operator</th><th>CC</th><th>MCC</th><th>MNC</th><th>MCCMNC</th><th className="!text-right">Rate({attachSample.currency})</th></tr></thead>
+                  <thead><tr><th>Country</th><th>MCC</th><th>MNC</th><th className="!text-right">Price</th><th>Date</th></tr></thead>
                   <tbody>{attachSample.sample.map((r, i) => (
-                    <tr key={i}><td>{r.country}</td><td>{r.operator}</td><td className="mono">{r.cc}</td><td className="mono">{r.mcc}</td><td className="mono">{r.mnc}</td><td className="mono">{r.mccmnc}</td><td className="!text-right mono">{Number(r.rate).toFixed(4)}</td></tr>
+                    <tr key={i}><td>{r.country}</td><td className="mono">{r.mcc}</td><td className="mono">{r.mnc}</td><td className="!text-right mono">{Number(r.rate).toFixed(4)}</td><td className="mono text-xs">{r.date}</td></tr>
                   ))}</tbody>
                 </table>
                 <div className="text-[11px] text-muted mt-1">Showing first {attachSample.sample.length} of {attachSample.route_count} active routes.</div>

@@ -550,7 +550,7 @@ router.post('/preview', async (req, res) => {
   let attachment = null;
   if (parsed.data.include_attachment) {
     try {
-      const list = await getClientActiveRates(parsed.data.client_id);
+      const list = await getClientActiveRates(parsed.data.client_id, validFrom);
       attachment = { filename, route_count: list.rows.length, countries: list.countries, networks: list.networks, currency: list.currency, empty: list.rows.length === 0 };
     } catch (e) { attachment = { filename, error: (e as Error).message.slice(0, 200), empty: true, route_count: 0, countries: 0, networks: 0, currency: '' }; }
   }
@@ -613,7 +613,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
   let rateList: { rows: unknown[]; currency: string; countries: number; networks: number } | null = null;
   if (parsed.data.include_attachment) {
     try {
-      const list = await getClientActiveRates(parsed.data.client_id);
+      const list = await getClientActiveRates(parsed.data.client_id, validFrom);
       rateList = list;
       if (!list.rows.length) {
         res.status(422).json({ error: 'No active rates found for this client account. Verify the route/rate configuration before sending.' });
@@ -862,7 +862,7 @@ router.post('/:id/resend', audit('resent_rate_notification', 'rate_notification'
   ).catch(() => null);
   if (mode === 'regenerate') {
     try {
-      const list = await getClientActiveRates(full!.client_id);
+      const list = await getClientActiveRates(full!.client_id, new Date(rn.valid_from));
       if (!list.rows.length) { res.status(422).json({ error: 'No active rates found for this client account.' }); return; }
       const filename = attachmentFilename(full!.account_id, rn.system_id);
       const info = await queryOne<{ name: string; company_name: string | null }>('SELECT name, company_name FROM clients WHERE id=$1', [full!.client_id]);
@@ -952,15 +952,14 @@ router.get('/:id/attachment-preview', async (req, res) => {
   await wb.xlsx.load(att.content as unknown as ArrayBuffer);
   const ws = wb.getWorksheet('Rates');
   if (!ws) { res.status(404).json({ error: 'rates sheet missing' }); return; }
-  const headerRow = 10;
-  const headers = ws.getRow(headerRow).values as unknown[];
+  const { RN_HEADER_ROW, RN_COLUMNS } = await import('./rate-excel.js');
   const rows = [];
-  for (let i = headerRow + 1; i <= Math.min(ws.rowCount, headerRow + 25); i++) {
+  for (let i = RN_HEADER_ROW + 1; i <= Math.min(ws.rowCount, RN_HEADER_ROW + 25); i++) {
     const v = ws.getRow(i).values as unknown[];
     if (!v || v.length < 2) continue;
-    rows.push(Array.isArray(v) ? v.slice(1, 8) : []);
+    rows.push(Array.isArray(v) ? v.slice(1, 6) : []);
   }
-  res.json({ headers: Array.isArray(headers) ? headers.slice(1, 8) : [], rows, total: ws.rowCount - headerRow });
+  res.json({ headers: RN_COLUMNS, rows, total: ws.rowCount - RN_HEADER_ROW });
 });
 
 // ── Live attachment preview for the create form (server-side rows) ──
