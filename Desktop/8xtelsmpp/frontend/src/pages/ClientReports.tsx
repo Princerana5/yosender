@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, fmtMoney } from '../api';
+import { api, API_BASE, fmtMoney } from '../api';
 import { PageHeader, DataTable, StatusBadge, StatCard, Bars } from '../components';
 
 interface ClientOpt {
@@ -161,7 +161,7 @@ export default function ClientReports(): JSX.Element {
     }
     const a = document.createElement('a');
     const token = localStorage.getItem('xtel_token');
-    const url = `/reports/client/${clientId}/export?format=${format}&${rangeParams}`;
+    const url = `${API_BASE}/reports/client/${clientId}/export?format=${format}&${rangeParams}`;
     fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })
       .then((r) => {
         if (!r.ok) throw new Error('export failed');

@@ -1,5 +1,6 @@
 // Typed API client for the 8xtelSMPP backend.
 const BASE = import.meta.env.VITE_API_URL ?? '';
+export const API_BASE = BASE;
 
 export function token(): string | null {
   return localStorage.getItem('xtel_token');
