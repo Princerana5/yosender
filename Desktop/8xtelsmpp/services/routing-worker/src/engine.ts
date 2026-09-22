@@ -1,4 +1,4 @@
-import { query, queryOne, getPool, getRedis } from '@8xtel/core';
+import { query, queryOne, getPool, getRedis, classifyNanp } from '@8xtel/core';
 
 // ── Route engine (§10–§12, §18–§20, §24) ─────────────────────────────────────
 // 1. resolve country by longest prefix → 2. filters (allow/block/reroute) →
@@ -23,6 +23,22 @@ export async function resolveCountry(destination: string): Promise<{ id: string;
     [digits],
   );
   if (hit) return { id: hit.id, name: hit.name, iso: hit.iso_code };
+  // NANP (+1) is shared by USA, Canada and ~20 other territories — the NPA
+  // (area code) decides, never the bare '1'. Resolve the ISO from the NPA
+  // table so +1212 → US and +1416 → CA instead of whichever country row
+  // (Canada, calling_code '1') the generic fallback happens to match first.
+  if (digits.startsWith('1') && (digits.length === 11 || digits.length === 10)) {
+    const nanp = classifyNanp(digits);
+    const iso = nanp === 'US' ? 'US' : nanp === 'CA' ? 'CA' : null;
+    if (iso) {
+      const row = await queryOne<{ id: string; name: string; iso_code: string }>(
+        `SELECT id, name, iso_code FROM countries WHERE iso_code=$1 AND status='active'`,
+        [iso],
+      );
+      if (row) return { id: row.id, name: row.name, iso: row.iso_code };
+    }
+    return null; // unassigned NPA / other territory — never guess Canada
+  }
   const cc = await queryOne<{ id: string; name: string; iso_code: string }>(
     `SELECT id, name, iso_code FROM countries WHERE $1 LIKE calling_code || '%' AND status='active'
      ORDER BY length(calling_code) DESC LIMIT 1`,
