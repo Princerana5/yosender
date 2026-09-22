@@ -53,8 +53,12 @@ function isReportMode(tpl: string): boolean {
 }
 
 function reportDate(d: Date): string {
+  // HSP's report clock runs IST — shift the message's UTC timestamp into IST
+  // before taking the calendar day, or late-evening UTC sends query the WRONG
+  // day's report and their DELIVRD rows are never seen.
+  const ist = new Date(d.getTime() + 5.5 * 3600_000);
   const p = (n: number): string => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  return `${ist.getUTCFullYear()}-${p(ist.getUTCMonth() + 1)}-${p(ist.getUTCDate())}`;
 }
 
 function fill(tpl: string, vars: Record<string, string>): string {
@@ -249,11 +253,28 @@ async function pollOne(
   // synthetic http-* id is irrelevant here, skip the msgid gate below.
   const reportMode = isReportMode(tpl);
 
+  // HSP's send response DOES carry a real msgid (second array element:
+  // [{"responseCode":"..."},{"msgid":"32982052"}]) — but msgid_json_path "0.msgid"
+  // reads the FIRST element, so every message got a synthetic http-* id and the
+  // poller skipped correlation. Extract the real msgid from the sent-audit
+  // detail when the stored id is synthetic.
+  let effectiveMsgId = msg.vendor_msg_id;
+  if (!reportMode && (!effectiveMsgId || effectiveMsgId.startsWith('http-'))) {
+    const audit = await pool.query(
+      `SELECT detail FROM message_events WHERE message_id=$1 AND event='sent-audit' LIMIT 1`,
+      [msg.id],
+    ).then((x) => String(x.rows[0]?.detail ?? '')).catch(() => '');
+    const m = audit.match(/"msgid"\s*:\s*"([^"]+)"/) ?? audit.match(/msgid=([A-Za-z0-9-]+)/);
+    if (m?.[1] && !m[1].startsWith('http-')) {
+      effectiveMsgId = m[1];
+      await pool.query('UPDATE messages SET vendor_msg_id=$1 WHERE id=$2', [effectiveMsgId, msg.id]).catch(() => undefined);
+    }
+  }
   // Synthetic ids (http-<short>) mean the submit response carried no vendor
   // msgid — polling with a fake id can never match. Surface it on the message
   // so the operator fixes msgid_json_path instead of wondering why it sticks.
   // (Skipped in report mode: matching is by destination, not msgid.)
-  if (!reportMode && (!msg.vendor_msg_id || msg.vendor_msg_id.startsWith('http-'))) {
+  if (!reportMode && (!effectiveMsgId || effectiveMsgId.startsWith('http-'))) {
     await pool.query(
       `UPDATE messages SET last_dlr_poll_at=now(),
          error_code=COALESCE(NULLIF(error_code,''),'poll:no-vendor-msgid')
@@ -263,14 +284,13 @@ async function pollOne(
     console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} skipped — no vendor msgid (check msgid_json_path)`);
     return;
   }
-
   const url = reportMode
     ? fill(tpl, {
-      msgid: msg.vendor_msg_id ?? '',
+      msgid: effectiveMsgId ?? '',
       to: msg.destination,
       date: reportDate(new Date(msg.created_at)),
     })
-    : fill(tpl, { msgid: msg.vendor_msg_id, to: msg.destination });
+    : fill(tpl, { msgid: effectiveMsgId, to: msg.destination });
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 15_000);
   let res: Response;
