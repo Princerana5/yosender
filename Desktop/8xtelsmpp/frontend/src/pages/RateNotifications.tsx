@@ -9,7 +9,7 @@ interface RnClient {
   portal_email: string | null; rate_email: string | null; status: string;
 }
 
-interface Country { name: string; iso_code: string; calling_code: string; }
+interface Country { name: string; iso_code: string; calling_code: string; mccs: string[]; }
 
 interface Dest {
   country: string; country_code: string;
@@ -232,9 +232,11 @@ export function RateNotificationCreate(): JSX.Element {
   }
   function pickCountry(i: number, name: string): void {
     const c = countries.find((x) => x.name === name);
+    // MCC = ITU E.212 mobile country code (e.g. India 404, USA 310,
+    // Singapore 525) — NEVER the dialling/calling code (91/1/65).
     setDest(i, {
       country: name, country_code: c?.iso_code ?? '',
-      network_name: `${name} - Default`, mcc: c?.calling_code ?? '',
+      network_name: `${name} - Default`, mcc: c?.mccs?.[0] ?? '',
     });
   }
 

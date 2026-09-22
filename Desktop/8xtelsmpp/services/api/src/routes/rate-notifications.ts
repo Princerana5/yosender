@@ -273,7 +273,13 @@ router.get('/countries', async (_req, res) => {
   const rows = await query<{ name: string; iso_code: string; calling_code: string }>(
     `SELECT name, iso_code, calling_code FROM countries WHERE status='active' ORDER BY name`,
   );
-  res.json({ countries: rows });
+  const { mccsForIso } = await import('@8xtel/core');
+  res.json({
+    countries: rows.map((c) => ({
+      ...c,
+      mccs: (mccsForIso as (iso: string) => string[])(c.iso_code),
+    })),
+  });
 });
 
 // ── Preview (no DB write, no send) ───────────────────────────────────────────
