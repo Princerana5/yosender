@@ -196,6 +196,61 @@ router.get('/clients', async (req, res) => {
   });
 });
 
+// ── Saved rate card for a client (prefills the create form) ──────────────────
+router.get('/saved-rates/:clientId', async (req, res) => {
+  const rows = await query<{
+    id: string; country: string; country_code: string | null; network_name: string;
+    mcc: string; mnc: string; currency: string; rate: string; updated_at: string;
+  }>(
+    `SELECT id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at
+     FROM client_saved_rates WHERE client_id=$1 ORDER BY country, network_name`,
+    [req.params.clientId],
+  );
+  res.json({ rates: rows });
+});
+
+// ── Add / update one saved rate ──────────────────────────────────────────────
+const savedRateSchema = z.object({
+  country: z.string().min(1).max(100),
+  country_code: z.string().length(2).nullable().optional(),
+  network_name: z.string().min(1).max(120),
+  mcc: z.string().regex(/^\d{3}$/),
+  mnc: z.string().regex(/^(\d{1,3}|ALL)$/i),
+  currency: z.enum(['EUR', 'USD']),
+  rate: z.number().positive().max(999999),
+});
+
+router.post('/saved-rates/:clientId', audit('saved_client_rate', 'client_saved_rate'), async (req, res) => {
+  const parsed = savedRateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const client = await queryOne<{ id: string }>('SELECT id FROM clients WHERE id=$1', [req.params.clientId]);
+  if (!client) { res.status(404).json({ error: 'client not found' }); return; }
+  const r = parsed.data;
+  const { rows } = await getPool().query(
+    `INSERT INTO client_saved_rates
+       (client_id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+     ON CONFLICT (client_id, country, network_name, mcc, mnc, currency)
+     DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate, updated_at=now()
+     RETURNING id`,
+    [req.params.clientId, r.country, r.country_code ?? null, r.network_name,
+     r.mcc, r.mnc.toUpperCase(), r.currency, r.rate],
+  );
+  res.status(201).json({ id: rows[0].id });
+});
+
+// ── Remove one saved rate ────────────────────────────────────────────────────
+router.delete('/saved-rates/:clientId/:rateId', audit('deleted_client_rate', 'client_saved_rate'), async (req, res) => {
+  const r = await getPool().query(
+    'DELETE FROM client_saved_rates WHERE id=$2 AND client_id=$1', [req.params.clientId, req.params.rateId],
+  );
+  if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ ok: true });
+});
+
 // ── Countries for the destination picker ─────────────────────────────────────
 router.get('/countries', async (_req, res) => {
   const rows = await query<{ name: string; iso_code: string; calling_code: string }>(
@@ -275,6 +330,17 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
       [rnId, r.country, r.country_code ?? null, r.network_name, r.mcc,
        r.mnc.toUpperCase(), r.currency, r.rate],
+    );
+    // Auto-save the rate card: next time the admin picks this client the
+    // destinations prefill. Upsert on the natural key so re-sends update.
+    await pool.query(
+      `INSERT INTO client_saved_rates
+         (client_id, country, country_code, network_name, mcc, mnc, currency, rate, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+       ON CONFLICT (client_id, country, network_name, mcc, mnc, currency)
+       DO UPDATE SET country_code=EXCLUDED.country_code, rate=EXCLUDED.rate, updated_at=now()`,
+      [parsed.data.client_id, r.country, r.country_code ?? null, r.network_name,
+       r.mcc, r.mnc.toUpperCase(), r.currency, r.rate],
     );
   }
   try {

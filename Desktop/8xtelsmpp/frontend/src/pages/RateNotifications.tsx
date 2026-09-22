@@ -16,6 +16,11 @@ interface Dest {
   currency: 'EUR' | 'USD'; rate: string;
 }
 
+interface SavedRate {
+  id: string; country: string; country_code: string | null; network_name: string;
+  mcc: string; mnc: string; currency: string; rate: string; updated_at: string;
+}
+
 interface Preview {
   to: string; from: string; from_name: string; subject: string;
   valid_from_display: string; html: string;
@@ -137,6 +142,58 @@ export function RateNotificationCreate(): JSX.Element {
   const [confirming, setConfirming] = useState(false);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState<SavedRate[]>([]);
+  const [savedLoaded, setSavedLoaded] = useState(false);
+  const [manageRates, setManageRates] = useState(false);
+
+  function toDest(r: SavedRate): Dest {
+    const all = r.mnc.toUpperCase() === 'ALL';
+    return {
+      country: r.country, country_code: r.country_code ?? '',
+      network_name: r.network_name, mcc: r.mcc,
+      mncMode: all ? 'all' : 'specific', mnc: all ? 'ALL' : r.mnc,
+      currency: (r.currency === 'USD' ? 'USD' : 'EUR'), rate: String(r.rate),
+    };
+  }
+
+  function pickClient(c: RnClient): void {
+    setClient(c); setPreview(null); setSaved([]); setSavedLoaded(false);
+    api<{ rates: SavedRate[] }>(`/rate-notifications/saved-rates/${c.id}`)
+      .then((r) => {
+        setSaved(r.rates); setSavedLoaded(true);
+        if (r.rates.length) setDests(r.rates.map(toDest));
+      })
+      .catch(() => setSavedLoaded(true));
+  }
+
+  async function saveRate(i: number): Promise<void> {
+    if (!client) return;
+    const d = dests[i];
+    const mnc = d.mncMode === 'all' ? 'ALL' : d.mnc.trim().toUpperCase();
+    setBusy(true); setMsg('');
+    try {
+      await api(`/rate-notifications/saved-rates/${client.id}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          country: d.country, country_code: d.country_code || null,
+          network_name: d.network_name.trim(), mcc: d.mcc, mnc,
+          currency: d.currency, rate: Number(d.rate),
+        }),
+      });
+      const r = await api<{ rates: SavedRate[] }>(`/rate-notifications/saved-rates/${client.id}`);
+      setSaved(r.rates);
+      setMsg(`Rate saved for ${d.country} — it will prefill next time ✓`);
+    } catch (e) { setMsg(`Save failed: ${(e as Error).message}`); }
+    setBusy(false);
+  }
+
+  async function deleteSaved(id: string): Promise<void> {
+    if (!client || !window.confirm('Remove this saved rate?')) return;
+    try {
+      await api(`/rate-notifications/saved-rates/${client.id}/${id}`, { method: 'DELETE' });
+      setSaved((s) => s.filter((r) => r.id !== id));
+    } catch (e) { setMsg(`Remove failed: ${(e as Error).message}`); }
+  }
 
   useEffect(() => {
     api<{ countries: Country[] }>('/rate-notifications/countries').then((r) => setCountries(r.countries)).catch(() => undefined);
@@ -218,7 +275,7 @@ export function RateNotificationCreate(): JSX.Element {
             <input className="input" placeholder="Search name, company, system ID or email…" value={q} onChange={(e) => setQ(e.target.value)} />
             <div className="mt-2 max-h-48 overflow-y-auto divide-y divide-line/50">
               {opts.map((c) => (
-                <button key={c.id} className="w-full text-left py-2 px-1 hover:bg-ink/60" onClick={() => setClient(c)}>
+                <button key={c.id} className="w-full text-left py-2 px-1 hover:bg-ink/60" onClick={() => pickClient(c)}>
                   <span className="text-sm font-semibold">{c.name}</span>
                   <span className="text-xs text-muted ml-2 mono">{c.system_id}</span>
                   <span className="text-xs text-muted ml-2">{c.email ?? 'no email'}</span>
@@ -274,7 +331,38 @@ export function RateNotificationCreate(): JSX.Element {
           </div>
         ))}
         <button className="btn-ghost !py-1.5 !text-xs" onClick={() => setDests((ds) => [...ds, emptyDest()])}>+ Add Destination</button>
+        {client && savedLoaded && (
+          <div className="mt-2 text-xs text-muted">
+            {saved.length
+              ? <span>✓ {saved.length} saved rate{saved.length > 1 ? 's' : ''} loaded for {client.name} — sending auto-saves any changes. <button className="link" onClick={() => setManageRates((v) => !v)}>{manageRates ? 'Hide' : 'Add / update rates'}</button></span>
+              : <span>No saved rates for {client.name} yet — add destinations below, then <button className="link" onClick={() => setManageRates((v) => !v)}>save them</button> or just send (auto-saves).</span>}
+          </div>
+        )}
       </div>
+
+      {client && manageRates && (
+        <div className="card card-pad mb-3">
+          <div className="card-title mb-1">Add / update saved rates — {client.name}</div>
+          <p className="text-[11px] text-muted mb-2">Saved rates prefill automatically next time you select this client. Sending a notification also auto-saves.</p>
+          {dests.map((d, i) => (
+            <div key={i} className="flex items-center gap-2 py-1.5 border-b border-line/40 text-xs">
+              <span className="flex-1">{d.country || '—'} · {d.network_name || '—'} · {d.mcc || '—'}/{d.mncMode === 'all' ? 'ALL' : d.mnc || '—'} · {d.currency} {d.rate || '—'}</span>
+              <button className="btn-ghost !py-0.5 !px-2 !text-[11px]" onClick={() => void saveRate(i)} disabled={busy || !d.country || !d.rate}>Save rate</button>
+            </div>
+          ))}
+          {saved.length > 0 && (
+            <div className="mt-2">
+              <div className="label">Saved ({saved.length})</div>
+              {saved.map((r) => (
+                <div key={r.id} className="flex items-center gap-2 py-1 text-xs">
+                  <span className="flex-1">{r.country} · {r.network_name} · {r.mcc}/{r.mnc} · {r.currency} {Number(r.rate).toFixed(3)}</span>
+                  <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300" onClick={() => void deleteSaved(r.id)}>Remove</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card card-pad mb-3">
         <div className="card-title mb-2">3 · Valid From (GMT)</div>
