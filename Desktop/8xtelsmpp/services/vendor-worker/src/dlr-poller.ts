@@ -77,7 +77,7 @@ function toStat(raw: string): string {
   // DLT-style free-text failures (e.g. "Template Not Matched") — vendors that
   // reject on template/content grounds instead of a code.
   if (/TEMPLATE|MISMATCH|NOT APPROVED|NOT WHITELIST|BLACKLIST|BLOCKED|BARRED|INVALID/i.test(raw)) return 'FAILED';
-  if (s.startsWith('ACCEPTD') || s.startsWith('ENROUTE') || s === 'SENT' || s === 'SUBMITTED' || s === 'PENDING' || s === 'P') return 'ACCEPTD';
+  if (s.startsWith('ACCEPTD') || s.startsWith('ENROUTE') || s === 'SENT' || s === 'SUBMITTED' || s === 'SUBMITED' || s === 'PENDING' || s === 'P') return 'ACCEPTD';
   return 'UNKNOWN';
 }
 
@@ -359,22 +359,66 @@ async function pollOne(
   // Before accepting the hit, check sibling `submitted` rows for the same
   // vendor+destination: if one of them is closer to the entry's vendor
   // send-time, this entry is THEIRS — leave us `submitted` for the next round.
-  // Report-mode entry fingerprint: vendor send-time + destination digits.
+  // Report-mode entry fingerprint: vendor send-time + status + message hash.
   // One report row settles ONE message — whoever claims it first owns it.
+  // The status+text join matters: repeated tests to the SAME number produce
+  // rows with close send-times, and a time-only fingerprint lets an old claim
+  // block a fresh DELIVRD row (handset received it, panel stuck `submitted`).
   const hitTimeForClaim = reportMode ? parseVendorTime(pickField(hit, SEND_TIME_FIELDS)) : -1;
+  const hitStatusForClaim = reportMode
+    ? String(pickField(hit, STATUS_FIELDS) ?? '').trim().toUpperCase().slice(0, 16)
+    : '';
+  const hitTextForClaim = reportMode
+    ? String(pickField(hit, ['message', 'msg', 'text', 'content']) ?? '').slice(0, 60)
+    : '';
+  const claimKey = reportMode && hitTimeForClaim >= 0
+    ? `report-claim ${hitTimeForClaim} ${hitStatusForClaim} ${hitTextForClaim}`
+    : null;
   if (reportMode) {
     const hitTime = hitTimeForClaim;
     // Already claimed? Another message settled off this exact entry — never
     // settle twice off one row (the false-DELIVRD: test #2 claiming test #1's
-    // row after #1 already consumed it).
-    if (hitTime >= 0) {
+    // row after #1 already consumed it). BUT: if THIS row is already claimed,
+    // fall through to the other DELIVRD rows for our number below instead of
+    // giving up — a fresh vendor row must not be blocked by an old claim.
+    let hitClaimed = false;
+    if (claimKey) {
       const claimed = await pool.query(
         `SELECT 1 FROM message_events e JOIN messages m ON m.id=e.message_id
          WHERE m.vendor_id=$1 AND m.destination=$2 AND e.event='report-claim'
            AND e.detail=$3 LIMIT 1`,
-        [vendorId, msg.destination, `report-claim ${hitTime}`],
+        [vendorId, msg.destination, claimKey],
       ).catch(() => ({ rowCount: 0 }));
-      if ((claimed.rowCount ?? 0) > 0) {
+      hitClaimed = (claimed.rowCount ?? 0) > 0;
+    }
+    if (hitClaimed) {
+      // Try the NEXT-BEST unclaimed DELIVRD row for our number (latest first)
+      // before giving up — HSP appends a new row per send, so a retry/test a
+      // minute later has its own row sitting behind the claimed one.
+      const alt = byNumber
+        .map((e) => ({ e, t: parseVendorTime(pickField(e, SEND_TIME_FIELDS)) }))
+        .filter((s) => resolvePollStat(
+          String(pickField(s.e, STATUS_FIELDS) ?? ''),
+          pickField(s.e, TIME_FIELDS),
+        ) === 'DELIVRD')
+        .sort((a, b) => b.t - a.t);
+      let adopted = false;
+      for (const s of alt) {
+        const key = `report-claim ${s.t} ${String(pickField(s.e, STATUS_FIELDS) ?? '').trim().toUpperCase().slice(0, 16)} ${String(pickField(s.e, ['message', 'msg', 'text', 'content']) ?? '').slice(0, 60)}`;
+        if (s.t < 0) continue;
+        const taken = await pool.query(
+          `SELECT 1 FROM message_events e JOIN messages m ON m.id=e.message_id
+           WHERE m.vendor_id=$1 AND m.destination=$2 AND e.event='report-claim'
+             AND e.detail=$3 LIMIT 1`,
+          [vendorId, msg.destination, key],
+        ).catch(() => ({ rowCount: 0 }));
+        if ((taken.rowCount ?? 0) === 0) {
+          hit = s.e;
+          adopted = true;
+          break;
+        }
+      }
+      if (!adopted) {
         await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
         console.warn(`[dlr-poll] ${msg.id.slice(0, 8)} entry already claimed — leaving submitted`);
         return;
@@ -423,11 +467,18 @@ async function pollOne(
   if (stat === 'DELIVRD') {
     // Stamp the claim BEFORE settling: one report row = one message. A later
     // sibling matching the same row sees the stamp above and backs off.
-    if (reportMode && hitTimeForClaim >= 0) {
-      await pool.query(
-        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'report-claim',$3)`,
-        [msg.id, vendorId, `report-claim ${hitTimeForClaim}`],
-      ).catch(() => undefined);
+    // Recompute the key from the FINAL hit (it may have been swapped to an
+    // alternate unclaimed row above).
+    if (reportMode) {
+      const ft = parseVendorTime(pickField(hit, SEND_TIME_FIELDS));
+      const fs = String(pickField(hit, STATUS_FIELDS) ?? '').trim().toUpperCase().slice(0, 16);
+      const fx = String(pickField(hit, ['message', 'msg', 'text', 'content']) ?? '').slice(0, 60);
+      if (ft >= 0) {
+        await pool.query(
+          `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'report-claim',$3)`,
+          [msg.id, vendorId, `report-claim ${ft} ${fs} ${fx}`],
+        ).catch(() => undefined);
+      }
     }
     const now = dlrDate(new Date());
     const body =
