@@ -143,6 +143,8 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
 
   const chosen = candidates[0];
   const chain = await orderVendors(chosen);
+  // Forced-vendor-only path has no route row (route_id stays NULL on the message)
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chosen.route_id);
   // ── OTP Sender ID & Template Mapping (India HSP, opt-in per route) ───────
   // Runs AFTER route match, BEFORE pricing/TPS/vendor-send: the transformed
   // text is what gets billed, segmented and submitted upstream. Client
@@ -172,8 +174,6 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     }
     // 'passthrough' → fall through to existing logic byte-identical.
   }
-  // Forced-vendor-only path has no route row (route_id stays NULL on the message)
-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chosen.route_id);
 
   // Route TPS guard (§18) — requeue with delay instead of dropping
   const routeRow = isUuid
