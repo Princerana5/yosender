@@ -12,21 +12,86 @@ router.use(requirePerm('clients.update'));
 const SENDER_NAME = '8xtel Rate Notification';
 const SENDER_EMAIL = 'rates@8xtel.com';
 
-// ── SMTP transport (env-only, lazy singleton) ────────────────────────────────
+// ── Mail sender (env-only credentials, never frontend) ────────────────────────
+// Primary: SMTP (RN_SMTP_*). Fallback: Roundcube webmail HTTP on the same
+// cPanel host — same mailbox creds, but a different auth path that works even
+// when Exim's SMTP AUTH rejects the password (observed live: webmail login OK,
+// SMTP 535 on every port/method). RN_MAIL_MODE=roundcube forces the fallback;
+// default is smtp → roundcube automatic failover.
+async function sendRnMail(opts: { to: string; subject: string; html: string }): Promise<void> {
+  const mode = (process.env.RN_MAIL_MODE ?? 'auto').toLowerCase();
+  const smtpErr = await trySmtp(opts).catch((e) => e as Error);
+  if (!smtpErr) return;
+  if (mode === 'smtp') throw smtpErr;
+  console.warn(`[rn] smtp failed (${smtpErr.message}) — trying roundcube webmail`);
+  await sendViaRoundcube(opts);
+  console.log('[rn] sent via roundcube webmail fallback');
+}
+
 let transporter: Transporter | null = null;
-function getTransporter(): Transporter {
-  if (transporter) return transporter;
+function trySmtp(opts: { to: string; subject: string; html: string }): Promise<void> {
   const { RN_SMTP_HOST, RN_SMTP_PORT, RN_SMTP_USER, RN_SMTP_PASS, RN_SMTP_SECURE } = process.env;
   if (!RN_SMTP_HOST || !RN_SMTP_USER || !RN_SMTP_PASS) {
-    throw new Error('rate-notification SMTP not configured (RN_SMTP_HOST/RN_SMTP_USER/RN_SMTP_PASS)');
+    return Promise.reject(new Error('rate-notification SMTP not configured (RN_SMTP_HOST/RN_SMTP_USER/RN_SMTP_PASS)'));
   }
-  transporter = nodemailer.createTransport({
-    host: RN_SMTP_HOST,
-    port: Number(RN_SMTP_PORT ?? 587),
-    secure: String(RN_SMTP_SECURE ?? 'false') === 'true',
-    auth: { user: RN_SMTP_USER, pass: RN_SMTP_PASS },
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      host: RN_SMTP_HOST,
+      port: Number(RN_SMTP_PORT ?? 587),
+      secure: String(RN_SMTP_SECURE ?? 'false') === 'true',
+      auth: { user: RN_SMTP_USER, pass: RN_SMTP_PASS },
+    });
+  }
+  const t = transporter;
+  return t.sendMail({
+    from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
+    to: opts.to,
+    replyTo: SENDER_EMAIL,
+    subject: opts.subject,
+    html: opts.html,
+  }).then(() => undefined);
+}
+
+// Roundcube HTTP send: logs into webmail with the mailbox creds, opens a
+// compose window and submits it. Session cookies live only in this call.
+async function sendViaRoundcube(opts: { to: string; subject: string; html: string }): Promise<void> {
+  const base = (process.env.RN_WEBMAIL_BASE ?? 'https://nvme05.netcloudns.com:2096').replace(/\/$/, '');
+  const user = process.env.RN_SMTP_USER ?? SENDER_EMAIL;
+  const pass = process.env.RN_SMTP_PASS;
+  if (!pass) throw new Error('roundcube fallback needs RN_SMTP_PASS');
+  const jar: string[] = [];
+  const req = async (url: string, init?: RequestInit): Promise<{ text: string; headers: Headers }> => {
+    const res = await fetch(url, {
+      ...init,
+      redirect: 'manual',
+      headers: { ...(init?.headers ?? {}), ...(jar.length ? { cookie: jar.join('; ') } : {}) },
+    });
+    for (const c of res.headers.getSetCookie()) jar.push(c.split(';')[0]!);
+    return { text: await res.text(), headers: res.headers };
+  };
+  const login = await req(`${base}/login/?login_only=1`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: `user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`,
   });
-  return transporter;
+  const sess = login.text.match(/\/cpsess\d+/)?.[0];
+  if (!sess) throw new Error(`roundcube login failed: ${login.text.slice(0, 120)}`);
+  const rc = `${base}${sess}/3rdparty/roundcube`;
+  await req(`${rc}/index.php?login=1&post_login=1`);
+  const token = (await req(`${rc}/?_task=mail`)).text.match(/"request_token":"([a-zA-Z0-9]+)"/)?.[1];
+  if (!token) throw new Error('roundcube token not found');
+  const comp = (await req(`${rc}/?_task=mail&_action=compose`)).text;
+  const cid = comp.match(/"compose_id":"([^"]+)"/)?.[1];
+  if (!cid) throw new Error('roundcube compose id not found');
+  const body = new URLSearchParams({
+    _task: 'mail', _action: 'send', _id: cid, _token: token, _from: '2',
+    _to: opts.to, _subject: opts.subject,
+    _message: `Rate notification — please view this email in an HTML-capable client.\n\n${opts.html.replace(/<[^>]*>/g, ' ')}`,
+  });
+  const send = await req(`${rc}/?_task=mail&_action=send`, { method: 'POST', body });
+  if (!/Message sent/i.test(send.text)) {
+    throw new Error(`roundcube send failed: ${send.text.replace(/<[^>]*>/g, ' ').slice(0, 200)}`);
+  }
 }
 
 // ── HTML escaping: every user-controlled field goes through this ─────────────
@@ -213,13 +278,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     );
   }
   try {
-    await getTransporter().sendMail({
-      from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
-      to: client.portal_email,
-      replyTo: SENDER_EMAIL,
-      subject,
-      html,
-    });
+    await sendRnMail({ to: client.portal_email, subject, html });
     await pool.query(
       `UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rnId],
     );
@@ -292,13 +351,7 @@ router.post('/:id/retry', audit('retried_rate_notification', 'rate_notification'
   await pool.query(`UPDATE rate_notifications SET status='sending', error_message=NULL WHERE id=$1`, [rn.id]);
   try {
     const html = buildEmailHtml({ validFrom: new Date(rn.valid_from), systemId: rn.system_id, rates });
-    await getTransporter().sendMail({
-      from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
-      to: rn.recipient_email,
-      replyTo: SENDER_EMAIL,
-      subject: rn.subject,
-      html,
-    });
+    await sendRnMail({ to: rn.recipient_email, subject: rn.subject, html });
     await pool.query(`UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rn.id]);
     res.json({ id: rn.id, status: 'sent' });
   } catch (e) {
