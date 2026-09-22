@@ -56,6 +56,7 @@ app.use('/routes', requireAuth, routeRoutes);
 app.use('/messages', requireAuth, messageRoutes);
 app.use('/billing', requireAuth, billingRoutes);
 app.use('/reports', requireAuth, reportRoutes);
+app.use('/rate-notifications', requireAuth, (await import('./routes/rate-notifications.js')).default);
 // /system/health + /system/health/pipeline are public (counts only, no PII)
 // so the local watchdog/cron can poll without a JWT; everything else under
 // /system keeps requireAuth via the router's internal guard.
