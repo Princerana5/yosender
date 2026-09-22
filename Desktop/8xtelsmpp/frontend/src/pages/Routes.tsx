@@ -121,6 +121,116 @@ const STRATEGY_HINT: Record<string, string> = {
   percentage: 'Weighted random pick per message (weight = % share). Full chain kept behind the pick for failover.',
 };
 
+// ── OTP transformation panel (India HSP): ON/OFF + default template + fallbacks ──
+interface OtpTemplateOpt {
+  id: string; name: string; sender_id: string; status: string; is_default: boolean;
+}
+
+function OtpTransformPanel({ route, onChange }: {
+  route: Route & {
+    otp_transform_enabled?: boolean; otp_default_template_id?: string | null;
+    otp_on_no_otp?: string; otp_on_no_template?: string;
+  };
+  onChange: () => void;
+}): JSX.Element {
+  const [templates, setTemplates] = useState<OtpTemplateOpt[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const enabled = !!route.otp_transform_enabled;
+
+  useEffect(() => {
+    api<{ templates: OtpTemplateOpt[] }>('/routes/otp-templates')
+      .then((r) => setTemplates(r.templates))
+      .catch(() => undefined);
+  }, []);
+
+  async function patch(body: Record<string, unknown>): Promise<void> {
+    setBusy(true);
+    setErr('');
+    try {
+      await api(`/routes/${route.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      onChange();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const active = templates.filter((t) => t.status === 'active');
+  const current = templates.find((t) => t.id === route.otp_default_template_id);
+
+  return (
+    <div className="rounded-lg border border-line bg-ink/50 px-3.5 py-3 text-[13px] space-y-2.5">
+      <div className="flex items-center gap-2">
+        <span className="text-muted font-semibold">OTP Transformation</span>
+        <button
+          className={`ml-auto rounded-full border px-3 py-1 text-xs font-bold transition ${enabled
+            ? 'border-brand/50 bg-brand/10 text-emerald-300'
+            : 'border-line text-muted hover:text-white'}`}
+          disabled={busy}
+          onClick={() => void patch({ otp_transform_enabled: !enabled })}
+          title="When ON: any client SID + OTP text is rewritten to the approved template + SID before vendor submit"
+        >
+          {enabled ? '● ON' : '○ OFF'}
+        </button>
+      </div>
+      {enabled && (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="label">Default template</label>
+              <select
+                className="input font-mono !text-xs"
+                value={route.otp_default_template_id ?? ''}
+                onChange={(e) => void patch({ otp_default_template_id: e.target.value || null })}
+              >
+                <option value="">— none (rejects) —</option>
+                {active.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name} · {t.sender_id}{t.is_default ? ' ★' : ''}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="label">If OTP not found</label>
+              <select
+                className="input !text-xs"
+                value={route.otp_on_no_otp ?? 'reject'}
+                onChange={(e) => void patch({ otp_on_no_otp: e.target.value })}
+              >
+                <option value="reject">Reject with reason</option>
+                <option value="passthrough">Send through normal route</option>
+              </select>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="label">If no template</label>
+              <select
+                className="input !text-xs"
+                value={route.otp_on_no_template ?? 'reject'}
+                onChange={(e) => void patch({ otp_on_no_template: e.target.value })}
+              >
+                <option value="reject">Reject with reason</option>
+                <option value="passthrough">Send through normal route</option>
+              </select>
+            </div>
+            <div className="flex items-end">
+              <span className="text-[11px] text-muted pb-2">
+                {current ? <>Vendor sees <b className="text-gray-200 font-mono">{current.sender_id}</b> + “{current.name}”</> : '⚠ no template — OTP traffic will reject'}
+              </span>
+            </div>
+          </div>
+          {err && <div className="text-xs text-red-300">{err}</div>}
+          <div className="text-[11px] text-muted">
+            Client submits any SID + OTP text → OTP extracted → <b className="text-gray-300">approved template + SID</b> → HSP vendor. Original kept in message log.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Member manager: add/remove clients on a member route ───────────────────
 function MemberManager({ detail, clients, onChange, setDetail }: {
   detail: RouteDetail; clients: Opt[]; onChange: () => void; setDetail: (d: RouteDetail | null) => void;
@@ -624,6 +734,7 @@ export default function Routes(): JSX.Element {
                 {Number(detail.route.policy_count ?? 0) > 0 && (
                   <div><span className="text-muted font-semibold">Traffic policies: </span>{detail.route.policy_count} attached</div>
                 )}
+                <OtpTransformPanel route={detail.route} onChange={() => { openDetail(detail.route.id); load(); }} />
               </div>
 
               {/* who it serves */}

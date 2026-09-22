@@ -2,13 +2,14 @@ import {
   createWorker, getQueue, QUEUES, getPool, tryAcquireTps, incrStat, analyzeSms, type MessageJob,
 } from '@8xtel/core';
 import { resolveCountry, applyFilters, findRoutes, orderVendors, recordEvent } from './engine.js';
+import { tryOtpTransform } from './otp.js';
 
 // ── Routing worker: sms:submit → route → sms:vendor-send (§15, Phase 3) ──────
 // Fails over across the ordered vendor chain at SEND time (vendor-worker
 // re-queues with next index); here we attach the chain + pricing snapshot.
 
 async function handleJob(job: { data: MessageJob }): Promise<void> {
-  const msg = job.data;
+  let msg = job.data;
   const pool = getPool();
 
   // Balance pre-check FIRST: a client with no funds must never see their
@@ -142,6 +143,35 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
 
   const chosen = candidates[0];
   const chain = await orderVendors(chosen);
+  // ── OTP Sender ID & Template Mapping (India HSP, opt-in per route) ───────
+  // Runs AFTER route match, BEFORE pricing/TPS/vendor-send: the transformed
+  // text is what gets billed, segmented and submitted upstream. Client
+  // message-id, DLR flow and accounting key off internal_id — untouched.
+  // Only real route rows participate (forced-vendor test path skips it).
+  if (isUuid) {
+    const otpRes = await tryOtpTransform(chosen.route_id, msg.client_id, msg.source, msg.text);
+    if (otpRes.ok) {
+      const t = otpRes.transform;
+      await pool.query(
+        `UPDATE messages SET original_source=$1, original_text=$2, extracted_otp=$3,
+                otp_template_id=$4, otp_transformed=true, source=$5, text=$6 WHERE id=$7`,
+        [msg.source, msg.text, t.otp, t.template.id, t.finalSource, t.finalText, msg.internal_id],
+      );
+      await recordEvent(
+        msg.internal_id, chain[0]?.vendor_id ?? null, 'otp-transform',
+        `otp=${t.otp} template="${t.template.name}" ${msg.source}→${t.finalSource}`,
+      );
+      msg = { ...msg, source: t.finalSource, text: t.finalText };
+    } else if (otpRes.fallback === 'reject' && otpRes.reason !== 'otp transform not enabled') {
+      await pool.query(`UPDATE messages SET status='rejected', error_description=$1 WHERE id=$2`, [
+        `otp-transform: ${otpRes.reason}`, msg.internal_id,
+      ]);
+      await recordEvent(msg.internal_id, null, 'failed', `otp-transform rejected: ${otpRes.reason}`);
+      await incrStat('rejected');
+      return;
+    }
+    // 'passthrough' → fall through to existing logic byte-identical.
+  }
   // Forced-vendor-only path has no route row (route_id stays NULL on the message)
   const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chosen.route_id);
 

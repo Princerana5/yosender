@@ -15,6 +15,7 @@ import { TablePage, Connections, Reports, SendersPage } from './pages/Generic.js
 import UsersPage from './pages/Users.js';
 import Traffic from './pages/Traffic.js';
 import ClientReports from './pages/ClientReports.js';
+import OtpTemplates from './pages/OtpTemplates.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
 import ClientApi from './pages/ClientApi.js';
@@ -124,6 +125,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           />
           <Route path="reports" element={<Reports />} />
           <Route path="client-reports" element={<ClientReports />} />
+          <Route path="otp-templates" element={<OtpTemplates />} />
           <Route
             path="senders"
             element={

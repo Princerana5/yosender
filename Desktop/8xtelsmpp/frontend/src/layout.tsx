@@ -36,6 +36,7 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     name: 'Routing',
     items: [
       { to: '/routes', label: 'Routes & Failover', icon: 'route' },
+      { to: '/otp-templates', label: 'OTP Templates', icon: 'shield' },
       { to: '/policies', label: 'Traffic Policies', icon: 'sliders' },
     ],
   },

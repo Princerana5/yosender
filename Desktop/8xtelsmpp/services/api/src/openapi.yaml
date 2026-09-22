@@ -69,6 +69,14 @@ paths:
     get: { summary: Per-client detailed traffic records, responses: { '200': { description: ok } } }
   /reports/client/{id}/export:
     get: { summary: Per-client traffic export (csv|xls), responses: { '200': { description: ok } } }
+  /routes/otp-templates:
+    get: { summary: List OTP templates, responses: { '200': { description: ok } } }
+    post: { summary: Create OTP template, responses: { '201': { description: created } } }
+  /routes/otp-templates/{tid}:
+    patch: { summary: Update OTP template, responses: { '200': { description: ok } } }
+    delete: { summary: Delete OTP template, responses: { '200': { description: deleted } } }
+  /routes/otp-templates/{tid}/test:
+    post: { summary: Test-render a template against a sample message, responses: { '200': { description: ok } } }
   /system/health:
     get: { summary: Health, responses: { '200': { description: ok } } }
   /connectors:

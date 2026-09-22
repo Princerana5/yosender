@@ -114,7 +114,8 @@ router.post('/', requirePerm('routes.create'), audit('created_route', 'route'), 
 });
 
 router.patch('/:id', requirePerm('routes.update'), audit('updated_route', 'route'), async (req, res) => {
-  const allowed = ['name', 'channel', 'country_id', 'prefix', 'sender_id', 'strategy', 'status', 'tps_limit', 'group_id', 'price_per_segment', 'price_currency', 'min_margin_pct'] as const;
+  const allowed = ['name', 'channel', 'country_id', 'prefix', 'sender_id', 'strategy', 'status', 'tps_limit', 'group_id', 'price_per_segment', 'price_currency', 'min_margin_pct',
+    'otp_transform_enabled', 'otp_default_template_id', 'otp_on_no_otp', 'otp_on_no_template'] as const;
   const sets: string[] = [];
   const params: unknown[] = [];
   for (const k of allowed) {
@@ -235,6 +236,167 @@ router.get('/:id', async (req, res) => {
       [req.params.id],
     );
   res.json({ route, served_clients: servedClients, served_count: memberCount === 0 ? servedClients.length : memberCount, excluded, available });
+});
+
+// ── OTP Template Manager (India HSP route transformation) ──────────────────
+// Templates hold the vendor-approved SID + DLT text with an {OTP} placeholder.
+// Only status='active' rows are eligible at send time; the routing worker
+// resolves per-client mapping → route default.
+const otpSchema = z.object({
+  name: z.string().min(1).max(120),
+  template_ref: z.string().max(120).nullable().optional(),
+  sender_id: z.string().min(1).max(21),
+  content: z.string().min(1).max(1000),
+  otp_placeholder: z.string().min(1).max(20).default('{OTP}'),
+  status: z.enum(['active', 'inactive']).default('active'),
+  is_default: z.boolean().default(false),
+});
+
+router.get('/otp-templates', async (_req, res) => {
+  const rows = await query(
+    `SELECT t.*,
+            (SELECT count(*) FROM messages m WHERE m.otp_template_id=t.id AND m.created_at >= now() - interval '7 days') AS usage_7d,
+            (SELECT count(*) FROM route_otp_clients m WHERE m.template_id=t.id) AS client_maps
+     FROM otp_templates t ORDER BY t.is_default DESC, t.created_at DESC`,
+  );
+  res.json({ templates: rows });
+});
+
+router.post('/otp-templates', requirePerm('routes.create'), audit('created_otp_template', 'otp_template'), async (req, res) => {
+  const parsed = otpSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const b = parsed.data;
+  if (!b.content.includes(b.otp_placeholder)) {
+    res.status(400).json({ error: `content must contain the placeholder ${b.otp_placeholder}` });
+    return;
+  }
+  const pool = getPool();
+  if (b.is_default) await pool.query(`UPDATE otp_templates SET is_default=false`);
+  const { rows } = await pool.query(
+    `INSERT INTO otp_templates (name, template_ref, sender_id, content, otp_placeholder, status, is_default)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [b.name, b.template_ref ?? null, b.sender_id.trim(), b.content, b.otp_placeholder, b.status, b.is_default],
+  );
+  res.status(201).json({ template: rows[0] });
+});
+
+router.patch('/otp-templates/:tid', requirePerm('routes.update'), audit('updated_otp_template', 'otp_template'), async (req, res) => {
+  const parsed = otpSchema.partial().safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() });
+    return;
+  }
+  const cur = await queryOne<Record<string, unknown>>('SELECT * FROM otp_templates WHERE id=$1', [req.params.tid]);
+  if (!cur) {
+    res.status(404).json({ error: 'template not found' });
+    return;
+  }
+  const next = { ...(cur as Record<string, unknown>), ...parsed.data };
+  if (!String(next.content ?? '').includes(String(next.otp_placeholder ?? '{OTP}'))) {
+    res.status(400).json({ error: `content must contain the placeholder ${String(next.otp_placeholder ?? '{OTP}')}` });
+    return;
+  }
+  const pool = getPool();
+  if (parsed.data.is_default) await pool.query(`UPDATE otp_templates SET is_default=false WHERE id<>$1`, [req.params.tid]);
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const k of ['name', 'template_ref', 'sender_id', 'content', 'otp_placeholder', 'status', 'is_default'] as const) {
+    if ((parsed.data as Record<string, unknown>)[k] !== undefined) {
+      params.push((parsed.data as Record<string, unknown>)[k]);
+      sets.push(`${k} = $${params.length}`);
+    }
+  }
+  if (!sets.length) {
+    res.status(400).json({ error: 'nothing to update' });
+    return;
+  }
+  params.push(req.params.tid);
+  const { rows } = await pool.query(
+    `UPDATE otp_templates SET ${sets.join(', ')}, updated_at=now() WHERE id=$${params.length} RETURNING *`, params,
+  );
+  res.json({ template: rows[0] });
+});
+
+router.delete('/otp-templates/:tid', requirePerm('routes.delete'), audit('deleted_otp_template', 'otp_template'), async (req, res) => {
+  // Safe delete: routes referencing it fall back to reject-with-reason (never
+  // an inactive template), client mappings are removed.
+  const pool = getPool();
+  await pool.query('DELETE FROM route_otp_clients WHERE template_id=$1', [req.params.tid]);
+  await pool.query('UPDATE routes SET otp_default_template_id=NULL WHERE otp_default_template_id=$1', [req.params.tid]);
+  const r = await pool.query('DELETE FROM otp_templates WHERE id=$1', [req.params.tid]);
+  if (!r.rowCount) {
+    res.status(404).json({ error: 'template not found' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+// Test-render a template against a sample client message: extracts the OTP and
+// shows exactly what the vendor would receive. No message is sent.
+router.post('/otp-templates/:tid/test', async (req, res) => {
+  const tpl = await queryOne<{ sender_id: string; content: string; otp_placeholder: string; status: string; name: string }>(
+    'SELECT sender_id, content, otp_placeholder, status, name FROM otp_templates WHERE id=$1', [req.params.tid],
+  );
+  if (!tpl) {
+    res.status(404).json({ error: 'template not found' });
+    return;
+  }
+  const sample = String(req.body?.message ?? '');
+  // Same anchored→bare extraction as the routing worker (kept inline so the
+  // API has no worker import; keep both in sync).
+  const anchored = /(?:otp|one[\s-]?time[\s-]?password|verification(?:\s+code)?|verify(?:\s+code)?|passcode|\bcode\b|\bpin\b)[\s:.\-is]*?(\d{4,6})(?!\d)/i.exec(sample);
+  const bare = /(?<!\d)(\d{4,6})(?!\d)/.exec(sample);
+  const otp = anchored?.[1] ?? bare?.[1] ?? null;
+  if (!otp) {
+    res.json({ ok: false, reason: 'no 4-6 digit OTP found in sample message' });
+    return;
+  }
+  res.json({
+    ok: true,
+    otp,
+    vendor_sender: tpl.sender_id,
+    vendor_text: tpl.content.split(tpl.otp_placeholder).join(otp),
+    template_status: tpl.status,
+  });
+});
+
+// Per-client template mapping on a route (optional; falls back to route default)
+router.get('/:id/otp-clients', async (req, res) => {
+  const rows = await query(
+    `SELECT m.client_id, c.name AS client_name, c.system_id, m.template_id, t.name AS template_name, t.sender_id
+     FROM route_otp_clients m JOIN clients c ON c.id=m.client_id
+     JOIN otp_templates t ON t.id=m.template_id WHERE m.route_id=$1 ORDER BY c.name`,
+    [req.params.id],
+  );
+  res.json({ mappings: rows });
+});
+
+router.post('/:id/otp-clients', requirePerm('routes.update'), audit('mapped_route_otp_client', 'route'), async (req, res) => {
+  const { client_id, template_id } = (req.body ?? {}) as { client_id?: string; template_id?: string };
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!client_id || !uuid.test(client_id) || !template_id || !uuid.test(template_id)) {
+    res.status(400).json({ error: 'provide body.client_id + body.template_id (uuid)' });
+    return;
+  }
+  const tpl = await queryOne('SELECT id FROM otp_templates WHERE id=$1 AND status=$2', [template_id, 'active']);
+  if (!tpl) {
+    res.status(400).json({ error: 'template must exist and be active' });
+    return;
+  }
+  await getPool().query(
+    `INSERT INTO route_otp_clients (route_id, client_id, template_id) VALUES ($1,$2,$3)
+     ON CONFLICT (route_id, client_id) DO UPDATE SET template_id=EXCLUDED.template_id`,
+    [req.params.id, client_id, template_id],
+  );
+  res.json({ ok: true });
+});
+
+router.delete('/:id/otp-clients/:clientId', requirePerm('routes.update'), audit('unmapped_route_otp_client', 'route'), async (req, res) => {
+  await getPool().query('DELETE FROM route_otp_clients WHERE route_id=$1 AND client_id=$2', [req.params.id, req.params.clientId]);
+  res.json({ ok: true });
 });
 
 // ── Membership: add / remove ONE client (member routes) ────────────────────
