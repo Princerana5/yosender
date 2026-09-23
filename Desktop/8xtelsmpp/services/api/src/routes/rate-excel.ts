@@ -94,7 +94,10 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
     if (price === null || !Number.isFinite(price)) continue;
     // Only list rates in the client's own currency — never mislabel.
     if (currency !== client.currency) continue;
-    const country = r.country_name ?? r.name;
+    // Never fall back to the route name: routes without a linked country
+    // (e.g. 'HSP-OTP-INDIA') would leak internal route names into the file.
+    if (!r.country_name) continue;
+    const country = r.country_name;
     const mccs: string[] = r.iso_code ? (mccsForIso as (iso: string) => string[])(r.iso_code) : [];
     const mcc = mccs[0] ?? '';
     const operators = opsByCountry.get(country) ?? ['All'];
@@ -139,14 +142,20 @@ export async function buildClientRatesXlsx(args: {
   wb.creator = '8xtel';
   wb.created = new Date();
   const ws = wb.addWorksheet('Rates');
+  // Panel theme: emerald brand #10B981 + sky accent #38BDF8 on slate #0F172A.
   // Top block: brand + account context, then the 7-column table.
   // No route/vendor names anywhere — only country operators.
-  const title = ws.addRow(['8xtel']);
-  title.font = { bold: true, size: 16, color: { argb: 'FF16A34A' } };
+  const band = ws.addRow(['8xtel — Rate List']);
+  band.font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
+  band.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
+  band.alignment = { vertical: 'middle' };
+  ws.getRow(1).height = 28;
   const ctx = ws.addRow([`System ID: ${args.systemId}   Client ID: ${args.accountId}`]);
-  ctx.font = { bold: true };
+  ctx.font = { bold: true, color: { argb: 'FF0F172A' } };
+  ctx.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
   const cur = ws.addRow([`Currency: ${args.currency}   Timezone: ${args.timezone}`]);
-  cur.font = { bold: true };
+  cur.font = { bold: true, color: { argb: 'FF0F172A' } };
+  cur.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
   ws.addRow([]);
   ws.addRow([]);
   ws.addRow([]);
@@ -155,10 +164,16 @@ export async function buildClientRatesXlsx(args: {
   header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
   header.alignment = { vertical: 'middle' };
-  for (const r of args.list.rows) {
+  args.list.rows.forEach((r, idx) => {
     const row = ws.addRow([r.country, r.operator, r.mcc, r.mnc, r.rate, r.currency, r.time]);
     row.getCell(5).numFmt = '0.0000';
-  }
+    // Alternating emerald-tinted banding for readability.
+    if (idx % 2 === 1) {
+      for (let c = 1; c <= 7; c++) {
+        row.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFECFDF5' } };
+      }
+    }
+  });
   ws.columns = [
     { width: 24 }, { width: 22 }, { width: 10 }, { width: 10 },
     { width: 14 }, { width: 10 }, { width: 14 },
