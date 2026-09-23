@@ -3,14 +3,16 @@ import { query, queryOne } from '@8xtel/core';
 
 export interface ClientRateRow {
   country: string;
+  operator: string;
   mcc: string;
   mnc: string;
   rate: number;
-  date: string;
+  currency: string;
+  time: string;
 }
 
 export const RN_HEADER_ROW = 8;
-export const RN_COLUMNS = ['Country', 'MCC', 'MNC', 'Price', 'Date'];
+export const RN_COLUMNS = ['Country', 'Operator (All)', 'MCC', 'MNC', 'Rate', 'Currency', 'Time'];
 
 function fmtDate(d: Date): string {
   const p = (n: number): string => String(n).padStart(2, '0');
@@ -64,7 +66,24 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
         [client.pricing_profile_id],
       )
     : [];
+  // Operator names per country: distinct prefixes.operator values; when the
+  // DB has none (all NULL, as observed live), fall back to 'All'.
+  const ops = await query<{ country_name: string | null; operator: string | null }>(
+    `SELECT co.name AS country_name, p.operator
+     FROM prefixes p JOIN countries co ON co.id=p.country_id
+     WHERE p.operator IS NOT NULL AND p.operator <> ''
+     GROUP BY co.name, p.operator`,
+    [],
+  ).catch(() => []);
+  const opsByCountry = new Map<string, string[]>();
+  for (const o of ops) {
+    if (!o.country_name || !o.operator) continue;
+    const list = opsByCountry.get(o.country_name) ?? [];
+    if (!list.includes(o.operator)) list.push(o.operator);
+    opsByCountry.set(o.country_name, list);
+  }
   const rows: ClientRateRow[] = [];
+  const time = fmtDate(validFrom);
   for (const r of routes) {
     let price: number | null = r.price_per_segment !== null ? Number(r.price_per_segment) : null;
     let currency = r.price_currency ?? 'EUR';
@@ -75,21 +94,26 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
     if (price === null || !Number.isFinite(price)) continue;
     // Only list rates in the client's own currency — never mislabel.
     if (currency !== client.currency) continue;
+    const country = r.country_name ?? r.name;
     const mccs: string[] = r.iso_code ? (mccsForIso as (iso: string) => string[])(r.iso_code) : [];
     const mcc = mccs[0] ?? '';
-    rows.push({ country: r.country_name ?? r.name, mcc, mnc: 'ALL', rate: price, date: fmtDate(validFrom) });
+    const operators = opsByCountry.get(country) ?? ['All'];
+    for (const operator of operators) {
+      rows.push({ country, operator, mcc, mnc: 'ALL', rate: price, currency, time });
+    }
   }
-  // Collapse identical rows (same country/MCC/MNC/rate/date) so the sheet
-  // lists each opened destination once instead of once per route.
+  // Collapse identical rows so the sheet lists each opened destination once
+  // instead of once per route.
   const seen = new Set<string>();
   const uniq = rows.filter((x) => {
-    const k = [x.country, x.mcc, x.mnc, x.rate, x.date].join('|');
+    const k = [x.country, x.operator, x.mcc, x.mnc, x.rate, x.currency, x.time].join('|');
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
   uniq.sort((a, b) =>
-    a.country.localeCompare(b.country) || a.mcc.localeCompare(b.mcc) || a.mnc.localeCompare(b.mnc),
+    a.country.localeCompare(b.country) || a.operator.localeCompare(b.operator) ||
+    a.mcc.localeCompare(b.mcc) || a.mnc.localeCompare(b.mnc),
   );
   rows.length = 0;
   rows.push(...uniq);
@@ -115,11 +139,14 @@ export async function buildClientRatesXlsx(args: {
   wb.creator = '8xtel';
   wb.created = new Date();
   const ws = wb.addWorksheet('Rates');
-  // Top block: brand + account context, then the 5-column table.
+  // Top block: brand + account context, then the 7-column table.
+  // No route/vendor names anywhere — only country operators.
   const title = ws.addRow(['8xtel']);
-  title.font = { bold: true, size: 16 };
-  ws.addRow([`System ID: ${args.systemId}   Client ID: ${args.accountId}`]);
-  ws.addRow([`Currency: ${args.currency}   Timezone: ${args.timezone}`]);
+  title.font = { bold: true, size: 16, color: { argb: 'FF16A34A' } };
+  const ctx = ws.addRow([`System ID: ${args.systemId}   Client ID: ${args.accountId}`]);
+  ctx.font = { bold: true };
+  const cur = ws.addRow([`Currency: ${args.currency}   Timezone: ${args.timezone}`]);
+  cur.font = { bold: true };
   ws.addRow([]);
   ws.addRow([]);
   ws.addRow([]);
@@ -129,20 +156,21 @@ export async function buildClientRatesXlsx(args: {
   header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
   header.alignment = { vertical: 'middle' };
   for (const r of args.list.rows) {
-    const row = ws.addRow([r.country, r.mcc, r.mnc, r.rate, r.date]);
-    row.getCell(4).numFmt = '0.0000';
+    const row = ws.addRow([r.country, r.operator, r.mcc, r.mnc, r.rate, r.currency, r.time]);
+    row.getCell(5).numFmt = '0.0000';
   }
   ws.columns = [
-    { width: 24 }, { width: 10 }, { width: 10 }, { width: 14 }, { width: 14 },
+    { width: 24 }, { width: 22 }, { width: 10 }, { width: 10 },
+    { width: 14 }, { width: 10 }, { width: 14 },
   ];
   ws.views = [{ state: 'frozen', ySplit: RN_HEADER_ROW }];
   ws.autoFilter = {
     from: { row: RN_HEADER_ROW, column: 1 },
-    to: { row: RN_HEADER_ROW - 1 + args.list.rows.length, column: 5 },
+    to: { row: RN_HEADER_ROW - 1 + args.list.rows.length, column: 7 },
   };
   const lastRow = RN_HEADER_ROW - 1 + args.list.rows.length;
   for (let i = RN_HEADER_ROW; i <= lastRow; i++) {
-    for (let c = 1; c <= 5; c++) {
+    for (let c = 1; c <= 7; c++) {
       ws.getRow(i).getCell(c).border = {
         top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
         bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
