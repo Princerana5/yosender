@@ -215,30 +215,34 @@ const STALE_ROUNDS = 24;
     timestamp — is not proof the handset received it. */
 const EXPLICIT_DELIVERED_RE = /delivrd|delivered|delivery_success|\bsuccess\b|\bok\b|^d$/i;
 
-/** Fortius numeric codebook (confirmed live 2026-09-19):
+/** Fortius numeric codebook (confirmed live 2026-09-19, updated 2026-09-23):
+    - "3" = DELIVERED (handset received the SMS; verified live: message
+      23493 to 917876890255 shows status "3" and the handset got it).
     - "4" = FAILED at the vendor (panel shows FAILED, handset never receives;
       prior manual correction "code 4 is not delivered" agrees).
-    - "2"/"3" = accepted/in-flight at the vendor (panel keeps them pending;
-      a wrong-template test sits at "2" while the vendor panel shows the
-      send FAILED — the code never advances, so it must not sit `submitted`
-      forever either; see the stale guard in pollOne).
-    Only an explicit delivered WORD ever means delivered. */
+    - "2" = accepted/in-flight at the vendor (a wrong-template test sits at
+      "2" while the vendor panel shows the send FAILED — the code never
+      advances; the stale guard in pollOne fails it after N rounds).
+    Only an explicit delivered WORD or Fortius "3" ever means delivered. */
 const FORTIUS_FAILED_CODES = new Set(['4']);
+const FORTIUS_DELIVERED_CODES = new Set(['3']);
 
 /** Resolve a poll entry to a DLR stat token.
     - Word statuses map via toStat (FAILED/REJECTD/UNDELIV/EXPIRED/DELIVRD…).
     - Explicit delivered words (+ timestamp or not) → DELIVRD.
+    - Fortius "3" → DELIVRD (vendor-confirmed delivery code).
     - Fortius "4" → FAILED (vendor-confirmed failure code).
     - Other bare numerics / unrecognized → ACCEPTD when a delivery timestamp
       is present (in-flight, keep polling — the stale guard in pollOne fails
       them after N rounds with no terminal state), UNKNOWN otherwise.
-      NEVER DELIVRD from a numeric: Fortius populates delvd_time on failed
-      rows too, so the timestamp alone proves nothing. */
+      NEVER DELIVRD from any other numeric: Fortius populates delvd_time on
+      failed rows too, so the timestamp alone proves nothing. */
 export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
   const stat = toStat(statusRaw);
   if (stat === 'DELIVRD') return 'DELIVRD';
   if (stat !== 'ACCEPTD' && stat !== 'UNKNOWN') return stat;
   if (EXPLICIT_DELIVERED_RE.test(statusRaw.trim())) return 'DELIVRD';
+  if (FORTIUS_DELIVERED_CODES.has(statusRaw.trim())) return 'DELIVRD';
   if (FORTIUS_FAILED_CODES.has(statusRaw.trim())) return 'FAILED';
   if (hasDeliveryTime(timeRaw)) return 'ACCEPTD';
   return stat;
