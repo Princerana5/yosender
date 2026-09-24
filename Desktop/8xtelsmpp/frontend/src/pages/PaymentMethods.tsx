@@ -51,7 +51,7 @@ export default function PaymentMethods(): JSX.Element {
         { key: 'chain', label: 'Chain', render: r => <span className="text-xs">{r.chain ?? '—'}</span> },
         { key: 'details', label: 'Details', render: r => { const d = r.details as Record<string, unknown>; const v = String(d.address ?? d.wallet_address ?? d.upi_id ?? d.vpa ?? d.account_number ?? ''); return <span className="text-xs font-mono truncate max-w-[220px] inline-block">{v ? (v.length > 22 ? v.slice(0,22)+'…' : v) : '—'}</span>; } },
         { key: 'is_active', label: 'Active', render: r => <span className={`text-xs ${r.is_active ? 'text-emerald-400' : 'text-red-400'}`}>{r.is_active ? 'Yes' : 'No'}</span> },
-        { key: 'actions', label: '', render: r => <span className="flex gap-1"><button className="btn-ghost !py-1 !text-xs" onClick={() => openEdit(r as unknown as Method)}>Edit</button><button className="btn-ghost !py-1 !text-xs" onClick={async () => { await api(`/payment-methods/${r.id}`, { method: 'DELETE' }); load(); }}>{(r as Record<string,unknown>).is_active ? 'Disable' : '—'}</button></span> },
+        { key: 'actions', label: '', render: r => <span className="flex gap-1"><button className="btn-ghost !py-1 !text-xs" onClick={() => openEdit(r as unknown as Method)}>Edit</button><button className="btn-ghost !py-1 !text-xs" onClick={async () => { await api(`/payment-methods/${(r as unknown as Method).id}`, { method: 'DELETE' }); load(); }}>{(r as unknown as Method).is_active ? 'Disable' : '—'}</button></span> },
       ]} />
       {creating && (
         <Modal title={editing ? 'Edit method' : 'Add method'} onClose={() => setCreating(false)}>
