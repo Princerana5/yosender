@@ -32,11 +32,16 @@ export default function Billing(): JSX.Element {
   const [creditKind, setCreditKind] = useState<'grant' | 'deduct'>('grant');
   const [creditTxs, setCreditTxs] = useState<CreditTx[]>([]);
   const [creditDraft, setCreditDraft] = useState('0');
+  const [q, setQ] = useState('');
 
   const load = (): void => {
     api<{ wallets: Wallet[] }>('/billing/wallets').then((r) => setWallets(r.wallets)).catch(() => undefined);
     api<{ transactions: Tx[] }>('/billing/transactions').then((r) => setTxs(r.transactions)).catch(() => undefined);
   };
+  const filtered = !q.trim() ? wallets : wallets.filter((w) => {
+    const s = q.trim().toLowerCase();
+    return w.client_name.toLowerCase().includes(s) || w.system_id.toLowerCase().includes(s) || w.client_status.toLowerCase().includes(s) || w.billing_mode.toLowerCase().includes(s);
+  });
   useEffect(load, []);
 
   function openAdj(wallet: Wallet, kind: AdjKind): void {
@@ -152,19 +157,32 @@ export default function Billing(): JSX.Element {
       <TopupQueue onDone={load} />
 
       <div className="card card-pad">
-        <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 flex-wrap">
           <div>
             <div className="card-title">Base currency — € Euro</div>
             <div className="card-sub">
               All money wallets, prices and rates are in EUR. SMS credits are unitless (1 credit = 1 segment).
             </div>
           </div>
-          <CurrencyBadge code="EUR" />
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="relative flex-1 sm:w-64">
+              <Icon name="search" size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+              <input
+                className="input !py-1.5 !pl-8 !text-sm w-full"
+                placeholder="Search clients…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+              {!!q && <button className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-white text-xs" onClick={() => setQ('')}>✕</button>}
+            </div>
+            <CurrencyBadge code="EUR" />
+          </div>
         </div>
+        {!!q && <div className="text-xs text-muted mt-2">{filtered.length} of {wallets.length} clients</div>}
       </div>
 
       <div className="grid md:grid-cols-3 gap-3">
-        {wallets.map((w) => {
+        {filtered.map((w) => {
           const bal = Number(w.balance);
           const postpay = w.billing_mode === 'postpay';
           const creditMode = w.billing_mode === 'credit';
@@ -234,9 +252,9 @@ export default function Billing(): JSX.Element {
             </div>
           );
         })}
-        {!wallets.length && (
+        {!filtered.length && (
           <div className="card card-pad text-sm text-muted md:col-span-3 text-center py-8">
-            No wallets yet — they are created automatically with each client.
+            {wallets.length ? `No clients match "${q}"` : 'No wallets yet — they are created automatically with each client.'}
           </div>
         )}
       </div>
