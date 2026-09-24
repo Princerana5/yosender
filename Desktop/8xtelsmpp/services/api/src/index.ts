@@ -57,6 +57,7 @@ app.use('/messages', requireAuth, messageRoutes);
 app.use('/billing', requireAuth, billingRoutes);
 app.use('/reports', requireAuth, reportRoutes);
 app.use('/invoices', requireAuth, (await import('./routes/invoices.js')).default);
+app.use('/payment-methods', requireAuth, (await import('./routes/payment-methods.js')).default);
 app.use('/rate-notifications', requireAuth, (await import('./routes/rate-notifications.js')).default);
 // /system/health + /system/health/pipeline are public (counts only, no PII)
 // so the local watchdog/cron can poll without a JWT; everything else under
@@ -85,4 +86,7 @@ app.use((err: Error & { status?: number; type?: string }, _req: express.Request,
   res.status(500).json({ error: 'internal error' });
 });
 
-app.listen(PORT, () => console.log(`[8xtelSMPP api] listening on :${PORT}`));
+app.listen(PORT, () => {
+  console.log(`[8xtelSMPP api] listening on :${PORT}`);
+  import('./jobs/auto-invoices.js').then(m => m.startAutoInvoiceJob()).catch(e => console.warn('[auto-invoices]', e.message));
+});

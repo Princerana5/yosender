@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { query, getPool } from '@8xtel/core';
-import { requirePerm, requirePortal, audit } from '../middleware.js';
+import { requirePerm, audit } from '../middleware.js';
 import { nextInvoiceNumber } from '../lib/invoice-numbers.js';
-import { buildInvoiceHtml } from '../lib/invoice-pdf.js';
+import { buildInvoiceHtml, buildInvoicePdfBuffer } from '../lib/invoice-pdf.js';
+import { sendMail } from '../lib/mailer.js';
+import { buildInvoiceEmailHtml } from '../lib/invoice-email.js';
 
 const router = Router();
 
-// All console invoice routes require billing.read at minimum
 router.use(requirePerm('billing.read'));
 
 const genSchema = z.object({
@@ -21,7 +22,6 @@ const genSchema = z.object({
 });
 
 async function buildInvoiceLines(clientId: string, from: string, to: string) {
-  // Group settled billing_records by country for the period
   const rows = await query<{
     country_id: string | null; country_name: string | null; iso_code: string | null;
     total_sms: string; successful: string; failed: string;
@@ -60,6 +60,40 @@ async function buildInvoiceLines(clientId: string, from: string, to: string) {
   });
 }
 
+async function loadPaymentMethods() {
+  return query<{ id: string; kind: string; label: string; chain: string | null; details: unknown; is_active: boolean; sort_order: number }>(
+    'SELECT * FROM system_payment_methods WHERE is_active=true ORDER BY sort_order, created_at',
+  );
+}
+
+function toInvoiceDoc(inv: Record<string, unknown>, lines: Record<string, unknown>[]) {
+  return {
+    invoice_number: inv.invoice_number as string,
+    period_from: String(inv.period_from).slice(0, 10),
+    period_to: String(inv.period_to).slice(0, 10),
+    currency: inv.currency as string,
+    subtotal: Number(inv.subtotal),
+    tax_rate: Number(inv.tax_rate),
+    tax_amount: Number(inv.tax_amount),
+    adjustments: Number(inv.adjustments),
+    grand_total: Number(inv.grand_total),
+    status: inv.status as string,
+    notes: inv.notes as string | null,
+    created_at: String(inv.created_at),
+    client: {
+      name: inv.client_name as string,
+      company_name: inv.company_name as string | null,
+      system_id: inv.system_id as string,
+      email: (inv.portal_email as string | null) ?? null,
+    },
+    lines: lines.map((l) => ({
+      country_name: String(l.country_name), iso_code: l.iso_code as string | null,
+      total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed),
+      segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage),
+    })),
+  };
+}
+
 // POST /invoices/generate
 router.post('/generate', requirePerm('billing.manage'), audit('generated_invoice', 'invoice'), async (req, res) => {
   const parsed = genSchema.safeParse(req.body);
@@ -67,7 +101,6 @@ router.post('/generate', requirePerm('billing.manage'), audit('generated_invoice
   const { client_id, from, to, tax_rate, adjustments, notes } = parsed.data;
   const dryRun = parsed.data.dryRun || req.query.dryRun === '1';
   if (from > to) { res.status(400).json({ error: 'from must be <= to' }); return; }
-  // Dedup guard: same client+period
   const existing = await query<{ id: string; invoice_number: string }>(
     'SELECT id, invoice_number FROM invoices WHERE client_id=$1 AND period_from=$2::date AND period_to=$3::date AND status != \'cancelled\' LIMIT 1',
     [client_id, from, to],
@@ -111,7 +144,7 @@ router.post('/generate', requirePerm('billing.manage'), audit('generated_invoice
   } finally { db.release(); }
 });
 
-// GET /invoices — admin list with filters
+// GET /invoices
 router.get('/', async (req, res) => {
   const q = req.query as Record<string, string>;
   const clientId = q.client_id ?? null;
@@ -139,47 +172,86 @@ router.get('/:id', async (req, res) => {
   if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
   const lines = await query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY amount DESC', [req.params.id]);
   const emails = await query('SELECT * FROM invoice_emails WHERE invoice_id=$1 ORDER BY sent_at DESC', [req.params.id]);
-  res.json({ invoice: inv[0], lines, emails });
+  const payments = await query('SELECT * FROM invoice_payments WHERE invoice_id=$1::uuid ORDER BY created_at DESC', [req.params.id]).catch(() => []);
+  const paymentMethods = await loadPaymentMethods().catch(() => []);
+  res.json({ invoice: inv[0], lines, emails, payments, payment_methods: paymentMethods });
 });
 
-// GET /invoices/:id/pdf
+// GET /invoices/:id/payments
+router.get('/:id/payments', async (req, res) => {
+  const rows = await query('SELECT * FROM invoice_payments WHERE invoice_id=$1::uuid ORDER BY created_at DESC', [req.params.id]);
+  res.json({ payments: rows });
+});
+
+// POST /invoices/:id/payment — admin records a payment claim
+const paymentSchema = z.object({
+  method: z.enum(['bank', 'upi', 'usdt', 'wire', 'other']),
+  chain: z.enum(['TRC20', 'ERC20', 'BEP20', 'Polygon', 'Other']).nullable().optional(),
+  details: z.record(z.unknown()).default({}),
+  amount: z.number().optional(),
+  reference: z.string().max(200).optional(),
+});
+
+router.post('/:id/payment', requirePerm('billing.manage'), audit('created_invoice_payment', 'invoice_payment'), async (req, res) => {
+  const parsed = paymentSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() }); return; }
+  if (parsed.data.method === 'usdt' && !parsed.data.chain) { res.status(422).json({ error: 'chain is required for usdt (TRC20/ERC20/BEP20/Polygon/Other)' }); return; }
+  const inv = await query('SELECT id FROM invoices WHERE id=$1::uuid', [req.params.id]);
+  if (!inv.length) { res.status(404).json({ error: 'invoice not found' }); return; }
+  const details = { ...parsed.data.details as Record<string, unknown>, ...(parsed.data.reference ? { reference: parsed.data.reference } : {}) };
+  const { rows } = await getPool().query(
+    `INSERT INTO invoice_payments (invoice_id, method, chain, details, amount, status, created_by)
+     VALUES ($1::uuid,$2,$3,$4,$5,'pending',$6) RETURNING *`,
+    [req.params.id, parsed.data.method, parsed.data.chain ?? null, JSON.stringify(details), parsed.data.amount ?? null, (req.user as { id: string }).id],
+  );
+  await getPool().query('UPDATE invoices SET payment_method=$1, payment_chain=$2, updated_at=now() WHERE id=$3::uuid', [parsed.data.method, parsed.data.chain ?? null, req.params.id]);
+  res.status(201).json({ payment: rows[0] });
+});
+
+router.post('/:id/payment/:pid/verify', requirePerm('billing.manage'), audit('verified_invoice_payment', 'invoice_payment'), async (req, res) => {
+  const body = z.object({ action: z.enum(['verify', 'reject']) }).safeParse(req.body);
+  if (!body.success) { res.status(400).json({ error: 'invalid payload' }); return; }
+  const p = await query('SELECT * FROM invoice_payments WHERE id=$1::uuid AND invoice_id=$2::uuid', [req.params.pid, req.params.id]);
+  if (!p.length) { res.status(404).json({ error: 'payment not found' }); return; }
+  const status = body.data.action === 'verify' ? 'verified' : 'rejected';
+  await getPool().query('UPDATE invoice_payments SET status=$1, verified_at=now(), verified_by=$2 WHERE id=$3::uuid', [status, (req.user as { id: string }).id, req.params.pid]);
+  if (status === 'verified') {
+    await getPool().query("UPDATE invoices SET status='paid', paid_at=now(), paid_by=$1, updated_at=now() WHERE id=$2::uuid", [(req.user as { id: string }).id, req.params.id]);
+  }
+  const updated = await query('SELECT * FROM invoice_payments WHERE id=$1::uuid', [req.params.pid]);
+  const inv = await query('SELECT * FROM invoices WHERE id=$1::uuid', [req.params.id]);
+  res.json({ payment: updated[0], invoice: inv[0] });
+});
+
+// GET /invoices/:id/pdf — real PDF (pdfkit) with fallback to HTML
 router.get('/:id/pdf', async (req, res) => {
   const inv = await query('SELECT i.*, c.name AS client_name, c.company_name, c.system_id, c.portal_email FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=$1::uuid', [req.params.id]);
   if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
   const lines = await query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY amount DESC', [req.params.id]);
-  const doc = {
-    invoice_number: (inv[0] as { invoice_number: string }).invoice_number,
-    period_from: String((inv[0] as { period_from: string }).period_from).slice(0, 10),
-    period_to: String((inv[0] as { period_to: string }).period_to).slice(0, 10),
-    currency: (inv[0] as { currency: string }).currency,
-    subtotal: Number((inv[0] as { subtotal: string }).subtotal),
-    tax_rate: Number((inv[0] as { tax_rate: string }).tax_rate),
-    tax_amount: Number((inv[0] as { tax_amount: string }).tax_amount),
-    adjustments: Number((inv[0] as { adjustments: string }).adjustments),
-    grand_total: Number((inv[0] as { grand_total: string }).grand_total),
-    status: (inv[0] as { status: string }).status,
-    notes: (inv[0] as { notes: string | null }).notes,
-    created_at: String((inv[0] as { created_at: string }).created_at),
-    client: {
-      name: (inv[0] as { client_name: string }).client_name,
-      company_name: (inv[0] as { company_name: string | null }).company_name,
-      system_id: (inv[0] as { system_id: string }).system_id,
-      email: (inv[0] as { portal_email: string | null }).portal_email,
-    },
-    lines: (lines as Record<string, unknown>[]).map((l) => ({
-      country_name: String(l.country_name), iso_code: l.iso_code as string | null,
-      total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed),
-      segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage),
-    })),
-  };
-  const html = buildInvoiceHtml(doc);
-  const buf = Buffer.from(html, 'utf8');
+  const methods = await loadPaymentMethods().catch(() => []);
+  const doc = toInvoiceDoc(inv[0] as Record<string, unknown>, lines as Record<string, unknown>[]);
+  const payForDoc = methods.map(m => ({ kind: m.kind, label: m.label, chain: m.chain, details: (typeof m.details === 'string' ? JSON.parse(m.details) : m.details) as Record<string, unknown> }));
+  const wantsPdf = String(req.query.format ?? 'pdf') !== 'html';
+  if (wantsPdf) {
+    try {
+      const pdf = await buildInvoicePdfBuffer(doc, payForDoc);
+      // detect real PDF vs HTML fallback by header
+      const isPdf = pdf[0] === 0x25 && pdf[1] === 0x50; // %P
+      if (isPdf) {
+        res.setHeader('content-type', 'application/pdf');
+        res.setHeader('content-disposition', `inline; filename="Invoice_${doc.invoice_number}.pdf"`);
+        res.send(pdf);
+        return;
+      }
+    } catch { /* fall through to html */ }
+  }
+  const html = buildInvoiceHtml(doc, payForDoc);
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.setHeader('content-disposition', `inline; filename="${doc.invoice_number}.html"`);
-  res.send(buf);
+  res.send(Buffer.from(html, 'utf8'));
 });
 
-// PATCH /invoices/:id — status/notes
+// PATCH /invoices/:id
 router.patch('/:id', requirePerm('billing.manage'), audit('updated_invoice', 'invoice'), async (req, res) => {
   const body = z.object({ status: z.enum(['draft','generated','sent','paid','unpaid','overdue','cancelled']).optional(), notes: z.string().max(2000).optional().nullable() }).safeParse(req.body);
   if (!body.success) { res.status(400).json({ error: 'invalid payload' }); return; }
@@ -187,15 +259,17 @@ router.patch('/:id', requirePerm('billing.manage'), audit('updated_invoice', 'in
   if (!cur.length) { res.status(404).json({ error: 'not found' }); return; }
   const from = cur[0].status;
   const to = body.data.status;
-  // Terminal guard: cancelled cannot leave; paid cannot go backwards to draft/generated
   if (from === 'cancelled' && to && to !== 'cancelled') { res.status(422).json({ error: 'cancelled invoice is terminal' }); return; }
-  if (to) await query('UPDATE invoices SET status=$1, updated_at=now() WHERE id=$2::uuid', [to, req.params.id]);
+  if (to) {
+    if (to === 'paid') await query("UPDATE invoices SET status='paid', paid_at=now(), paid_by=$1, updated_at=now() WHERE id=$2::uuid", [(req.user as { id: string }).id, req.params.id]);
+    else await query('UPDATE invoices SET status=$1, updated_at=now() WHERE id=$2::uuid', [to, req.params.id]);
+  }
   if (body.data.notes !== undefined) await query('UPDATE invoices SET notes=$1, updated_at=now() WHERE id=$2::uuid', [body.data.notes, req.params.id]);
   const updated = await query('SELECT * FROM invoices WHERE id=$1::uuid', [req.params.id]);
   res.json({ invoice: updated[0] });
 });
 
-// POST /invoices/:id/send — record email send (SMTP wiring can be added; for now audit+status)
+// POST /invoices/:id/send — professional mail + PDF attachment
 router.post('/:id/send', requirePerm('billing.manage'), audit('sent_invoice', 'invoice'), async (req, res) => {
   const body = z.object({ to_email: z.string().email().optional() }).safeParse(req.body ?? {});
   if (!body.success) { res.status(400).json({ error: 'invalid payload' }); return; }
@@ -208,23 +282,30 @@ router.post('/:id/send', requirePerm('billing.manage'), audit('sent_invoice', 'i
     toEmail = cl[0]?.portal_email ?? null;
   }
   if (!toEmail) { res.status(422).json({ error: 'no recipient email — provide to_email' }); return; }
-  // Try to send via nodemailer if SMTP configured; otherwise just log.
+
+  const full = await query('SELECT i.*, c.name AS client_name, c.company_name, c.system_id, c.portal_email FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=$1::uuid', [req.params.id]);
+  const lines = await query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY amount DESC', [req.params.id]);
+  const methods = await loadPaymentMethods().catch(() => []);
+  const doc = toInvoiceDoc(full[0] as Record<string, unknown>, lines as Record<string, unknown>[]);
+  const payForDoc = methods.map(m => ({ kind: m.kind, label: m.label, chain: m.chain, details: (typeof m.details === 'string' ? JSON.parse(m.details) : m.details) as Record<string, unknown> }));
+  const panelUrl = (process.env.PANEL_HOST ?? process.env.FRONTEND_URL ?? '').replace(/\/$/, '') || 'https://8xtelsmpp.com';
+  const html = buildInvoiceEmailHtml({ doc, paymentMethods: payForDoc, panelUrl, invoiceId: req.params.id });
+  const pdfBuffer = await buildInvoicePdfBuffer(doc, payForDoc);
+  const isPdf = pdfBuffer[0] === 0x25 && pdfBuffer[1] === 0x50;
+  const filename = `Invoice_${doc.invoice_number}.${isPdf ? 'pdf' : 'html'}`;
+
   let error: string | null = null;
   let messageId: string | null = null;
   try {
-    const host = process.env.RN_SMTP_HOST ?? process.env.SMTP_HOST;
-    if (host) {
-      const nodemailer = await import('nodemailer');
-      const transporter = nodemailer.createTransport({
-        host,
-        port: Number(process.env.RN_SMTP_PORT ?? process.env.SMTP_PORT ?? 587),
-        secure: String(process.env.RN_SMTP_SECURE ?? 'false') === 'true',
-        auth: process.env.RN_SMTP_USER ? { user: process.env.RN_SMTP_USER, pass: process.env.RN_SMTP_PASS ?? '' } : undefined,
-      });
-      const html = '<p>Invoice attached.</p>';
-      const info = await transporter.sendMail({ from: process.env.RN_SMTP_USER ?? 'billing@8xtelsmpp.com', to: toEmail, subject: `Invoice ${inv[0].invoice_number}`, html });
-      messageId = (info as { messageId?: string }).messageId ?? null;
-    }
+    const r = await sendMail({
+      from: `"8xtel Accounts" <${process.env.BILLING_SMTP_USER ?? process.env.BILLING_FROM_EMAIL ?? 'Accounts@8xtel.com'}>`,
+      replyTo: process.env.BILLING_SMTP_USER ?? 'Accounts@8xtel.com',
+      to: toEmail,
+      subject: `Invoice ${doc.invoice_number} — ${doc.period_from} to ${doc.period_to} — 8xtel`,
+      html,
+      attachments: [{ filename, content: pdfBuffer, contentType: isPdf ? 'application/pdf' : 'text/html' }],
+    });
+    messageId = r.messageId;
   } catch (e) { error = (e as Error).message; }
   await query('INSERT INTO invoice_emails (invoice_id, to_email, sent_by, message_id, error) VALUES ($1::uuid,$2,$3,$4,$5)', [req.params.id, toEmail, (req.user as { id: string }).id, messageId, error]);
   if (!error) await query("UPDATE invoices SET status='sent', updated_at=now() WHERE id=$1::uuid AND status IN ('generated','draft')", [req.params.id]);
@@ -232,7 +313,7 @@ router.post('/:id/send', requirePerm('billing.manage'), audit('sent_invoice', 'i
   res.json({ invoice: updated[0], emailed_to: toEmail, message_id: messageId, error });
 });
 
-// POST /invoices/:id/regenerate — cancel old, create new for same period (audit)
+// POST /invoices/:id/regenerate
 router.post('/:id/regenerate', requirePerm('billing.manage'), audit('regenerated_invoice', 'invoice'), async (req, res) => {
   const inv = await query<{ client_id: string; period_from: string; period_to: string; tax_rate: string; adjustments: string; notes: string | null }>(
     'SELECT client_id, period_from, period_to, tax_rate, adjustments, notes FROM invoices WHERE id=$1::uuid', [req.params.id],

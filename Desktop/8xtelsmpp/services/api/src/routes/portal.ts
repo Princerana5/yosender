@@ -665,6 +665,11 @@ router.get('/messages/:id', async (req, res) => {
 });
 
 // ── Invoices (own client only) ─────────────────────────────────────────────
+router.get('/payment-methods', async (_req, res) => {
+  const rows = await query('SELECT id, kind, label, chain, details, sort_order FROM system_payment_methods WHERE is_active=true ORDER BY sort_order, created_at');
+  res.json({ methods: rows });
+});
+
 router.get('/invoices', async (req, res) => {
   const id = cid(req);
   const rows = await query('SELECT * FROM invoices WHERE client_id=$1 ORDER BY created_at DESC LIMIT 100', [id]);
@@ -675,13 +680,42 @@ router.get('/invoices/:invId', async (req, res) => {
   if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
   const lines = await query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY amount DESC', [req.params.invId]);
   const emails = await query('SELECT * FROM invoice_emails WHERE invoice_id=$1 ORDER BY sent_at DESC', [req.params.invId]);
-  res.json({ invoice: inv[0], lines, emails });
+  const payments = await query('SELECT * FROM invoice_payments WHERE invoice_id=$1::uuid ORDER BY created_at DESC', [req.params.invId]).catch(() => []);
+  const methods = await query('SELECT id, kind, label, chain, details FROM system_payment_methods WHERE is_active=true ORDER BY sort_order').catch(() => []);
+  res.json({ invoice: inv[0], lines, emails, payments, payment_methods: methods });
+});
+router.get('/invoices/:invId/payments', async (req, res) => {
+  const inv = await query('SELECT id FROM invoices WHERE id=$1::uuid AND client_id=$2', [req.params.invId, cid(req)]);
+  if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
+  const rows = await query('SELECT * FROM invoice_payments WHERE invoice_id=$1::uuid ORDER BY created_at DESC', [req.params.invId]);
+  res.json({ payments: rows });
+});
+router.post('/invoices/:invId/payment', async (req, res) => {
+  const parsed = z.object({
+    method: z.enum(['bank','upi','usdt','wire','other']),
+    chain: z.enum(['TRC20','ERC20','BEP20','Polygon','Other']).nullable().optional(),
+    details: z.record(z.unknown()).default({}),
+    amount: z.number().optional(),
+    reference: z.string().max(200).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() }); return; }
+  if (parsed.data.method === 'usdt' && !parsed.data.chain) { res.status(422).json({ error: 'chain is required for usdt' }); return; }
+  const inv = await query('SELECT id FROM invoices WHERE id=$1::uuid AND client_id=$2', [req.params.invId, cid(req)]);
+  if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
+  const details = { ...parsed.data.details as Record<string, unknown>, ...(parsed.data.reference ? { reference: parsed.data.reference } : {}) };
+  const { rows } = await getPool().query(
+    `INSERT INTO invoice_payments (invoice_id, method, chain, details, amount, status) VALUES ($1::uuid,$2,$3,$4,$5,'pending') RETURNING *`,
+    [req.params.invId, parsed.data.method, parsed.data.chain ?? null, JSON.stringify(details), parsed.data.amount ?? null],
+  );
+  await getPool().query('UPDATE invoices SET payment_method=$1, payment_chain=$2, updated_at=now() WHERE id=$3::uuid', [parsed.data.method, parsed.data.chain ?? null, req.params.invId]);
+  res.status(201).json({ payment: rows[0] });
 });
 router.get('/invoices/:invId/pdf', async (req, res) => {
   const inv = await query('SELECT i.*, c.name AS client_name, c.company_name, c.system_id, c.portal_email FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=$1::uuid AND i.client_id=$2', [req.params.invId, cid(req)]);
   if (!inv.length) { res.status(404).json({ error: 'not found' }); return; }
   const lines = await query('SELECT * FROM invoice_lines WHERE invoice_id=$1 ORDER BY amount DESC', [req.params.invId]);
-  const { buildInvoiceHtml } = await import('../lib/invoice-pdf.js');
+  const methods = await query('SELECT kind, label, chain, details FROM system_payment_methods WHERE is_active=true ORDER BY sort_order').catch(() => []);
+  const { buildInvoiceHtml, buildInvoicePdfBuffer } = await import('../lib/invoice-pdf.js');
   const doc = {
     invoice_number: (inv[0] as { invoice_number: string }).invoice_number,
     period_from: String((inv[0] as { period_from: string }).period_from).slice(0, 10),
@@ -698,7 +732,16 @@ router.get('/invoices/:invId/pdf', async (req, res) => {
     client: { name: (inv[0] as { client_name: string }).client_name, company_name: (inv[0] as { company_name: string | null }).company_name, system_id: (inv[0] as { system_id: string }).system_id, email: (inv[0] as { portal_email: string | null }).portal_email },
     lines: (lines as Record<string, unknown>[]).map((l) => ({ country_name: String(l.country_name), iso_code: l.iso_code as string | null, total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed), segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage) })),
   };
-  const html = buildInvoiceHtml(doc);
+  const payForDoc = (methods as Record<string, unknown>[]).map(m => ({ kind: String(m.kind), label: String(m.label), chain: m.chain as string | null, details: (typeof m.details === 'string' ? JSON.parse(m.details as string) : m.details) as Record<string, unknown> }));
+  const wantsPdf = String(req.query.format ?? 'pdf') !== 'html';
+  if (wantsPdf) {
+    try {
+      const pdf = await buildInvoicePdfBuffer(doc, payForDoc);
+      const isPdf = pdf[0] === 0x25 && pdf[1] === 0x50;
+      if (isPdf) { res.setHeader('content-type', 'application/pdf'); res.setHeader('content-disposition', `inline; filename="Invoice_${doc.invoice_number}.pdf"`); res.send(pdf); return; }
+    } catch { /* fallback */ }
+  }
+  const html = buildInvoiceHtml(doc, payForDoc);
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.setHeader('content-disposition', `inline; filename="${doc.invoice_number}.html"`);
   res.send(Buffer.from(html, 'utf8'));

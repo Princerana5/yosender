@@ -1396,7 +1396,13 @@ function PortalApiKeys(): JSX.Element {
 // ── Portal: invoices (own client only) ───────────────────────────────────
 export function PortalInvoices(): JSX.Element {
   const [rows, setRows] = useState<Array<{ id: string; invoice_number: string; period_from: string; period_to: string; currency: string; grand_total: string; status: string; created_at: string }>>([]);
-  const [detail, setDetail] = useState<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>> } | null>(null);
+  const [detail, setDetail] = useState<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>>; payments?: Array<Record<string, unknown>>; payment_methods?: Array<Record<string, unknown>> } | null>(null);
+  const [payMethod, setPayMethod] = useState('usdt');
+  const [payChain, setPayChain] = useState('TRC20');
+  const [payRef, setPayRef] = useState('');
+  const [payAmount, setPayAmount] = useState('');
+  const [payMsg, setPayMsg] = useState('');
+  const [payBusy, setPayBusy] = useState(false);
 
   const load = (): void => {
     portalApi<{ invoices: typeof rows }>('/portal/invoices').then((r) => setRows(r.invoices)).catch(() => undefined);
@@ -1404,8 +1410,39 @@ export function PortalInvoices(): JSX.Element {
   useEffect(load, []);
 
   async function open(id: string): Promise<void> {
-    const r = await portalApi<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>> }>(`/portal/invoices/${id}`);
+    setPayMsg('');
+    const r = await portalApi<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>>; payments?: Array<Record<string, unknown>>; payment_methods?: Array<Record<string, unknown>> }>(`/portal/invoices/${id}`);
     setDetail(r);
+  }
+
+  async function reloadDetail(): Promise<void> {
+    if (!detail) return;
+    const r = await portalApi<typeof detail>(`/portal/invoices/${String(detail.invoice.id)}`);
+    setDetail(r);
+  }
+
+  async function submitPayment(): Promise<void> {
+    if (!detail) return;
+    setPayMsg('');
+    setPayBusy(true);
+    try {
+      await portalApi(`/portal/invoices/${String(detail.invoice.id)}/payment`, {
+        method: 'POST',
+        body: JSON.stringify({
+          method: payMethod,
+          chain: payMethod === 'usdt' ? payChain : null,
+          details: payRef ? { reference: payRef, tx_hash: payRef } : {},
+          reference: payRef || undefined,
+          amount: payAmount ? Number(payAmount) : undefined,
+        }),
+      });
+      setPayRef('');
+      setPayAmount('');
+      setPayMsg('Payment reference submitted — Accounts will verify and mark the invoice as paid.');
+      await reloadDetail();
+      load();
+    } catch (e) { setPayMsg((e as Error).message); }
+    finally { setPayBusy(false); }
   }
 
   function openPdf(id: string): void {
@@ -1435,16 +1472,64 @@ export function PortalInvoices(): JSX.Element {
         <Modal title={String(detail.invoice.invoice_number ?? 'Invoice')} onClose={() => setDetail(null)}>
           <div className="space-y-3">
             <div className="flex gap-2 text-xs"><span>{String(detail.invoice.period_from).slice(0, 10)} → {String(detail.invoice.period_to).slice(0, 10)}</span><StatusBadge status={String(detail.invoice.status)} /><span className="ml-auto font-semibold"><Money value={String(detail.invoice.grand_total)} currency={String(detail.invoice.currency)} /></span></div>
-            <div className="max-h-64 overflow-auto">
+            <div className="max-h-48 overflow-auto">
               <table className="w-full text-xs">
                 <thead><tr className="text-muted"><th className="text-left">Country</th><th className="text-right">SMS</th><th className="text-right">OK</th><th className="text-right">Fail</th><th className="text-right">Amount</th><th className="text-right">%</th></tr></thead>
                 <tbody>{detail.lines.map((l, i) => <tr key={i} className="border-t border-line"><td>{String(l.country_name)}</td><td className="text-right">{String(l.total_sms)}</td><td className="text-right text-emerald-300">{String(l.successful)}</td><td className="text-right text-red-300">{String(l.failed)}</td><td className="text-right"><Money value={String(l.amount)} currency={String(detail.invoice.currency)} /></td><td className="text-right">{String(l.percentage)}%</td></tr>)}</tbody>
               </table>
             </div>
+            {!!detail.payment_methods?.length && (
+              <div className="card card-pad !p-3 bg-panel/50">
+                <div className="text-[10px] tracking-widest uppercase text-muted font-semibold mb-2">How to pay</div>
+                {detail.payment_methods.map((m) => {
+                  const d = (typeof m.details === 'string' ? JSON.parse(m.details as string) : m.details) as Record<string, unknown> ?? {};
+                  const val = String(d.address ?? d.wallet_address ?? d.upi_id ?? d.vpa ?? d.account_number ?? '');
+                  return (
+                    <div key={String(m.id)} className="text-xs border border-line rounded-lg px-2.5 py-2 mb-1.5 bg-ink/60">
+                      <div className="font-semibold">{String(m.label)} <span className="font-normal text-muted">— {String(m.kind).toUpperCase()}{m.chain ? ` · ${String(m.chain)}` : ''}</span></div>
+                      <div className="font-mono text-[11px] break-all mt-0.5">{val || '—'}</div>
+                      {m.kind === 'bank' && d.bank_name ? <div className="text-[11px] text-muted">{String(d.bank_name)}{d.ifsc ? ` · ${String(d.ifsc)}` : ''}</div> : null}
+                      {m.kind === 'usdt' && m.chain ? <div className="text-[11px] text-emerald-300">Send USDT on {String(m.chain)} only</div> : null}
+                    </div>
+                  );
+                })}
+                <div className="text-[11px] text-muted mt-1">After paying, submit the reference below — Accounts verifies and marks the invoice as paid.</div>
+              </div>
+            )}
             <div className="flex gap-2">
               <button className="btn flex-1" onClick={() => openPdf(String(detail.invoice.id))}>Open PDF</button>
             </div>
             {!!detail.emails.length && <div className="text-xs text-muted">Emails: {detail.emails.length} sent</div>}
+
+            {/* Submit payment */}
+            <div className="border-t border-line pt-3">
+              <div className="text-[11px] font-semibold mb-2">Submit payment</div>
+              {payMsg && <div className={`text-xs rounded-lg px-2.5 py-2 mb-2 border ${payMsg.includes('submitted') || payMsg.includes('Payment') ? 'bg-brand/10 border-brand/25 text-emerald-300' : 'bg-danger/10 border-danger/25 text-red-300'}`}>{payMsg}</div>}
+              <div className="flex flex-wrap gap-1.5 items-end">
+                <select className="input !py-1.5 text-xs max-w-[110px]" value={payMethod} onChange={(e) => setPayMethod(e.target.value)}>
+                  <option value="usdt">USDT</option><option value="bank">Bank</option><option value="upi">UPI</option><option value="wire">Wire</option><option value="other">Other</option>
+                </select>
+                {payMethod === 'usdt' && (
+                  <select className="input !py-1.5 text-xs max-w-[110px]" value={payChain} onChange={(e) => setPayChain(e.target.value)}>
+                    {['TRC20','ERC20','BEP20','Polygon','Other'].map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                )}
+                <input className="input !py-1.5 text-xs flex-1 min-w-[120px] font-mono" placeholder={payMethod === 'usdt' ? 'TX hash' : 'Reference / UTR'} value={payRef} onChange={(e) => setPayRef(e.target.value)} />
+                <input className="input !py-1.5 text-xs w-[90px] font-mono" placeholder="Amount" inputMode="decimal" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
+                <button className="btn !py-1.5 !text-xs" disabled={payBusy || !payRef.trim()} onClick={() => void submitPayment()}>{payBusy ? '…' : 'Submit'}</button>
+              </div>
+              {!!detail.payments?.length && (
+                <div className="mt-2.5 space-y-1 max-h-28 overflow-auto">
+                  {detail.payments.map((pp) => (
+                    <div key={String(pp.id)} className="flex items-center gap-2 text-xs border border-line rounded px-2 py-1 bg-panel/50">
+                      <span className="font-mono">{String(pp.method).toUpperCase()}{pp.chain ? ` ${String(pp.chain)}` : ''}</span>
+                      <StatusBadge status={String(pp.status)} />
+                      <span className="ml-auto text-[11px] text-muted truncate max-w-[140px]">{String((pp.details as Record<string, unknown>)?.reference ?? (pp.details as Record<string, unknown>)?.tx_hash ?? '')}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </Modal>
       )}

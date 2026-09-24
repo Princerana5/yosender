@@ -22,6 +22,7 @@ import { RateNotificationHistory, RateNotificationDetail, RateNotificationCreate
 import ClientApi from './pages/ClientApi.js';
 import Docs from './pages/Docs.js';
 import Invoices from './pages/Invoices.js';
+import PaymentMethods from './pages/PaymentMethods.js';
 import { StatusBadge, initTheme } from './components.js';
 import { token } from './api.js';
 
@@ -115,6 +116,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           />
           <Route path="billing" element={<Billing />} />
           <Route path="invoices" element={<Invoices />} />
+          <Route path="payment-methods" element={<PaymentMethods />} />
           <Route
             path="rates"
             element={

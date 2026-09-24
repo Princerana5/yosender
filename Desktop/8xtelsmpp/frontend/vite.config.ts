@@ -35,6 +35,7 @@ export default defineConfig({
       '/rate-notifications': apiProxy('/rate-notifications'),
       '/system': apiProxy('/system'),
       '/connectors': apiProxy('/connectors'),
+      '/payment-methods': apiProxy('/payment-methods'),
       '/portal': apiProxy('/portal'),
     },
   },
