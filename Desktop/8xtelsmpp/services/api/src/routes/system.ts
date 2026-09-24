@@ -245,7 +245,12 @@ router.post('/sender-requests/:id/review', requirePerm('clients.update'), audit(
 // when omitted and returned ONCE (stored as bcrypt hash).
 router.get('/users', requirePerm('users.manage'), async (_req, res) => {
   const rows = await query(
-    'SELECT u.id, u.email, u.full_name, r.name AS role, u.is_active, u.last_login_at, u.created_at FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.created_at',
+    `SELECT u.id, u.email, u.full_name, r.name AS role, u.is_active, u.last_login_at, u.last_seen_at, u.created_at,
+            CASE WHEN NOT u.is_active THEN 'disabled'
+                 WHEN u.last_seen_at IS NOT NULL AND u.last_seen_at > now() - interval '5 minutes' THEN 'active'
+                 ELSE 'offline' END AS presence_status,
+            EXTRACT(EPOCH FROM (now() - COALESCE(u.last_seen_at, u.last_login_at)))::int AS last_seen_secs
+     FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.created_at`,
   );
   res.json({ users: rows });
 });

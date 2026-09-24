@@ -12,7 +12,7 @@ declare global {
   }
 }
 
-/** JWT auth (§32) */
+/** JWT auth (§32) — also heartbeats last_seen_at for presence (§30) */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const header = req.headers.authorization ?? '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -26,6 +26,11 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
   req.user = user;
+  // heartbeat: best-effort, never blocks the request; updated_at throttled by
+  // the DB below to at most once per minute per user via WHERE guard.
+  void getPool()
+    .query(`UPDATE users SET last_seen_at=now() WHERE id=$1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '60 seconds')`, [user.id])
+    .catch(() => undefined);
   next();
 }
 

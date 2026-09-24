@@ -16,7 +16,7 @@ router.post('/login', async (req, res) => {
     res.status(401).json({ error: 'invalid credentials' });
     return;
   }
-  await getPool().query('UPDATE users SET last_login_at=now() WHERE id=$1', [user.id]);
+  await getPool().query('UPDATE users SET last_login_at=now(), last_seen_at=now() WHERE id=$1', [user.id]);
   res.json({ token: signToken(user), user: { id: user.id, email: user.email, role: user.role, permissions: user.permissions } });
 });
 

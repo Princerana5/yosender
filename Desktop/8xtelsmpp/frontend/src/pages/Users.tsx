@@ -4,7 +4,17 @@ import { PageHeader, DataTable, StatusBadge, Modal, EmptyState, Icon } from '../
 
 interface User {
   id: string; email: string; full_name: string | null; role: string;
-  is_active: boolean; last_login_at: string | null; created_at: string;
+  is_active: boolean; last_login_at: string | null; last_seen_at: string | null;
+  presence_status: 'active' | 'offline' | 'disabled'; last_seen_secs: number | null; created_at: string;
+}
+function fmtLastOnline(u: User): string {
+  if (!u.is_active) return 'disabled';
+  const s = u.last_seen_secs;
+  if (s == null) return 'never';
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) { const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); return m ? `${h}h ${m}m ago` : `${h}h ago`; }
+  const d = Math.floor(s / 86400); return `${d}d ago`;
 }
 
 interface Role {
@@ -182,18 +192,17 @@ export default function UsersPage(): JSX.Element {
           rows={users}
           columns={[
             {
-              key: 'email', label: 'User',
-              render: (u) => (
-                <div>
-                  <div className="font-semibold">{u.email}</div>
-                  <div className="text-[11px] text-muted">{u.full_name ?? '—'}</div>
-                </div>
-              ),
+              key: 'email', label: 'Mail',
+              render: (u) => <span className="font-mono text-xs">{u.email}</span>,
+            },
+            {
+              key: 'full_name', label: 'Name',
+              render: (u) => <span className="text-xs">{u.full_name ?? '—'}</span>,
             },
             {
               key: 'role', label: 'Role',
               render: (u) => (
-                <select className="input !py-1.5 !text-xs font-mono max-w-[160px]"
+                <select className="input !py-1.5 !text-xs font-mono max-w-[150px]"
                   value={u.role} onChange={(e) => setRole(u, e.target.value)}
                   title={ROLE_BLURB[u.role] ?? u.role}>
                   {(roles.length ? roles.map((r) => r.name) : Object.keys(ROLE_BLURB)).map((rn) => (
@@ -203,14 +212,24 @@ export default function UsersPage(): JSX.Element {
               ),
             },
             {
-              key: 'is_active', label: 'Status',
-              render: (u) => <StatusBadge status={u.is_active ? 'active' : 'disabled'} />,
+              key: 'presence_status', label: 'Status',
+              render: (u) => {
+                const s = u.presence_status;
+                const cls = s === 'active' ? 'bg-emerald-500' : s === 'disabled' ? 'bg-red-500' : 'bg-zinc-500';
+                const badge = s === 'active' ? 'active' : s === 'disabled' ? 'disabled' : 'offline';
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-xs">
+                    <span className={`inline-block h-2 w-2 rounded-full ${cls}`} />
+                    <StatusBadge status={badge} />
+                  </span>
+                );
+              },
             },
             {
-              key: 'last_login_at', label: 'Last login',
+              key: 'last_online', label: 'Last online',
               render: (u) => (
-                <span className="text-xs text-muted whitespace-nowrap">
-                  {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'never'}
+                <span className="text-xs text-muted whitespace-nowrap" title={u.last_seen_at ?? u.last_login_at ?? ''}>
+                  {fmtLastOnline(u)}
                 </span>
               ),
             },
