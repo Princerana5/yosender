@@ -24,17 +24,18 @@ const genSchema = z.object({
 async function buildInvoiceLines(clientId: string, from: string, to: string) {
   const rows = await query<{
     country_id: string | null; country_name: string | null; iso_code: string | null;
-    total_sms: string; successful: string; failed: string;
+    total_sms: string; successful: string; failed: string; rejected: string;
     segments: string; amount: string;
   }>(
     `SELECT m.country_id, COALESCE(co.name,'Unknown') AS country_name, co.iso_code,
             COUNT(*) AS total_sms,
             COUNT(*) FILTER (WHERE m.status='delivered') AS successful,
-            COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='rejected') AS rejected,
             COALESCE(SUM(COALESCE(m.segments,1)),0) AS segments,
             COALESCE(SUM(b.client_price),0) AS amount
      FROM messages m
-     JOIN billing_records b ON b.message_id=m.id
+     LEFT JOIN billing_records b ON b.message_id=m.id
      LEFT JOIN countries co ON co.id=m.country_id
      WHERE m.client_id=$1::uuid AND m.created_at >= $2::date AND m.created_at < ($3::date + interval '1 day')
      GROUP BY m.country_id, co.name, co.iso_code
@@ -52,6 +53,7 @@ async function buildInvoiceLines(clientId: string, from: string, to: string) {
       total_sms: Number(r.total_sms),
       successful: Number(r.successful),
       failed: Number(r.failed),
+      rejected: Number((r as unknown as { rejected: string }).rejected ?? 0),
       segments: segs,
       rate: segs ? amount / segs : 0,
       amount,
@@ -88,7 +90,7 @@ function toInvoiceDoc(inv: Record<string, unknown>, lines: Record<string, unknow
     },
     lines: lines.map((l) => ({
       country_name: String(l.country_name), iso_code: l.iso_code as string | null,
-      total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed),
+      total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed), rejected: Number((l as Record<string, unknown>).rejected ?? 0),
       segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage),
     })),
   };
@@ -131,9 +133,9 @@ router.post('/generate', requirePerm('billing.manage'), audit('generated_invoice
     const inv = rows[0];
     for (const l of lines) {
       await db.query(
-        `INSERT INTO invoice_lines (invoice_id, country_id, country_name, iso_code, total_sms, successful, failed, segments, rate, amount, percentage)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [inv.id, l.country_id, l.country_name, l.iso_code, l.total_sms, l.successful, l.failed, l.segments, l.rate, l.amount, l.percentage],
+        `INSERT INTO invoice_lines (invoice_id, country_id, country_name, iso_code, total_sms, successful, failed, rejected, segments, rate, amount, percentage)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [inv.id, l.country_id, l.country_name, l.iso_code, l.total_sms, l.successful, l.failed, l.rejected, l.segments, l.rate, l.amount, l.percentage],
       );
     }
     await db.query('COMMIT');
@@ -398,9 +400,9 @@ router.post('/:id/regenerate', requirePerm('billing.manage'), audit('regenerated
     );
     for (const l of lines) {
       await db.query(
-        `INSERT INTO invoice_lines (invoice_id, country_id, country_name, iso_code, total_sms, successful, failed, segments, rate, amount, percentage)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [rows[0].id, l.country_id, l.country_name, l.iso_code, l.total_sms, l.successful, l.failed, l.segments, l.rate, l.amount, l.percentage],
+        `INSERT INTO invoice_lines (invoice_id, country_id, country_name, iso_code, total_sms, successful, failed, rejected, segments, rate, amount, percentage)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [rows[0].id, l.country_id, l.country_name, l.iso_code, l.total_sms, l.successful, l.failed, l.rejected, l.segments, l.rate, l.amount, l.percentage],
       );
     }
     await db.query('COMMIT');

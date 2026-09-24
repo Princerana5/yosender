@@ -9,7 +9,7 @@ interface Invoice {
   status: string; notes: string | null; created_at: string;
 }
 interface Line {
-  country_name: string; iso_code: string | null; total_sms: number; successful: number; failed: number;
+  country_name: string; iso_code: string | null; total_sms: number; successful: number; failed: number; rejected: number;
   segments: number; rate: string; amount: string; percentage: string;
 }
 interface DetailState {
@@ -290,9 +290,10 @@ export default function Invoices(): JSX.Element {
             <div className="flex gap-2 text-xs"><span>{String(detail.invoice.period_from).slice(0, 10)} → {String(detail.invoice.period_to).slice(0, 10)}</span><StatusBadge status={detail.invoice.status} /><span className="ml-auto font-semibold">{fmtMoney(detail.invoice.grand_total, detail.invoice.currency)}</span></div>
             <div className="max-h-48 overflow-auto">
               <table className="w-full text-xs">
-                <thead><tr className="text-muted"><th className="text-left">Country</th><th className="text-right">SMS</th><th className="text-right">OK</th><th className="text-right">Fail</th><th className="text-right">Amount</th><th className="text-right">%</th></tr></thead>
-                <tbody>{detail.lines.map((l, i) => <tr key={i} className="border-t border-line"><td>{l.country_name}</td><td className="text-right">{l.total_sms}</td><td className="text-right text-emerald-300">{l.successful}</td><td className="text-right text-red-300">{l.failed}</td><td className="text-right">{fmtMoney(l.amount, detail.invoice.currency)}</td><td className="text-right">{l.percentage}%</td></tr>)}</tbody>
+                <thead><tr className="text-muted"><th className="text-left">Country</th><th className="text-right">SMS</th><th className="text-right">OK</th><th className="text-right">Fail</th><th className="text-right" title="non chargeable">Rejected *</th><th className="text-right">Amount</th><th className="text-right">%</th></tr></thead>
+                <tbody>{detail.lines.map((l, i) => <tr key={i} className="border-t border-line"><td>{l.country_name}</td><td className="text-right">{l.total_sms}</td><td className="text-right text-emerald-300">{l.successful}</td><td className="text-right text-red-300">{l.failed}</td><td className="text-right text-red-300/80" title="non chargeable">{Number((l as unknown as { rejected?: number }).rejected ?? 0).toLocaleString()}</td><td className="text-right">{fmtMoney(l.amount, detail.invoice.currency)}</td><td className="text-right">{l.percentage}%</td></tr>)}</tbody>
               </table>
+              {detail.lines.some(l => Number((l as unknown as { rejected?: number }).rejected ?? 0) > 0) && <div className="text-[11px] text-muted">* Rejected SMS — non chargeable (€0.00)</div>}
             </div>
             {!!detail.payment_methods?.length && (
               <div className="card card-pad !p-3">

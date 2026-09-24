@@ -6,7 +6,7 @@ interface FlowRow {
   client_id: string; client_name: string; system_id: string;
   country_id: string | null; country_name: string | null; iso_code: string | null;
   vendor_id: string | null; vendor_name: string | null;
-  total: string; delivered: string; failed: string; pending: string; last_at: string;
+  total: string; delivered: string; failed: string; rejected: string; pending: string; last_at: string;
 }
 
 interface RecentMsg {
@@ -169,6 +169,7 @@ export default function Traffic(): JSX.Element {
             { key: 'total', label: 'Msgs', right: true, render: (r) => <span className="tabular-nums font-semibold">{Number(r.total).toLocaleString()}</span> },
             { key: 'delivered', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{Number(r.delivered).toLocaleString()}</span> },
             { key: 'failed', label: 'Failed', right: true, render: (r) => <span className={`tabular-nums ${Number(r.failed) ? 'text-red-300' : 'text-muted'}`}>{Number(r.failed).toLocaleString()}</span> },
+            { key: 'rejected', label: 'Rejected *', right: true, render: (r) => <span className={`tabular-nums ${Number((r as unknown as { rejected?: string }).rejected ?? 0) ? 'text-red-300' : 'text-muted'}`} title="non chargeable">{Number((r as unknown as { rejected?: string }).rejected ?? 0).toLocaleString()}</span> },
             { key: 'pending', label: 'Pending', right: true, render: (r) => <span className="tabular-nums text-sky-300">{Number(r.pending).toLocaleString()}</span> },
           ]}
         />

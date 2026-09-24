@@ -46,14 +46,20 @@ function howToPayHtml(methods: InvoiceEmailArgs['paymentMethods']): string {
 
 export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
   const d = args.doc;
+  const hasRejected = d.lines.some(l => Number((l as unknown as { rejected?: number }).rejected ?? 0) > 0);
   const intro = args.introOverride?.trim() ? args.introOverride.trim() : `Please find your invoice for <b>${esc(d.period_from)} → ${esc(d.period_to)}</b> attached as PDF. Summary below:`;
-  const rows = d.lines.map(l => `<tr>
+  const rows = d.lines.map(l => {
+    const rej = Number((l as unknown as { rejected?: number }).rejected ?? 0);
+    return `<tr>
     <td style="padding:7px 8px;border:1px solid #e2e8f0">${esc(l.country_name)} <span style="color:#64748b;font-size:11px">${esc(l.iso_code ?? '')}</span></td>
     <td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${l.total_sms.toLocaleString()}</td>
+    <td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right;color:#ef4444">${rej.toLocaleString()}${rej ? '<span style="font-size:10px;color:#94a3b8"> · non chargeable</span>' : ''}</td>
     <td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${fmt(l.amount, d.currency)}</td>
     <td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${l.percentage.toFixed(1)}%</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
   const totalSms = d.lines.reduce((s,l)=>s+l.total_sms,0);
+  const totalRejected = d.lines.reduce((s,l)=> s + Number((l as unknown as { rejected?: number }).rejected ?? 0), 0);
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Inter,Arial,Helvetica,sans-serif">
 <div style="max-width:640px;margin:0 auto;background:#ffffff">
   <div style="background:#0f172a;color:#fff;padding:20px 28px">
@@ -64,10 +70,11 @@ export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
     <p>Dear ${esc(d.client.name)} team,</p>
     <p>${intro}</p>
     <table style="width:100%;border-collapse:collapse;margin:14px 0;font-size:13px">
-      <thead><tr style="background:#0f172a;color:#fff"><th style="padding:8px;border:1px solid #0f172a;text-align:left">Country</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">SMS</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">Amount</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">%</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="4" style="text-align:center;color:#64748b;padding:16px">No billable traffic in this period.</td></tr>`}</tbody>
-      <tfoot><tr style="background:#f8fafc;font-weight:700"><td style="padding:7px 8px;border:1px solid #e2e8f0">Total (${totalSms.toLocaleString()} SMS)</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${totalSms.toLocaleString()}</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${fmt(d.grand_total, d.currency)}</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">100%</td></tr></tfoot>
+      <thead><tr style="background:#0f172a;color:#fff"><th style="padding:8px;border:1px solid #0f172a;text-align:left">Country</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">SMS</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">Rejected *</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">Amount</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">%</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="5" style="text-align:center;color:#64748b;padding:16px">No billable traffic in this period.</td></tr>`}</tbody>
+      <tfoot><tr style="background:#f8fafc;font-weight:700"><td style="padding:7px 8px;border:1px solid #e2e8f0">Total (${totalSms.toLocaleString()} SMS)</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${totalSms.toLocaleString()}</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right;color:#ef4444">${totalRejected.toLocaleString()}</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${fmt(d.grand_total, d.currency)}</td><td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">100%</td></tr></tfoot>
     </table>
+    ${hasRejected ? '<div style="font-size:11px;color:#64748b;margin-top:-8px;margin-bottom:12px">* Rejected SMS — non chargeable (€0.00). Not billed.</div>' : ''}
     <div style="display:flex;justify-content:flex-end"><div style="width:300px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">
       <div style="display:flex;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #f1f5f9"><span>Subtotal</span><span>${fmt(d.subtotal, d.currency)}</span></div>
       <div style="display:flex;justify-content:space-between;padding:6px 10px;border-bottom:1px solid #f1f5f9"><span>Tax (${d.tax_rate}%)</span><span>${fmt(d.tax_amount, d.currency)}</span></div>

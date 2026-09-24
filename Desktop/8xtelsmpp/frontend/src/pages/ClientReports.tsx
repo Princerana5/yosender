@@ -14,13 +14,13 @@ interface ClientInfo {
 }
 
 interface Summary {
-  total: number; delivered: number; failed: number; pending: number;
+  total: number; delivered: number; failed: number; rejected: number; pending: number;
   credit_used: number; credits_used: number; segments: number;
   avg_daily: number; avg_daily_credit: number;
 }
 
 interface DayRow {
-  day: string; total: string; delivered: string; failed: string;
+  day: string; total: string; delivered: string; failed: string; rejected: string;
   credit_used: string; credits_used: string; segments: string;
 }
 
@@ -35,7 +35,7 @@ interface Msg {
 
 interface CountryRow {
   country_id: string | null; country_name: string; iso_code: string | null;
-  total_sms: number; successful: number; failed: number;
+  total_sms: number; successful: number; failed: number; rejected: number;
   segments: number; amount: number; rate: number; percentage: number;
 }
 
@@ -441,6 +441,7 @@ export default function ClientReports(): JSX.Element {
                   { key: 'total_sms', label: 'SMS', right: true, render: (r) => <span className="tabular-nums font-semibold">{r.total_sms.toLocaleString()}</span> },
                   { key: 'successful', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{r.successful.toLocaleString()}</span> },
                   { key: 'failed', label: 'Failed', right: true, render: (r) => <span className="tabular-nums text-red-300">{r.failed.toLocaleString()}</span> },
+                  { key: 'rejected', label: 'Rejected *', right: true, render: (r) => <span className="tabular-nums text-red-300" title="non chargeable">{Number((r as unknown as { rejected?: number }).rejected ?? 0).toLocaleString()}</span> },
                   { key: 'segments', label: 'Segments', right: true, render: (r) => <span className="tabular-nums text-muted">{r.segments.toLocaleString()}</span> },
                   { key: 'rate', label: 'Rate', right: true, render: (r) => <span className="tabular-nums">{r.rate.toFixed(4)}</span> },
                   { key: 'amount', label: 'Amount', right: true, render: (r) => <span className="tabular-nums font-semibold">{fmtMoney(r.amount, info?.currency)}</span> },
@@ -464,6 +465,7 @@ export default function ClientReports(): JSX.Element {
             <StatCard label="Total traffic" value={(summary?.total ?? 0).toLocaleString()} />
             <StatCard label="Delivered" value={(summary?.delivered ?? 0).toLocaleString()} tone="brand" />
             <StatCard label="Failed" value={(summary?.failed ?? 0).toLocaleString()} tone={(summary?.failed ?? 0) ? 'danger' : undefined} />
+            <StatCard label="Rejected" value={(summary?.rejected ?? 0).toLocaleString()} tone={(summary?.rejected ?? 0) ? 'danger' : undefined} />
             <StatCard
               label={creditMode ? 'Credits used' : 'Credit used'}
               value={creditMode ? (summary?.credits_used ?? 0).toLocaleString() : fmtMoney(summary?.credit_used ?? 0, info?.currency)}
@@ -524,6 +526,7 @@ export default function ClientReports(): JSX.Element {
                 { key: 'total', label: 'Traffic', right: true, render: (r) => <span className="tabular-nums">{Number(r.total).toLocaleString()}</span> },
                 { key: 'delivered', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{Number(r.delivered).toLocaleString()}</span> },
                 { key: 'failed', label: 'Failed', right: true, render: (r) => <span className="tabular-nums text-red-300">{Number(r.failed).toLocaleString()}</span> },
+                { key: 'rejected', label: 'Rejected *', right: true, render: (r) => <span className="tabular-nums text-red-300" title="non chargeable">{Number((r as unknown as { rejected?: string }).rejected ?? 0).toLocaleString()}</span> },
                 {
                   key: 'credit', label: creditMode ? 'Credits used' : 'Credit used', right: true,
                   render: (r) => <span className="tabular-nums font-semibold">{creditMode ? Number(r.credits_used).toLocaleString() : fmtMoney(r.credit_used, info?.currency)}</span>,
@@ -615,7 +618,7 @@ export default function ClientReports(): JSX.Element {
                 },
                 {
                   key: 'client_price', label: creditMode ? 'Credits' : 'Charged', right: true,
-                  render: (m) => <span className="tabular-nums">{creditMode ? Number(m.credits_charged ?? 0).toLocaleString() : fmtMoney(m.client_price, info?.currency)}</span>,
+                  render: (m) => m.status === 'rejected' ? <span className="tabular-nums text-muted" title="Rejected — non chargeable">—</span> : <span className="tabular-nums">{creditMode ? Number(m.credits_charged ?? 0).toLocaleString() : fmtMoney(m.client_price, info?.currency)}</span>,
                 },
               ]}
             />

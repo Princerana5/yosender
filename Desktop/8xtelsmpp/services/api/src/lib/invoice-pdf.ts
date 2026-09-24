@@ -1,7 +1,7 @@
 // @ts-nocheck — pdfkit has loose types; runtime is covered by buildInvoicePdfBuffer try/catch
 export interface InvoiceLine {
   country_name: string; iso_code: string | null; total_sms: number;
-  successful: number; failed: number; segments: number;
+  successful: number; failed: number; rejected: number; segments: number;
   rate: number; amount: number; percentage: number;
 }
 export interface InvoiceDoc {
@@ -39,19 +39,25 @@ function paymentBlockHtml(methods: PaymentMethodForDoc[]): string {
 }
 
 export function buildInvoiceHtml(doc: InvoiceDoc, paymentMethods: PaymentMethodForDoc[] = []): string {
-  const rows = doc.lines.map((l) => `
+  const hasRejected = doc.lines.some((l) => Number((l as unknown as { rejected?: number }).rejected ?? 0) > 0);
+  const rows = doc.lines.map((l) => {
+    const rej = Number((l as unknown as { rejected?: number }).rejected ?? 0);
+    return `
     <tr>
       <td>${esc(l.country_name)}${l.iso_code ? ` <span style="color:#64748b;font-size:11px">${esc(l.iso_code)}</span>` : ''}</td>
       <td style="text-align:right">${l.total_sms.toLocaleString()}</td>
       <td style="text-align:right;color:#059669">${l.successful.toLocaleString()}</td>
       <td style="text-align:right;color:#dc2626">${l.failed.toLocaleString()}</td>
+      <td style="text-align:right;color:#ef4444">${rej.toLocaleString()}${rej ? '<span style="font-size:10px;color:#94a3b8"> · non chargeable</span>' : ''}</td>
       <td style="text-align:right">${l.segments.toLocaleString()}</td>
       <td style="text-align:right">${l.rate.toFixed(4)}</td>
       <td style="text-align:right;font-weight:600">${fmt(l.amount, doc.currency)}</td>
       <td style="text-align:right">${l.percentage.toFixed(1)}%</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   const totalSms = doc.lines.reduce((s, l) => s + l.total_sms, 0);
   const totalSeg = doc.lines.reduce((s, l) => s + l.segments, 0);
+  const totalRejected = doc.lines.reduce((s, l) => s + Number((l as unknown as { rejected?: number }).rejected ?? 0), 0);
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(doc.invoice_number)}</title>
   <style>
     *{box-sizing:border-box} body{font-family:Inter,system-ui,Arial,sans-serif;color:#0f172a;margin:0;padding:32px;font-size:13px}
@@ -89,9 +95,10 @@ export function buildInvoiceHtml(doc: InvoiceDoc, paymentMethods: PaymentMethodF
     <div class="card"><h3>Bill to</h3><div style="font-weight:700">${esc(doc.client.name)}</div>${doc.client.company_name ? `<div>${esc(doc.client.company_name)}</div>` : ''}<div style="font-family:monospace;font-size:12px">${esc(doc.client.system_id)}</div>${doc.client.email ? `<div style="color:#64748b">${esc(doc.client.email)}</div>` : ''}</div>
     <div class="card"><h3>Invoice details</h3><div>Currency: <b>${esc(doc.currency)}</b></div><div>Period: <b>${esc(doc.period_from)} to ${esc(doc.period_to)}</b></div><div>Total SMS: <b>${totalSms.toLocaleString()}</b></div><div>Segments: <b>${totalSeg.toLocaleString()}</b></div></div>
   </div>
-  <table><thead><tr><th>Country</th><th style="text-align:right">SMS</th><th style="text-align:right">Delivered</th><th style="text-align:right">Failed</th><th style="text-align:right">Segments</th><th style="text-align:right">Rate</th><th style="text-align:right">Amount</th><th style="text-align:right">%</th></tr></thead>
-  <tbody>${rows || `<tr><td colspan="8" style="text-align:center;color:#64748b;padding:20px">No billable traffic in this period.</td></tr>`}</tbody>
-  <tfoot><tr><td>Total</td><td style="text-align:right">${totalSms.toLocaleString()}</td><td style="text-align:right">${doc.lines.reduce((s, l) => s + l.successful, 0).toLocaleString()}</td><td style="text-align:right">${doc.lines.reduce((s, l) => s + l.failed, 0).toLocaleString()}</td><td style="text-align:right">${totalSeg.toLocaleString()}</td><td></td><td style="text-align:right">${fmt(doc.subtotal, doc.currency)}</td><td style="text-align:right">100%</td></tr></tfoot></table>
+  <table><thead><tr><th>Country</th><th style="text-align:right">SMS</th><th style="text-align:right">Delivered</th><th style="text-align:right">Failed</th><th style="text-align:right">Rejected *</th><th style="text-align:right">Segments</th><th style="text-align:right">Rate</th><th style="text-align:right">Amount</th><th style="text-align:right">%</th></tr></thead>
+  <tbody>${rows || `<tr><td colspan="9" style="text-align:center;color:#64748b;padding:20px">No billable traffic in this period.</td></tr>`}</tbody>
+  <tfoot><tr><td>Total</td><td style="text-align:right">${totalSms.toLocaleString()}</td><td style="text-align:right">${doc.lines.reduce((s, l) => s + l.successful, 0).toLocaleString()}</td><td style="text-align:right">${doc.lines.reduce((s, l) => s + l.failed, 0).toLocaleString()}</td><td style="text-align:right;color:#ef4444">${totalRejected.toLocaleString()}</td><td style="text-align:right">${totalSeg.toLocaleString()}</td><td></td><td style="text-align:right">${fmt(doc.subtotal, doc.currency)}</td><td style="text-align:right">100%</td></tr></tfoot></table>
+  ${hasRejected ? `<div style="font-size:11px;color:#64748b;margin-top:6px">* Rejected SMS — non chargeable (&euro;0.00). Not billed.</div>` : ''}
   <div class="totals">
     <div><span>Subtotal</span><span>${fmt(doc.subtotal, doc.currency)}</span></div>
     <div><span>Tax (${doc.tax_rate}%)</span><span>${fmt(doc.tax_amount, doc.currency)}</span></div>
@@ -158,13 +165,15 @@ function drawCards(P: any, doc: InvoiceDoc, y: number): number {
 
 function drawTable(P: any, doc: InvoiceDoc, y: number): number {
   const cols = [
-    { w: 150, label: 'Country', align: 'left' as const },
-    { w: 55, label: 'SMS', align: 'right' as const },
-    { w: 55, label: 'Deliv.', align: 'right' as const },
-    { w: 50, label: 'Segs', align: 'right' as const },
-    { w: 65, label: 'Rate', align: 'right' as const },
-    { w: 75, label: 'Amount', align: 'right' as const },
-    { w: 45, label: '%', align: 'right' as const },
+    { w: 120, label: 'Country', align: 'left' as const },
+    { w: 48, label: 'SMS', align: 'right' as const },
+    { w: 48, label: 'Deliv.', align: 'right' as const },
+    { w: 45, label: 'Failed', align: 'right' as const },
+    { w: 55, label: 'Rejected *', align: 'right' as const },
+    { w: 45, label: 'Segs', align: 'right' as const },
+    { w: 62, label: 'Rate', align: 'right' as const },
+    { w: 72, label: 'Amount', align: 'right' as const },
+    { w: 28, label: '%', align: 'right' as const },
   ];
   const fmt2 = (n:number,ccy:string)=> new Intl.NumberFormat('en',{style:'currency',currency:ccy}).format(n);
   let x = 36;
@@ -177,7 +186,8 @@ function drawTable(P: any, doc: InvoiceDoc, y: number): number {
     for (const l of doc.lines) {
       if (y > 730) { P.addPage(); y=36; }
       x=36;
-      const cells = [l.country_name, String(l.total_sms), String(l.successful), String(l.segments), l.rate.toFixed(4), fmt2(l.amount, doc.currency), l.percentage.toFixed(1)+'%'];
+      const rej = String(Number((l as unknown as { rejected?: number }).rejected ?? 0));
+      const cells = [l.country_name, String(l.total_sms), String(l.successful), String(l.failed), rej, String(l.segments), l.rate.toFixed(4), fmt2(l.amount, doc.currency), l.percentage.toFixed(1)+'%'];
       for (let i=0;i<cols.length;i++) { P.text(cells[i], x+4, y+4, { width: cols[i].w-8, align: cols[i].align }); x+=cols[i].w; }
       y+=12;
       P.rect(36, y, 523, 0.5); P.fill('#e2e8f0');
@@ -187,7 +197,8 @@ function drawTable(P: any, doc: InvoiceDoc, y: number): number {
   if (y > 720) { P.addPage(); y=36; }
   P.rect(36, y, 523, 14).fill('#f8fafc');
   P.fillColor('#0f172a').font('Helvetica-Bold').fontSize(7);
-  x=36; const totals=[`Total (${doc.lines.reduce((s,l)=>s+l.total_sms,0).toLocaleString()} SMS)`, '', '', '', '', fmt2(doc.subtotal, doc.currency), '100%'];
+  x=36; const totalRejected = doc.lines.reduce((s,l)=> s + Number((l as unknown as { rejected?: number }).rejected ?? 0), 0);
+  const totals=[`Total (${doc.lines.reduce((s,l)=>s+l.total_sms,0).toLocaleString()} SMS)`, '', '', '', String(totalRejected), '', '', fmt2(doc.subtotal, doc.currency), '100%'];
   P.text(totals[0], 40, y+4, { width: 140 });
   let tx = 36+150; for(let i=1;i<cols.length;i++){ P.text(totals[i], tx+4, y+4, { width: cols[i].w-8, align: cols[i].align }); tx+=cols[i].w; }
   y+=18;

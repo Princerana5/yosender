@@ -129,6 +129,7 @@ router.get('/live', async (req, res) => {
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE m.status='delivered') AS delivered,
             COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='rejected') AS rejected,
             COUNT(*) FILTER (WHERE m.status='submitted') AS pending,
             MAX(m.created_at) AS last_at
      FROM messages m
@@ -306,12 +307,13 @@ router.get('/client/:id/summary', async (req, res) => {
     return;
   }
   const [mix] = await query<{
-    total: string; ok: string; fail: string; pending: string;
+    total: string; ok: string; fail: string; rejected: string; pending: string;
     charged: string; credits: string; segments: string;
   }>(
     `SELECT COUNT(*) AS total,
             COUNT(*) FILTER (WHERE m.status='delivered') AS ok,
             COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS fail,
+            COUNT(*) FILTER (WHERE m.status='rejected') AS rejected,
             COUNT(*) FILTER (WHERE m.status='submitted') AS pending,
             COALESCE(SUM(b.client_price),0) AS charged,
             COALESCE(SUM(COALESCE(m.credits_charged, m.reserved_credits, 0)),0) AS credits,
@@ -328,7 +330,7 @@ router.get('/client/:id/summary', async (req, res) => {
     client, range: { from, to, label, days },
     summary: {
       total: Number(mix.total), delivered: Number(mix.ok), failed: Number(mix.fail),
-      pending: Number(mix.pending),
+      rejected: Number((mix as unknown as { rejected: string }).rejected ?? 0), pending: Number(mix.pending),
       credit_used: Number(mix.charged), credits_used: Number(mix.credits),
       segments: Number(mix.segments),
       avg_daily: +(Number(mix.total) / days).toFixed(1),
@@ -346,6 +348,7 @@ router.get('/client/:id/daily', async (req, res) => {
     `SELECT m.created_at::date AS day, COUNT(*) AS total,
             COUNT(*) FILTER (WHERE m.status='delivered') AS delivered,
             COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='rejected') AS rejected,
             COALESCE(SUM(b.client_price),0) AS credit_used,
             COALESCE(SUM(COALESCE(m.credits_charged, m.reserved_credits, 0)),0) AS credits_used,
             COALESCE(SUM(COALESCE(m.segments,1)),0) AS segments
@@ -491,16 +494,17 @@ async function countryBreakdown(clientId: string, from: string, to: string, extr
   // Count distinct param numbers for extraWhere placeholders
   const rows = await query<{
     country_id: string | null; country_name: string; iso_code: string | null;
-    total_sms: string; successful: string; failed: string; segments: string; amount: string;
+    total_sms: string; successful: string; failed: string; rejected: string; segments: string; amount: string;
   }>(
     `SELECT m.country_id, COALESCE(co.name,'Unknown') AS country_name, co.iso_code,
             COUNT(*) AS total_sms,
             COUNT(*) FILTER (WHERE m.status='delivered') AS successful,
             COUNT(*) FILTER (WHERE m.status IN ('failed','undelivered','expired','rejected')) AS failed,
+            COUNT(*) FILTER (WHERE m.status='rejected') AS rejected,
             COALESCE(SUM(COALESCE(m.segments,1)),0) AS segments,
             COALESCE(SUM(b.client_price),0) AS amount
      FROM messages m
-     JOIN billing_records b ON b.message_id=m.id
+     LEFT JOIN billing_records b ON b.message_id=m.id
      LEFT JOIN countries co ON co.id=m.country_id
      LEFT JOIN routes r ON r.id=m.route_id
      LEFT JOIN vendors v ON v.id=m.vendor_id
@@ -514,6 +518,7 @@ async function countryBreakdown(clientId: string, from: string, to: string, extr
   return rows.map((r) => ({
     country_id: r.country_id, country_name: r.country_name, iso_code: r.iso_code,
     total_sms: Number(r.total_sms), successful: Number(r.successful), failed: Number(r.failed),
+    rejected: Number((r as unknown as { rejected: string }).rejected ?? 0),
     segments: Number(r.segments), amount: Number(r.amount),
     rate: Number(r.segments) ? Number(r.amount) / Number(r.segments) : 0,
     percentage: totalAmount ? +(Number(r.amount) / totalAmount * 100).toFixed(2) : 0,
@@ -541,6 +546,7 @@ router.get('/client/:id/by-country', async (req, res) => {
   }
   if (q.sort === 'total') filtered = [...filtered].sort((a, b) => b.total_sms - a.total_sms);
   else if (q.sort === 'failed') filtered = [...filtered].sort((a, b) => b.failed - a.failed);
+  else if (q.sort === 'rejected') filtered = [...filtered].sort((a, b) => b.rejected - a.rejected);
   res.json({ range: { from, to }, countries: filtered });
 });
 
@@ -564,9 +570,9 @@ router.get('/client/:id/by-country/export', async (req, res) => {
     const esc = (v: unknown): string => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     res.setHeader('content-type', 'application/vnd.ms-excel; charset=utf-8');
     res.setHeader('content-disposition', `attachment; filename="${safe}_Country_Report_${label}.xls"`);
-    res.write(`<html><head><meta charset="utf-8"></head><body><h2>${esc(client.name)} — Country Report (${esc(from)} to ${esc(to)})</h2><table border="1"><tr><th>Country</th><th>ISO</th><th>SMS</th><th>Delivered</th><th>Failed</th><th>Segments</th><th>Rate</th><th>Amount</th><th>%</th></tr>`);
-    for (const r of data) res.write(`<tr><td>${esc(r.country_name)}</td><td>${esc(r.iso_code)}</td><td>${r.total_sms}</td><td>${r.successful}</td><td>${r.failed}</td><td>${r.segments}</td><td>${r.rate.toFixed(4)}</td><td>${r.amount.toFixed(2)}</td><td>${r.percentage.toFixed(1)}</td></tr>`);
-    res.write('</table></body></html>');
+    res.write(`<html><head><meta charset="utf-8"></head><body><h2>${esc(client.name)} — Country Report (${esc(from)} to ${esc(to)})</h2><table border="1"><tr><th>Country</th><th>ISO</th><th>SMS</th><th>Delivered</th><th>Failed</th><th>Rejected *</th><th>Segments</th><th>Rate</th><th>Amount</th><th>%</th></tr>`);
+    for (const r of data) res.write(`<tr><td>${esc(r.country_name)}</td><td>${esc(r.iso_code)}</td><td>${r.total_sms}</td><td>${r.successful}</td><td>${r.failed}</td><td>${r.rejected}</td><td>${r.segments}</td><td>${r.rate.toFixed(4)}</td><td>${r.amount.toFixed(2)}</td><td>${r.percentage.toFixed(1)}</td></tr>`);
+    res.write('</table><p style="font-size:11px;color:#64748b">* Rejected SMS — non chargeable (&euro;0.00)</p></body></html>');
     res.end(); return;
   }
   if (format === 'pdf') {
@@ -576,7 +582,7 @@ router.get('/client/:id/by-country/export', async (req, res) => {
       subtotal: data.reduce((s, r) => s + r.amount, 0), tax_rate: 0, tax_amount: 0, adjustments: 0,
       grand_total: data.reduce((s, r) => s + r.amount, 0), status: 'report', notes: null, created_at: new Date().toISOString(),
       client: { name: client.name, company_name: null, system_id: '', email: null },
-      lines: data.map((r) => ({ country_name: r.country_name, iso_code: r.iso_code, total_sms: r.total_sms, successful: r.successful, failed: r.failed, segments: r.segments, rate: r.rate, amount: r.amount, percentage: r.percentage })),
+      lines: data.map((r) => ({ country_name: r.country_name, iso_code: r.iso_code, total_sms: r.total_sms, successful: r.successful, failed: r.failed, rejected: r.rejected, segments: r.segments, rate: r.rate, amount: r.amount, percentage: r.percentage })),
     });
     res.setHeader('content-type', 'text/html; charset=utf-8');
     res.setHeader('content-disposition', `inline; filename="${safe}_Country_Report_${label}.html"`);
@@ -585,8 +591,9 @@ router.get('/client/:id/by-country/export', async (req, res) => {
   const esc = (v: unknown): string => { const s = String(v ?? ''); return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   res.setHeader('content-type', 'text/csv; charset=utf-8');
   res.setHeader('content-disposition', `attachment; filename="${safe}_Country_Report_${label}.csv"`);
-  res.write('Country,ISO,SMS,Delivered,Failed,Segments,Rate,Amount,Percentage\n');
-  for (const r of data) res.write([esc(r.country_name), esc(r.iso_code), String(r.total_sms), String(r.successful), String(r.failed), String(r.segments), r.rate.toFixed(4), r.amount.toFixed(2), r.percentage.toFixed(1)].join(',') + '\n');
+  res.write('Country,ISO,SMS,Delivered,Failed,Rejected,Segments,Rate,Amount,Percentage\n');
+  for (const r of data) res.write([esc(r.country_name), esc(r.iso_code), String(r.total_sms), String(r.successful), String(r.failed), String(r.rejected), String(r.segments), r.rate.toFixed(4), r.amount.toFixed(2), r.percentage.toFixed(1)].join(',') + '\n');
+  res.write('# Rejected SMS — non chargeable (EUR 0.00)\n');
   res.end();
 });
 

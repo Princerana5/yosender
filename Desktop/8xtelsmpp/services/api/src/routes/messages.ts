@@ -51,7 +51,7 @@ router.get('/', async (req, res) => {
     `SELECT m.id, ${textCol} m.client_id, c.name AS client_name, m.vendor_id, v.name AS vendor_name,
             m.route_id, m.channel, m.client_msg_id, m.vendor_msg_id, m.source, m.destination,
             co.name AS country_name, co.iso_code, m.status, m.client_price, m.vendor_cost,
-            m.billing_mode, m.billing_status, m.billed_amount,
+            m.billing_mode, m.billing_status, m.billed_amount, m.error_description,
             m.submit_time, m.dlr_time, m.error_code, m.attempts, m.created_at
      FROM messages m
      LEFT JOIN clients c ON c.id=m.client_id

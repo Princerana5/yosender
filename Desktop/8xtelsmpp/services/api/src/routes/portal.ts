@@ -730,7 +730,7 @@ router.get('/invoices/:invId/pdf', async (req, res) => {
     notes: (inv[0] as { notes: string | null }).notes,
     created_at: String((inv[0] as { created_at: string }).created_at),
     client: { name: (inv[0] as { client_name: string }).client_name, company_name: (inv[0] as { company_name: string | null }).company_name, system_id: (inv[0] as { system_id: string }).system_id, email: (inv[0] as { portal_email: string | null }).portal_email },
-    lines: (lines as Record<string, unknown>[]).map((l) => ({ country_name: String(l.country_name), iso_code: l.iso_code as string | null, total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed), segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage) })),
+    lines: (lines as Record<string, unknown>[]).map((l) => ({ country_name: String(l.country_name), iso_code: l.iso_code as string | null, total_sms: Number(l.total_sms), successful: Number(l.successful), failed: Number(l.failed), rejected: Number((l as Record<string, unknown>).rejected ?? 0), segments: Number(l.segments), rate: Number(l.rate), amount: Number(l.amount), percentage: Number(l.percentage) })),
   };
   const payForDoc = (methods as Record<string, unknown>[]).map(m => ({ kind: String(m.kind), label: String(m.label), chain: m.chain as string | null, details: (typeof m.details === 'string' ? JSON.parse(m.details as string) : m.details) as Record<string, unknown> }));
   const wantsPdf = String(req.query.format ?? 'pdf') !== 'html';

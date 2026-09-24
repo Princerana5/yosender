@@ -14,6 +14,7 @@ interface Msg {
   id: string; client_name: string; vendor_name: string | null; source: string;
   destination: string; country_name: string | null; status: string;
   client_price: string | null; vendor_cost: string | null;
+  error_description: string | null;
   billing_mode: string | null; billing_status: string | null; billed_amount: string | null;
   submit_time: string; dlr_time: string | null;
 }
@@ -95,8 +96,8 @@ export default function Messages(): JSX.Element {
             render: (m) => <span>{m.source} <span className="text-muted">→</span> {m.destination}</span>,
           },
           { key: 'status', label: 'Status', render: (m) => <StatusBadge status={m.status} /> },
-          { key: 'client_price', label: 'Price', right: true, render: (m) => <Money value={m.client_price} /> },
-          { key: 'vendor_cost', label: 'Cost', right: true, render: (m) => <Money value={m.vendor_cost} /> },
+          { key: 'client_price', label: 'Price', right: true, render: (m) => m.status === 'rejected' ? <span className="tabular-nums text-muted" title="Rejected — non chargeable">€0.00 <span className="text-[10px]">· non chargeable</span></span> : <Money value={m.client_price} /> },
+          { key: 'vendor_cost', label: 'Cost', right: true, render: (m) => m.status === 'rejected' ? <span className="tabular-nums text-muted">—</span> : <Money value={m.vendor_cost} /> },
           {
             key: 'billing_mode', label: 'Billing Mode',
             render: (m) => <span className="text-xs whitespace-nowrap">{BM_LABELS[m.billing_mode ?? ''] ?? <span className="text-muted">—</span>}</span>,

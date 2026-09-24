@@ -147,9 +147,9 @@ export default function Dashboard(): JSX.Element {
           ['Rejected', d.rejected, 'rejected'],
           ['Failed', d.failed, 'failed'],
         ].map(([label, v, s]) => (
-          <div key={label as string} className="card px-4 py-3 flex items-center justify-between">
+          <div key={label as string} className="card px-4 py-3 flex items-center justify-between" title={label === 'Rejected' ? 'Rejected — non chargeable (€0.00)' : undefined}>
             <div>
-              <div className="stat-label">{label}</div>
+              <div className="stat-label">{label}{label === 'Rejected' ? ' *' : ''}</div>
               <div className="text-xl font-bold tabular-nums mt-0.5">{(v as number).toLocaleString()}</div>
             </div>
             <StatusBadge status={s as string} />
