@@ -259,9 +259,21 @@ export default function ClientReports(): JSX.Element {
       .finally(() => setExporting(''));
   }
 
+  const fmtDay = (v: string): string => {
+    const iso10 = String(v ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso10)) return String(v ?? '—');
+    const dt = new Date(`${iso10}T00:00:00Z`);
+    return Number.isNaN(dt.getTime()) ? iso10 : dt.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  };
+  const fmtDayLong = (v: string): string => {
+    const iso10 = String(v ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso10)) return String(v ?? '—');
+    const dt = new Date(`${iso10}T00:00:00Z`);
+    return Number.isNaN(dt.getTime()) ? iso10 : dt.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+  };
   const chartData = useMemo(
     () => daily.map((d) => ({
-      label: new Date(`${d.day}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }),
+      label: fmtDay(d.day),
       total: Number(d.total),
       ok: Number(d.delivered),
     })),
@@ -486,8 +498,8 @@ export default function ClientReports(): JSX.Element {
               <div className="mt-3 space-y-1.5 max-h-56 overflow-y-auto">
                 {daily.length ? daily.map((d) => (
                   <div key={d.day} className="flex items-center gap-2 text-xs">
-                    <span className="w-20 shrink-0 text-muted tabular-nums">
-                      {new Date(`${d.day}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}
+                    <span className="w-20 shrink-0 text-muted tabular-nums" title={String(d.day).slice(0,10)}>
+                      {fmtDay(d.day)}
                     </span>
                     <div className="flex-1 h-4 rounded bg-panel2 overflow-hidden">
                       <div
@@ -521,7 +533,7 @@ export default function ClientReports(): JSX.Element {
               columns={[
                 {
                   key: 'day', label: 'Date',
-                  render: (r) => <span className="font-semibold">{new Date(`${r.day}T00:00:00Z`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span>,
+                  render: (r) => <span className="font-semibold" title={String(r.day).slice(0,10)}>{fmtDayLong(r.day)}</span>,
                 },
                 { key: 'total', label: 'Traffic', right: true, render: (r) => <span className="tabular-nums">{Number(r.total).toLocaleString()}</span> },
                 { key: 'delivered', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{Number(r.delivered).toLocaleString()}</span> },
