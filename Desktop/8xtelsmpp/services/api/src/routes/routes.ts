@@ -17,7 +17,16 @@ const SCOPE_SQL = `
   (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id) AS member_count
 `;
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
+  const q = req.query as { vendor_id?: string };
+  const vendorId = q.vendor_id?.trim() || null;
+  const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (vendorId && !uuidRe.test(vendorId)) {
+    res.status(400).json({ error: 'invalid vendor_id' });
+    return;
+  }
+  const whereVendor = vendorId ? `WHERE EXISTS (SELECT 1 FROM route_vendors rv WHERE rv.route_id=r.id AND rv.vendor_id=$1)` : '';
+  const params: unknown[] = vendorId ? [vendorId] : [];
   const rows = await query(
     `SELECT r.*, c.name AS country_name, cl.name AS client_name,
        (SELECT t.name FROM otp_templates t WHERE t.id=r.otp_default_template_id) AS otp_default_template_name,
@@ -31,11 +40,14 @@ router.get('/', async (_req, res) => {
        (SELECT count(*) FROM messages m WHERE m.route_id=r.id AND m.created_at >= now() - interval '7 days') AS msgs_7d,
        (SELECT count(*) FROM filters f WHERE f.reroute_id=r.id) AS filter_refs,
        (SELECT count(*) FROM traffic_policies tp WHERE tp.route_id=r.id) AS policy_count,
+       (SELECT count(*) FROM route_client_rates rcr WHERE rcr.route_id=r.id) AS route_client_rate_count,
        ${SCOPE_SQL}
      FROM routes r
      LEFT JOIN countries c ON c.id=r.country_id
      LEFT JOIN clients cl ON cl.id=r.client_id
+     ${whereVendor}
      ORDER BY r.created_at DESC`,
+    params,
   );
   // Warn-only margin flag: price below cost×(1+margin) → below_margin=true + floor.
   // Sends are NEVER blocked; the badge tells you the route loses money.
@@ -573,5 +585,76 @@ router.post('/:id/policies', requirePerm('routes.update'), audit('created_traffi
 export function routeRouter(): Router {
   return router;
 }
+
+// ── Per-client route rates: Vendor→Route→Client override (038) ──────────────
+// Highest pricing priority: route_client_rates → routes.price_per_segment → client_rates.
+// One row per (route, client). Unique guard → 409.
+const rateSchema = z.object({
+  client_id: z.string().uuid(),
+  price_per_segment: z.number().nonnegative().finite(),
+  currency: z.enum(['EUR']).default('EUR'),
+  effective_from: z.string().datetime({ offset: true }).nullable().optional(),
+});
+
+router.get('/:id/client-rates', async (req, res) => {
+  const rows = await query(
+    `SELECT rcr.*, c.name AS client_name, c.system_id
+     FROM route_client_rates rcr JOIN clients c ON c.id=rcr.client_id
+     WHERE rcr.route_id=$1 ORDER BY rcr.effective_from DESC`,
+    [req.params.id],
+  );
+  res.json({ rates: rows });
+});
+
+router.post('/:id/client-rates', requirePerm('routes.create'), audit('set_client_route_rate', 'route_client_rate'), async (req, res) => {
+  const route = await queryOne('SELECT id FROM routes WHERE id=$1', [req.params.id]);
+  if (!route) { res.status(404).json({ error: 'route not found' }); return; }
+  const parsed = rateSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() }); return; }
+  const b = parsed.data;
+  const client = await queryOne('SELECT id FROM clients WHERE id=$1', [b.client_id]);
+  if (!client) { res.status(404).json({ error: 'client not found' }); return; }
+  try {
+    const { rows } = await getPool().query(
+      `INSERT INTO route_client_rates (route_id, client_id, price_per_segment, currency, effective_from, created_by)
+       VALUES ($1,$2,$3,$4,COALESCE($5, now()), $6) RETURNING *`,
+      [req.params.id, b.client_id, b.price_per_segment, b.currency, b.effective_from ?? null, (req as unknown as { user?: { id?: string } }).user?.id ?? null],
+    );
+    res.status(201).json({ rate: rows[0] });
+  } catch (e) {
+    if ((e as { code?: string }).code === '23505') { res.status(409).json({ error: 'rate already exists for this route+client — use PATCH' }); return; }
+    throw e;
+  }
+});
+
+router.patch('/:id/client-rates/:rateId', requirePerm('routes.update'), audit('updated_client_route_rate', 'route_client_rate'), async (req, res) => {
+  const sets: string[] = []; const params: unknown[] = [];
+  if (req.body?.price_per_segment !== undefined) {
+    const n = Number(req.body.price_per_segment);
+    if (!Number.isFinite(n) || n < 0) { res.status(400).json({ error: 'price_per_segment must be ≥ 0' }); return; }
+    params.push(n); sets.push(`price_per_segment = $${params.length}`);
+  }
+  if (req.body?.currency !== undefined) {
+    if (req.body.currency !== 'EUR') { res.status(400).json({ error: 'currency must be EUR' }); return; }
+    params.push('EUR'); sets.push(`currency = $${params.length}`);
+  }
+  if (req.body?.effective_from !== undefined) {
+    params.push(req.body.effective_from ? new Date(req.body.effective_from) : null);
+    sets.push(`effective_from = COALESCE($${params.length}, effective_from)`);
+  }
+  if (!sets.length) { res.status(400).json({ error: 'nothing to update' }); return; }
+  params.push(req.params.rateId); params.push(req.params.id);
+  const rows = await query(
+    `UPDATE route_client_rates SET ${sets.join(', ')}, updated_at=now() WHERE id=$${params.length - 1} AND route_id=$${params.length} RETURNING *`, params,
+  );
+  if (!rows.length) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ rate: rows[0] });
+});
+
+router.delete('/:id/client-rates/:rateId', requirePerm('routes.delete'), audit('deleted_client_route_rate', 'route_client_rate'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM route_client_rates WHERE id=$1 AND route_id=$2', [req.params.rateId, req.params.id]);
+  if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ ok: true });
+});
 
 export default router;

@@ -193,13 +193,24 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   let clientPrice: string | null = null;
   let priceSource = 'none';
   if (isUuid) {
-    const rp = await pool.query(
-      'SELECT price_per_segment FROM routes WHERE id=$1', [chosen.route_id],
+    // Highest priority: per-client route override (Vendor→Route→Client)
+    const rcr = await pool.query(
+      'SELECT price_per_segment FROM route_client_rates WHERE route_id=$1 AND client_id=$2',
+      [chosen.route_id, msg.client_id],
     );
-    const pp = rp.rows[0]?.price_per_segment;
-    if (pp !== null && pp !== undefined) {
-      clientPrice = String(Number(pp) * segments);
-      priceSource = `route:${chosen.route_name} × ${segments}seg`;
+    const rcrPrice = rcr.rows[0]?.price_per_segment;
+    if (rcrPrice !== null && rcrPrice !== undefined) {
+      clientPrice = String(Number(rcrPrice) * segments);
+      priceSource = `per-client ${chosen.route_name} × ${segments}seg`;
+    } else {
+      const rp = await pool.query(
+        'SELECT price_per_segment FROM routes WHERE id=$1', [chosen.route_id],
+      );
+      const pp = rp.rows[0]?.price_per_segment;
+      if (pp !== null && pp !== undefined) {
+        clientPrice = String(Number(pp) * segments);
+        priceSource = `route:${chosen.route_name} × ${segments}seg`;
+      }
     }
   }
   if (clientPrice === null) {

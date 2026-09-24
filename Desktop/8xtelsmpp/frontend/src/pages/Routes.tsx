@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { PageHeader, DataTable, StatusBadge, Modal, EmptyState, Icon, SearchInput } from '../components';
+import { RouteWizard } from './RouteWizard';
 
 interface RouteVendor {
   vendor_id: string;
@@ -99,11 +100,6 @@ interface Opt {
   iso_code?: string;
 }
 
-interface ChainItem {
-  vendor_id: string;
-  priority: number;
-  weight: number;
-}
 
 const STRATEGIES: Array<[string, string]> = [
   ['priority', 'Strict priority order'],
@@ -408,20 +404,12 @@ export default function Routes(): JSX.Element {
   const [q, setQ] = useState('');
   const [scope, setScope] = useState<'all' | 'global' | 'shared' | 'dedicated'>('all');
   const [status, setStatus] = useState<'all' | 'active' | 'disabled'>('all');
-  const [show, setShow] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [formErr, setFormErr] = useState('');
-  const CURS = ['EUR'] as const;
-  const [form, setForm] = useState({
-    name: '', prefix: '', sender_id: '', strategy: 'priority',
-    client_ids: [] as string[], country_id: '', price: '', currency: 'EUR', margin: '', tps: '',
-  });
-  const [clientSearch, setClientSearch] = useState('');
   const [editing, setEditing] = useState<Route | null>(null);
   const [editPrice, setEditPrice] = useState('');
   const [editCurrency, setEditCurrency] = useState('EUR');
   const [editMargin, setEditMargin] = useState('');
-  const [chain, setChain] = useState<ChainItem[]>([]);
   // Detail drawer
   const [detail, setDetail] = useState<RouteDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -467,59 +455,12 @@ export default function Routes(): JSX.Element {
   }), [routes]);
 
   function toggleVendor(id: string): void {
-    setChain((prev) => {
-      if (prev.some((v) => v.vendor_id === id)) return prev.filter((v) => v.vendor_id !== id);
-      return [...prev, { vendor_id: id, priority: prev.length + 1, weight: 100 }];
-    });
-  }
-
-  function toggleFormClient(id: string): void {
-    setForm((f) => ({
-      ...f,
-      client_ids: f.client_ids.includes(id) ? f.client_ids.filter((c) => c !== id) : [...f.client_ids, id],
-    }));
+    // kept for compatibility if referenced elsewhere; wizard owns vendor selection
+    void id;
   }
 
   function openModal(): void {
-    setForm({ name: '', prefix: '', sender_id: '', strategy: 'priority', client_ids: [], country_id: '', price: '', currency: 'EUR', margin: '', tps: '' });
-    setClientSearch('');
-    setChain([]);
-    setFormErr('');
-    setShow(true);
-  }
-
-  async function create(e: React.FormEvent): Promise<void> {
-    e.preventDefault();
-    if (!chain.length) {
-      setFormErr('Pick at least one vendor below.');
-      return;
-    }
-    setBusy(true);
-    setFormErr('');
-    try {
-      await api('/routes', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: form.name,
-          prefix: form.prefix || null,
-          sender_id: form.sender_id || null,
-          strategy: form.strategy,
-          client_ids: form.client_ids,
-          country_id: form.country_id || null,
-          price_per_segment: form.price === '' ? null : Number(form.price),
-          price_currency: form.currency,
-          min_margin_pct: form.margin === '' ? null : Number(form.margin),
-          tps_limit: form.tps === '' ? null : Math.max(1, Number(form.tps) || 0),
-          vendors: chain,
-        }),
-      });
-      setShow(false);
-      load();
-    } catch (e) {
-      setFormErr((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    setShowWizard(true);
   }
 
   async function savePrice(): Promise<void> {
@@ -936,166 +877,7 @@ export default function Routes(): JSX.Element {
         </Modal>
       )}
 
-      {show && (
-        <Modal title="New route" onClose={() => setShow(false)} wide>
-          <form onSubmit={create} className="space-y-3">
-            {formErr && <div className="text-sm text-red-300 bg-danger/10 border border-danger/30 rounded-lg px-3 py-2">{formErr}</div>}
-            {/* name */}
-            <div>
-              <label className="label">Route name</label>
-              <input className="input" placeholder="India Premium — all clients" value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })} required autoFocus />
-            </div>
-            {/* clients multi-select */}
-            <div>
-              <label className="label">
-                Select clients{' '}
-                <span className="text-gray-600 font-normal">
-                  ({form.client_ids.length === 0 ? 'none = 🌍 global, serves everyone' : `${form.client_ids.length} selected`})
-                </span>
-              </label>
-              {form.client_ids.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  {form.client_ids.map((id) => {
-                    const c = clients.find((x) => x.id === id);
-                    return (
-                      <span key={id} className="inline-flex items-center gap-1.5 text-xs font-semibold bg-brand/10 text-emerald-300 border border-brand/30 rounded-full pl-2.5 pr-1.5 py-1">
-                        {c?.name ?? id.slice(0, 8)}
-                        <button type="button" onClick={() => toggleFormClient(id)}
-                          className="w-4 h-4 rounded-full hover:bg-brand/25 flex items-center justify-center text-[10px]" title="Remove">
-                          ✕
-                        </button>
-                      </span>
-                    );
-                  })}
-                  <button type="button" onClick={() => setForm({ ...form, client_ids: [] })}
-                    className="text-[11px] text-muted hover:text-red-300 underline underline-offset-2">
-                    Clear all → global
-                  </button>
-                </div>
-              )}
-              <input className="input !py-1.5 !text-xs mb-1.5" placeholder="Search clients to add…"
-                value={clientSearch} onChange={(e) => setClientSearch(e.target.value)} />
-              <div className="space-y-1 max-h-32 overflow-y-auto border border-line/60 rounded-lg p-1.5 bg-ink/40">
-                {clients
-                  .filter((c) => {
-                    const n = clientSearch.trim().toLowerCase();
-                    return !n || c.name.toLowerCase().includes(n) || (c.system_id ?? '').toLowerCase().includes(n);
-                  })
-                  .slice(0, 30)
-                  .map((c) => {
-                    const picked = form.client_ids.includes(c.id);
-                    return (
-                      <label key={c.id}
-                        className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 cursor-pointer transition text-sm ${picked ? 'border-brand/50 bg-brand/5' : 'border-transparent hover:border-line hover:bg-panel2/50'}`}>
-                        <input type="checkbox" checked={picked} onChange={() => toggleFormClient(c.id)} className="accent-emerald-500" />
-                        <span className="font-medium truncate">{c.name}</span>
-                        <span className="text-[11px] text-muted font-mono ml-auto shrink-0">{c.system_id}</span>
-                      </label>
-                    );
-                  })}
-                {!clients.length && <div className="text-sm text-muted px-1 py-2">No clients yet — create one under Clients first.</div>}
-              </div>
-              <p className="text-[11px] text-muted mt-1">
-                {form.client_ids.length === 0
-                  ? '🌍 Global: every client falls back to it. Deleting later needs typed confirmation.'
-                  : form.client_ids.length === 1
-                    ? '🎯 1 client: only they use it. Safe to delete anytime.'
-                    : `👥 ${form.client_ids.length} clients: only they use it. Manage membership later from route detail.`}
-              </p>
-            </div>
-            {/* match: country + prefix + sender + tps on one row */}
-            <div className="grid grid-cols-4 gap-2.5">
-              <div className="col-span-2">
-                <label className="label">Country</label>
-                <select className="input" value={form.country_id}
-                  onChange={(e) => setForm({ ...form, country_id: e.target.value })}>
-                  <option value="">All countries</option>
-                  {countries.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="label">Prefix</label>
-                <input className="input font-mono" placeholder="91 · any" value={form.prefix}
-                  onChange={(e) => setForm({ ...form, prefix: e.target.value })} />
-              </div>
-              <div>
-                <label className="label">Sender · TPS</label>
-                <div className="flex gap-1.5">
-                  <input className="input font-mono" placeholder="sender" value={form.sender_id}
-                    onChange={(e) => setForm({ ...form, sender_id: e.target.value })} />
-                  <input className="input font-mono !w-[70px] shrink-0" placeholder="tps" value={form.tps}
-                    onChange={(e) => setForm({ ...form, tps: e.target.value })} inputMode="numeric" title="TPS cap (blank = none)" />
-                </div>
-              </div>
-            </div>
-            {/* price + margin + strategy on one row */}
-            <div className="grid grid-cols-4 gap-2.5">
-              <div className="col-span-2">
-                <label className="label">Price / seg <span className="text-gray-600">(blank = rate card)</span></label>
-                <div className="flex gap-1.5">
-                  <input className="input font-mono flex-1" placeholder="0.0045" value={form.price}
-                    onChange={(e) => setForm({ ...form, price: e.target.value })} inputMode="decimal" />
-                  <span className="input !w-auto text-muted">€ EUR</span>
-                </div>
-              </div>
-              <div>
-                <label className="label">Margin %</label>
-                <input className="input font-mono" placeholder="15 · none" value={form.margin}
-                  onChange={(e) => setForm({ ...form, margin: e.target.value })} inputMode="decimal" title="Warn-only margin guard" />
-              </div>
-              <div>
-                <label className="label">Strategy</label>
-                <select className="input font-mono !text-[13px]" value={form.strategy}
-                  onChange={(e) => setForm({ ...form, strategy: e.target.value })}
-                  title={STRATEGY_HINT[form.strategy]}>
-                  {STRATEGIES.map(([v, desc]) => (
-                    <option key={v} value={v} title={desc}>{v}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <p className="text-[11px] text-muted -mt-1">
-              {STRATEGY_HINT[form.strategy]}
-            </p>
-            {/* vendors: compact rows */}
-            <div>
-              <label className="label">Vendors <span className="text-gray-600">(click to add · first = priority 1)</span></label>
-              <div className="space-y-1 max-h-36 overflow-y-auto border border-line/60 rounded-lg p-1.5 bg-ink/40">
-                {vendors.map((v) => {
-                  const picked = chain.find((c) => c.vendor_id === v.id);
-                  return (
-                    <label key={v.id}
-                      className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 cursor-pointer transition text-sm ${picked ? 'border-brand/50 bg-brand/5' : 'border-transparent hover:border-line hover:bg-panel2/50'}`}>
-                      <input type="checkbox" checked={!!picked} onChange={() => toggleVendor(v.id)} className="accent-emerald-500" />
-                      <span className="font-medium truncate">{v.name}</span>
-                      {picked && (
-                        <span className="ml-auto flex items-center gap-1 text-[11px] text-muted shrink-0" onClick={(e) => e.stopPropagation()}>
-                          P<input type="number" min={1} value={picked.priority}
-                            onChange={(e) => setChain(chain.map((c) => c.vendor_id === v.id ? { ...c, priority: Number(e.target.value) } : c))}
-                            className="input font-mono !w-12 !py-0.5 !px-1.5 !text-[11px]" />
-                          {form.strategy === 'percentage' && (
-                            <span className="flex items-center gap-0.5">%<input type="number" min={1} max={100} value={picked.weight}
-                              onChange={(e) => setChain(chain.map((c) => c.vendor_id === v.id ? { ...c, weight: Number(e.target.value) } : c))}
-                              className="input font-mono !w-12 !py-0.5 !px-1.5 !text-[11px]" /></span>
-                          )}
-                        </span>
-                      )}
-                    </label>
-                  );
-                })}
-                {!vendors.length && <div className="text-sm text-muted px-1 py-2">No vendors yet — create one under Vendors first.</div>}
-              </div>
-            </div>
-            <div className="flex gap-2 pt-1">
-              <button className="btn flex-1" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create route'}</button>
-              <button className="btn-ghost" type="button" onClick={() => setShow(false)}>Cancel</button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      <RouteWizard open={showWizard} onClose={() => setShowWizard(false)} onDone={() => load()} />
 
       {editing && (
         <Modal title={`Route price — ${editing.name}`} onClose={() => setEditing(null)}>

@@ -52,7 +52,10 @@ const vendorSchema = z.object({
 
 router.get('/', async (_req, res) => {
   const rows = await query(
-    `SELECT v.*, (SELECT json_agg(vc) FROM vendor_connections vc WHERE vc.vendor_id=v.id) AS connections
+    `SELECT v.*,
+       (SELECT json_agg(vc) FROM vendor_connections vc WHERE vc.vendor_id=v.id) AS connections,
+       (SELECT count(*) FROM route_vendors rv JOIN routes r ON r.id=rv.route_id WHERE rv.vendor_id=v.id AND r.status='active') AS active_route_count,
+       (SELECT count(DISTINCT r.country_id) FROM route_vendors rv JOIN routes r ON r.id=rv.route_id WHERE rv.vendor_id=v.id) AS coverage_count
      FROM vendors v ORDER BY v.created_at DESC`,
   );
   // never leak encrypted password
