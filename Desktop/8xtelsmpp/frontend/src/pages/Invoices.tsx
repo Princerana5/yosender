@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { api, fmtMoney } from '../api';
-import { PageHeader, DataTable, StatusBadge, Modal } from '../components';
+import { api, token, fmtMoney } from '../api';
+import { PageHeader, DataTable, StatusBadge, Modal, Icon } from '../components';
 
 interface Invoice {
   id: string; invoice_number: string; client_id: string; client_name?: string; system_id?: string;
@@ -13,18 +13,47 @@ interface Line {
   segments: number; rate: string; amount: string; percentage: string;
 }
 interface DetailState {
-  invoice: Invoice; lines: Line[]; payments?: Array<Record<string, unknown>>; payment_methods?: Array<Record<string, unknown>>;
+  invoice: Invoice; lines: Line[]; emails?: Array<Record<string, unknown>>; payments?: Array<Record<string, unknown>>; payment_methods?: Array<Record<string, unknown>>;
+}
+
+async function downloadPdf(id: string, invoiceNumber: string): Promise<void> {
+  const t = token();
+  const res = await fetch(`/invoices/${id}/pdf`, { headers: t ? { authorization: `Bearer ${t}` } : {} });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error((j as { error?: string }).error ?? `PDF failed ${res.status}`);
+  }
+  const ct = res.headers.get('content-type') ?? '';
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = ct.includes('pdf') ? `Invoice_${invoiceNumber}.pdf` : `Invoice_${invoiceNumber}.html`;
+  // open in new tab if pdf inline viewer preferred
+  window.open(url, '_blank');
+  // trigger download as well
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 export default function Invoices(): JSX.Element {
   const [rows, setRows] = useState<Invoice[]>([]);
-  const [clients, setClients] = useState<Array<{ id: string; name: string }>>([]);
+  const [clients, setClients] = useState<Array<{ id: string; name: string; portal_email?: string | null }>>([]);
   const [filter, setFilter] = useState({ client_id: '', status: '' });
   const [gen, setGen] = useState(false);
   const [form, setForm] = useState({ client_id: '', from: new Date().toISOString().slice(0, 10).slice(0, 7) + '-01', to: new Date().toISOString().slice(0, 10), tax_rate: '0', adjustments: '0', notes: '' });
   const [detail, setDetail] = useState<DetailState | null>(null);
   const [msg, setMsg] = useState('');
+  const [errMsg, setErrMsg] = useState('');
   const [payForm, setPayForm] = useState({ method: 'usdt', chain: 'TRC20', reference: '' });
+  // edit invoice
+  const [editing, setEditing] = useState<Invoice | null>(null);
+  const [editForm, setEditForm] = useState({ tax_rate: '0', adjustments: '0', notes: '', status: '' });
+  // send mail
+  const [sendFor, setSendFor] = useState<Invoice | null>(null);
+  const [mail, setMail] = useState({ to: '', cc: '', bcc: '', subject: '', intro: '' });
+  const [sending, setSending] = useState(false);
+  const [showTemplateHelp, setShowTemplateHelp] = useState(false);
 
   const load = (): void => {
     const p = new URLSearchParams();
@@ -33,22 +62,25 @@ export default function Invoices(): JSX.Element {
     api<{ invoices: Invoice[] }>(`/invoices?${p}`).then((r) => setRows(r.invoices)).catch(() => undefined);
   };
   useEffect(() => {
-    api<{ clients: Array<{ id: string; name: string }> }>('/clients').then((r) => setClients(r.clients)).catch(() => undefined);
+    api<{ clients: Array<{ id: string; name: string; portal_email?: string | null }> }>('/clients').then((r) => setClients(r.clients)).catch(() => undefined);
   }, []);
   useEffect(load, [filter]);
 
   async function doGenerate(): Promise<void> {
-    setMsg('');
+    setMsg(''); setErrMsg('');
     try {
       await api('/invoices/generate', { method: 'POST', body: JSON.stringify({ client_id: form.client_id, from: form.from, to: form.to, tax_rate: Number(form.tax_rate), adjustments: Number(form.adjustments), notes: form.notes || null }) });
       setGen(false);
       load();
-    } catch (e) { setMsg((e as Error).message); }
+      setMsg('Invoice generated');
+    } catch (e) { setErrMsg((e as Error).message); }
   }
 
   async function openDetail(id: string): Promise<void> {
-    const r = await api<DetailState>(`/invoices/${id}`);
-    setDetail(r);
+    try {
+      const r = await api<DetailState>(`/invoices/${id}`);
+      setDetail(r);
+    } catch (e) { setErrMsg((e as Error).message); }
   }
   async function reloadDetail(): Promise<void> {
     if (!detail) return;
@@ -56,10 +88,77 @@ export default function Invoices(): JSX.Element {
     setDetail(r);
   }
 
+  function startEdit(inv: Invoice): void {
+    setEditing(inv);
+    setEditForm({ tax_rate: String(inv.tax_rate ?? '0'), adjustments: String(inv.adjustments ?? '0'), notes: inv.notes ?? '', status: inv.status });
+  }
+  async function doEdit(): Promise<void> {
+    if (!editing) return;
+    setErrMsg('');
+    try {
+      const body: Record<string, unknown> = {};
+      if (editForm.tax_rate !== String(editing.tax_rate)) body.tax_rate = Number(editForm.tax_rate);
+      if (editForm.adjustments !== String(editing.adjustments)) body.adjustments = Number(editForm.adjustments);
+      if ((editForm.notes ?? '') !== (editing.notes ?? '')) body.notes = editForm.notes || null;
+      if (editForm.status !== editing.status) body.status = editForm.status;
+      if (!Object.keys(body).length) { setEditing(null); return; }
+      await api(`/invoices/${editing.id}`, { method: 'PATCH', body: JSON.stringify(body) });
+      setEditing(null);
+      setMsg('Invoice updated');
+      load();
+      if (detail?.invoice.id === editing.id) await reloadDetail();
+    } catch (e) { setErrMsg((e as Error).message); }
+  }
+  async function doDelete(inv: Invoice): Promise<void> {
+    if (!window.confirm(`Delete ${inv.invoice_number} (${inv.status})? This cannot be undone. Paid/sent invoices must be cancelled first.`)) return;
+    try {
+      await api(`/invoices/${inv.id}`, { method: 'DELETE' });
+      setMsg(`${inv.invoice_number} deleted`);
+      if (detail?.invoice.id === inv.id) setDetail(null);
+      load();
+    } catch (e) { setErrMsg((e as Error).message); }
+  }
+  async function doDownloadPdf(inv: Invoice): Promise<void> {
+    setErrMsg('');
+    try { await downloadPdf(inv.id, inv.invoice_number); }
+    catch (e) { setErrMsg((e as Error).message); }
+  }
+  function openSend(inv: Invoice): void {
+    setSendFor(inv);
+    const client = clients.find(c => c.id === inv.client_id);
+    const fallback = (client?.portal_email ?? '') as string;
+    setMail({ to: fallback, cc: '', bcc: '', subject: `Invoice ${inv.invoice_number} — ${String(inv.period_from).slice(0, 10)} to ${String(inv.period_to).slice(0, 10)} — 8xtel`, intro: '' });
+    setErrMsg('');
+  }
+  async function doSend(): Promise<void> {
+    if (!sendFor) return;
+    const toList = mail.to.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    if (!toList.length) { setErrMsg('Enter at least one recipient (To)'); return; }
+    const ccList = mail.cc.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    const bccList = mail.bcc.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    setSending(true); setErrMsg('');
+    try {
+      const r = await api<{ error?: string | null; message_id?: string | null; emailed_to?: string }>(`/invoices/${sendFor.id}/send`, {
+        method: 'POST',
+        body: JSON.stringify({
+          to_emails: toList,
+          cc: ccList.length ? ccList : undefined,
+          bcc: bccList.length ? bccList : undefined,
+          subject: mail.subject.trim() || undefined,
+          intro: mail.intro.trim() || undefined,
+        }),
+      });
+      if (r.error) { setErrMsg(`Mail failed: ${r.error}`); }
+      else { setMsg(`Invoice sent to ${toList.join(', ')}${r.message_id ? ` · ${r.message_id}` : ''}`); setSendFor(null); load(); if (detail?.invoice.id === sendFor.id) await reloadDetail(); }
+    } catch (e) { setErrMsg((e as Error).message); }
+    finally { setSending(false); }
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader title="Invoices" sub="Period billing — country breakdown, totals, PDF & email" actions={<button className="btn" onClick={() => setGen(true)}>+ Generate invoice</button>} />
-      {msg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{msg}</div>}
+      {msg && <div className="text-sm text-emerald-300 bg-emerald-500/10 border border-emerald-500/25 rounded-lg px-3 py-2">{msg}</div>}
+      {errMsg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{errMsg}</div>}
       <div className="card card-pad flex flex-wrap gap-2">
         <select className="input max-w-xs" value={filter.client_id} onChange={(e) => setFilter({ ...filter, client_id: e.target.value })}>
           <option value="">All clients</option>
@@ -80,13 +179,23 @@ export default function Invoices(): JSX.Element {
           { key: 'period_from', label: 'Period', render: (r) => <span className="text-xs">{String(r.period_from).slice(0, 10)} → {String(r.period_to).slice(0, 10)}</span> },
           { key: 'grand_total', label: 'Total', right: true, render: (r) => <span className="font-semibold">{fmtMoney(r.grand_total, r.currency)}</span> },
           { key: 'status', label: 'Status', render: (r) => <StatusBadge status={String(r.status)} /> },
-          { key: 'actions', label: '', render: (r) => <span className="flex gap-1"><button className="btn-ghost !py-1 !text-xs" onClick={() => void openDetail(String(r.id))}>View</button><a className="btn-ghost !py-1 !text-xs" href={`/api/invoices/${String(r.id)}/pdf`} target="_blank" rel="noreferrer">PDF</a></span> },
+          {
+            key: 'actions', label: '', render: (r) => (
+              <span className="flex gap-1 flex-wrap">
+                <button className="btn-ghost !py-1 !text-xs" onClick={() => void openDetail(String(r.id))}>View</button>
+                <button className="btn-ghost !py-1 !text-xs" onClick={() => void doDownloadPdf(r as Invoice)}>PDF</button>
+                <button className="btn-ghost !py-1 !text-xs" onClick={() => startEdit(r as Invoice)}>Edit</button>
+                <button className="btn-ghost !py-1 !text-xs" onClick={() => openSend(r as Invoice)}>Email</button>
+                <button className="btn-ghost !py-1 !text-xs text-red-300/80 hover:text-red-200" onClick={() => void doDelete(r as Invoice)} title="Delete (draft/generated only)">Delete</button>
+              </span>
+            ),
+          },
         ]}
       />
       {gen && (
         <Modal title="Generate invoice" onClose={() => setGen(false)}>
           <div className="space-y-3">
-            {msg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{msg}</div>}
+            {errMsg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{errMsg}</div>}
             <label className="label">Client *</label>
             <select className="input" value={form.client_id} onChange={(e) => setForm({ ...form, client_id: e.target.value })}>
               <option value="">— Select —</option>
@@ -102,6 +211,65 @@ export default function Invoices(): JSX.Element {
             </div>
             <div><label className="label">Notes</label><textarea className="input" rows={2} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></div>
             <button className="btn w-full" disabled={!form.client_id || !form.from || !form.to} onClick={() => void doGenerate()}>Generate</button>
+          </div>
+        </Modal>
+      )}
+      {/* Edit invoice */}
+      {editing && (
+        <Modal title={`Edit ${editing.invoice_number}`} onClose={() => setEditing(null)}>
+          <div className="space-y-3">
+            {errMsg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{errMsg}</div>}
+            <div className="grid grid-cols-2 gap-2">
+              <div><label className="label">Tax %</label><input className="input" value={editForm.tax_rate} onChange={(e) => setEditForm({ ...editForm, tax_rate: e.target.value })} placeholder="0" /></div>
+              <div><label className="label">Adjustments</label><input className="input" value={editForm.adjustments} onChange={(e) => setEditForm({ ...editForm, adjustments: e.target.value })} placeholder="0" /></div>
+            </div>
+            <div><label className="label">Status</label>
+              <select className="input" value={editForm.status} onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}>
+                {['draft','generated','sent','paid','unpaid','overdue','cancelled'].map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+              <p className="text-[11px] text-muted mt-1">Tax/adjustments cannot be edited once paid or cancelled.</p>
+            </div>
+            <div><label className="label">Notes</label><textarea className="input" rows={3} value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} placeholder="Optional notes shown on PDF & email" /></div>
+            <div className="flex gap-2">
+              <button className="btn flex-1" onClick={() => void doEdit()}>Save</button>
+              <button className="btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {/* Send mail */}
+      {sendFor && (
+        <Modal title={`Send ${sendFor.invoice_number}`} onClose={() => setSendFor(null)}>
+          <div className="space-y-3">
+            {errMsg && <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{errMsg}</div>}
+            <div><label className="label">To * <span className="text-muted font-normal">(comma separated)</span></label>
+              <input className="input" value={mail.to} onChange={(e) => setMail({ ...mail, to: e.target.value })} placeholder="client@company.com, finance@company.com" />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div><label className="label">CC</label><input className="input" value={mail.cc} onChange={(e) => setMail({ ...mail, cc: e.target.value })} placeholder="cc@company.com" /></div>
+              <div><label className="label">BCC</label><input className="input" value={mail.bcc} onChange={(e) => setMail({ ...mail, bcc: e.target.value })} placeholder="bcc@company.com" /></div>
+            </div>
+            <div><label className="label">Subject</label>
+              <input className="input" value={mail.subject} onChange={(e) => setMail({ ...mail, subject: e.target.value })} placeholder={`Invoice ${sendFor.invoice_number} — ...`} />
+              <p className="text-[11px] text-muted mt-1">Leave blank to use default. Supports plain text.</p>
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <label className="label !mb-0">Intro / template override</label>
+                <button type="button" className="text-[11px] text-brand hover:underline" onClick={() => setShowTemplateHelp(v => !v)}>{showTemplateHelp ? 'Hide help' : 'Template help'}</button>
+              </div>
+              <textarea className="input mt-1" rows={3} value={mail.intro} onChange={(e) => setMail({ ...mail, intro: e.target.value })} placeholder="Custom paragraph above the summary table. HTML allowed (e.g. <b>). Leave blank for default." />
+              {showTemplateHelp && (
+                <div className="text-[11px] text-muted mt-1 leading-relaxed">
+                  Default intro: <em>Please find your invoice for {'{{period_from}}'} → {'{{period_to}}'} attached as PDF. Summary below:</em><br />
+                  PDF attached automatically as <code>Invoice_{'{invoice_number}'}.pdf</code>. Use Payment Methods to edit the How to pay block on the PDF/email.
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button className="btn flex-1" disabled={sending} onClick={() => void doSend()}>{sending ? 'Sending…' : 'Send email'}</button>
+              <button className="btn-ghost" onClick={() => setSendFor(null)}>Cancel</button>
+            </div>
           </div>
         </Modal>
       )}
@@ -125,11 +293,16 @@ export default function Invoices(): JSX.Element {
                 })}
               </div>
             )}
-            <div className="flex gap-2">
-              <a className="btn flex-1 text-center" href={`/api/invoices/${detail.invoice.id}/pdf`} target="_blank" rel="noreferrer">Open PDF</a>
-              <button className="btn-ghost" onClick={async () => { await api(`/invoices/${detail.invoice.id}/send`, { method: 'POST', body: JSON.stringify({}) }); setMsg('Email sent'); void reloadDetail(); }}>Send email</button>
+            {detail.invoice.notes && <div className="text-xs border border-amber-500/30 bg-amber-500/10 rounded-lg px-3 py-2"><b className="text-amber-300">Notes:</b> <span className="whitespace-pre-wrap">{detail.invoice.notes}</span></div>}
+            <div className="flex flex-wrap gap-2">
+              <button className="btn flex-1" onClick={() => void doDownloadPdf(detail.invoice)}>Download PDF</button>
+              <button className="btn-ghost" onClick={() => openSend(detail.invoice)}>Send email</button>
+              <button className="btn-ghost" onClick={() => startEdit(detail.invoice)}>Edit</button>
               <button className="btn-ghost" onClick={async () => { await api(`/invoices/${detail.invoice.id}/regenerate`, { method: 'POST' }); load(); setDetail(null); }}>Regenerate</button>
             </div>
+            {!!detail.emails?.length && (
+              <div className="text-[11px] text-muted">Last send: {String((detail.emails[0] as Record<string,unknown>).to_email ?? '')} · {String((detail.emails[0] as Record<string,unknown>).sent_at ?? '').slice(0, 19).replace('T',' ')} {(detail.emails[0] as Record<string,unknown>).error ? `· failed: ${String((detail.emails[0] as Record<string,unknown>).error).slice(0,120)}` : `· ${String((detail.emails[0] as Record<string,unknown>).message_id ?? '').slice(0,40)}`}</div>
+            )}
             <div className="border-t border-line pt-3">
               <div className="text-[11px] font-semibold mb-2">Payments {detail.payments?.length ? `(${detail.payments.length})` : ''}</div>
               {!!detail.payments?.length && (

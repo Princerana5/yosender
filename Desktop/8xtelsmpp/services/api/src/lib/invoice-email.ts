@@ -5,6 +5,14 @@ export interface InvoiceEmailArgs {
   paymentMethods: Array<{ kind: string; label: string; chain: string | null; details: Record<string, unknown> }>;
   panelUrl: string;
   invoiceId: string;
+  subjectOverride?: string | null;
+  introOverride?: string | null;
+}
+
+export const DEFAULT_EMAIL_SUBJECT_TMPL = 'Invoice {{invoice_number}} — {{period_from}} to {{period_to}} — 8xtel';
+export const DEFAULT_EMAIL_INTRO_TMPL = 'Please find your invoice for <b>{{period_from}} → {{period_to}}</b> attached as PDF. Summary below:';
+export function renderTmpl(tmpl: string, d: InvoiceDoc): string {
+  return tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => esc((d as unknown as Record<string,unknown>)[k] ?? ''));
 }
 
 function esc(s: unknown): string {
@@ -38,6 +46,7 @@ function howToPayHtml(methods: InvoiceEmailArgs['paymentMethods']): string {
 
 export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
   const d = args.doc;
+  const intro = args.introOverride?.trim() ? args.introOverride.trim() : `Please find your invoice for <b>${esc(d.period_from)} → ${esc(d.period_to)}</b> attached as PDF. Summary below:`;
   const rows = d.lines.map(l => `<tr>
     <td style="padding:7px 8px;border:1px solid #e2e8f0">${esc(l.country_name)} <span style="color:#64748b;font-size:11px">${esc(l.iso_code ?? '')}</span></td>
     <td style="padding:7px 8px;border:1px solid #e2e8f0;text-align:right">${l.total_sms.toLocaleString()}</td>
@@ -53,7 +62,7 @@ export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
   </div>
   <div style="padding:28px;color:#0f172a;font-size:14px;line-height:1.6">
     <p>Dear ${esc(d.client.name)} team,</p>
-    <p>Please find your invoice for <b>${esc(d.period_from)} → ${esc(d.period_to)}</b> attached as PDF. Summary below:</p>
+    <p>${intro}</p>
     <table style="width:100%;border-collapse:collapse;margin:14px 0;font-size:13px">
       <thead><tr style="background:#0f172a;color:#fff"><th style="padding:8px;border:1px solid #0f172a;text-align:left">Country</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">SMS</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">Amount</th><th style="padding:8px;border:1px solid #0f172a;text-align:right">%</th></tr></thead>
       <tbody>${rows || `<tr><td colspan="4" style="text-align:center;color:#64748b;padding:16px">No billable traffic in this period.</td></tr>`}</tbody>
