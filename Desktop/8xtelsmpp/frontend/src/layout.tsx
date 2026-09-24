@@ -52,6 +52,7 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     name: 'Billing',
     items: [
       { to: '/billing', label: 'Wallets & Ledger', icon: 'wallet' },
+      { to: '/invoices', label: 'Invoices', icon: 'tag' },
       { to: '/rates', label: 'Rates', icon: 'tag' },
       { to: '/rate-notifications', label: 'Rate Notifications', icon: 'mail' },
     ],

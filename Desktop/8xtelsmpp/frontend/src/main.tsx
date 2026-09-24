@@ -21,12 +21,13 @@ import PortalAccounts from './pages/PortalAccounts.js';
 import { RateNotificationHistory, RateNotificationDetail, RateNotificationCreate, RateNotificationContacts } from './pages/RateNotifications.js';
 import ClientApi from './pages/ClientApi.js';
 import Docs from './pages/Docs.js';
+import Invoices from './pages/Invoices.js';
 import { StatusBadge, initTheme } from './components.js';
 import { token } from './api.js';
 
 initTheme(); // saved light/dark before first paint — no theme flash
 import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
-import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage, PortalApiPage } from './portal-pages.js';
+import { PortalSend, PortalHistory, PortalWallet, PortalReports, PortalReportDetail, PortalCoverage, PortalApiPage, PortalInvoices } from './portal-pages.js';
 
 function Guard({ children }: { children: JSX.Element }): JSX.Element {
   return token() ? children : <Navigate to="/login" replace />;
@@ -113,6 +114,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             }
           />
           <Route path="billing" element={<Billing />} />
+          <Route path="invoices" element={<Invoices />} />
           <Route
             path="rates"
             element={
@@ -209,6 +211,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="history" element={<PortalHistory />} />
           <Route path="reports" element={<PortalReports />} />
           <Route path="reports/:id" element={<PortalReportDetail />} />
+          <Route path="invoices" element={<PortalInvoices />} />
           <Route path="api" element={<PortalApiPage />} />
           <Route path="wallet" element={<PortalWallet />} />
         </Route>

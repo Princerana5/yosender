@@ -31,6 +31,8 @@ export default defineConfig({
       '/messages': apiProxy('/messages'),
       '/billing': apiProxy('/billing'),
       '/reports': apiProxy('/reports'),
+      '/invoices': apiProxy('/invoices'),
+      '/rate-notifications': apiProxy('/rate-notifications'),
       '/system': apiProxy('/system'),
       '/connectors': apiProxy('/connectors'),
       '/portal': apiProxy('/portal'),

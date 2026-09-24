@@ -1392,3 +1392,62 @@ function PortalApiKeys(): JSX.Element {
     </div>
   );
 }
+
+// ── Portal: invoices (own client only) ───────────────────────────────────
+export function PortalInvoices(): JSX.Element {
+  const [rows, setRows] = useState<Array<{ id: string; invoice_number: string; period_from: string; period_to: string; currency: string; grand_total: string; status: string; created_at: string }>>([]);
+  const [detail, setDetail] = useState<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>> } | null>(null);
+
+  const load = (): void => {
+    portalApi<{ invoices: typeof rows }>('/portal/invoices').then((r) => setRows(r.invoices)).catch(() => undefined);
+  };
+  useEffect(load, []);
+
+  async function open(id: string): Promise<void> {
+    const r = await portalApi<{ invoice: Record<string, unknown>; lines: Array<Record<string, unknown>>; emails: Array<Record<string, unknown>> }>(`/portal/invoices/${id}`);
+    setDetail(r);
+  }
+
+  function openPdf(id: string): void {
+    const token = portalToken();
+    fetch(`${API_BASE}/portal/invoices/${id}/pdf`, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+      .then((res) => { if (!res.ok) throw new Error('failed'); return res.blob(); })
+      .then((b) => { const u = URL.createObjectURL(b); window.open(u, '_blank'); setTimeout(() => URL.revokeObjectURL(u), 60000); })
+      .catch(() => undefined);
+  }
+
+  return (
+    <div className="space-y-5">
+      <PageHeader title="Invoices" sub="Your billing history — download PDF per period" />
+      <DataTable
+        keyOf={(r) => r.id}
+        rows={rows}
+        empty="No invoices yet."
+        columns={[
+          { key: 'invoice_number', label: 'Invoice', mono: true },
+          { key: 'period', label: 'Period', render: (r) => <span className="text-xs">{String(r.period_from).slice(0, 10)} → {String(r.period_to).slice(0, 10)}</span> },
+          { key: 'grand_total', label: 'Total', right: true, render: (r) => <span className="font-semibold"><Money value={r.grand_total} currency={String(r.currency)} /></span> },
+          { key: 'status', label: 'Status', render: (r) => <StatusBadge status={String(r.status)} /> },
+          { key: 'actions', label: '', render: (r) => <span className="flex gap-1"><button className="btn-ghost !py-1 !text-xs" onClick={() => void open(r.id)}>View</button><button className="btn-ghost !py-1 !text-xs" onClick={() => openPdf(r.id)}>PDF</button></span> },
+        ]}
+      />
+      {detail && (
+        <Modal title={String(detail.invoice.invoice_number ?? 'Invoice')} onClose={() => setDetail(null)}>
+          <div className="space-y-3">
+            <div className="flex gap-2 text-xs"><span>{String(detail.invoice.period_from).slice(0, 10)} → {String(detail.invoice.period_to).slice(0, 10)}</span><StatusBadge status={String(detail.invoice.status)} /><span className="ml-auto font-semibold"><Money value={String(detail.invoice.grand_total)} currency={String(detail.invoice.currency)} /></span></div>
+            <div className="max-h-64 overflow-auto">
+              <table className="w-full text-xs">
+                <thead><tr className="text-muted"><th className="text-left">Country</th><th className="text-right">SMS</th><th className="text-right">OK</th><th className="text-right">Fail</th><th className="text-right">Amount</th><th className="text-right">%</th></tr></thead>
+                <tbody>{detail.lines.map((l, i) => <tr key={i} className="border-t border-line"><td>{String(l.country_name)}</td><td className="text-right">{String(l.total_sms)}</td><td className="text-right text-emerald-300">{String(l.successful)}</td><td className="text-right text-red-300">{String(l.failed)}</td><td className="text-right"><Money value={String(l.amount)} currency={String(detail.invoice.currency)} /></td><td className="text-right">{String(l.percentage)}%</td></tr>)}</tbody>
+              </table>
+            </div>
+            <div className="flex gap-2">
+              <button className="btn flex-1" onClick={() => openPdf(String(detail.invoice.id))}>Open PDF</button>
+            </div>
+            {!!detail.emails.length && <div className="text-xs text-muted">Emails: {detail.emails.length} sent</div>}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}

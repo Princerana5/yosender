@@ -33,6 +33,12 @@ interface Msg {
   credits_charged: string | null; error_description: string | null;
 }
 
+interface CountryRow {
+  country_id: string | null; country_name: string; iso_code: string | null;
+  total_sms: number; successful: number; failed: number;
+  segments: number; amount: number; rate: number; percentage: number;
+}
+
 const BM_SHORT: Record<string, string> = {
   on_submission: 'Submission', on_delivery: 'Delivery Only',
   submission_delivery: 'Sub + Deliv', operator_submission: 'Op Submission',
@@ -71,6 +77,12 @@ export default function ClientReports(): JSX.Element {
   const [err, setErr] = useState('');
   const [showContent, setShowContent] = useState(false);
   const [exporting, setExporting] = useState('');
+  const [activeTab, setActiveTab] = useState<'overview' | 'by-country'>('overview');
+  const [countries, setCountries] = useState<CountryRow[]>([]);
+  const [countryLoading, setCountryLoading] = useState(false);
+  const [countryErr, setCountryErr] = useState('');
+  const [cf, setCf] = useState({ search: '', status: '', sender: '', destination: '', sort: '' });
+  const [countryExporting, setCountryExporting] = useState('');
   const abort = useRef(false);
 
   useEffect(() => {
@@ -159,6 +171,65 @@ export default function ClientReports(): JSX.Element {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, rangeParams]);
+
+  function loadCountries(): void {
+    if (!clientId) return;
+    setCountryLoading(true);
+    setCountryErr('');
+    const p = new URLSearchParams(rangeParams);
+    if (cf.search) p.set('search', cf.search);
+    if (cf.status) p.set('status', cf.status);
+    if (cf.sender) p.set('sender', cf.sender);
+    if (cf.destination) p.set('destination', cf.destination);
+    if (cf.sort) p.set('sort', cf.sort);
+    api<{ countries: CountryRow[] }>(`/reports/client/${clientId}/by-country?${p}`)
+      .then((r) => setCountries(r.countries))
+      .catch((e) => setCountryErr((e as Error).message))
+      .finally(() => setCountryLoading(false));
+  }
+
+  useEffect(() => {
+    if (clientId && activeTab === 'by-country') loadCountries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientId, rangeParams, activeTab]);
+
+  function downloadCountry(format: 'csv' | 'xls' | 'pdf'): void {
+    if (!clientId) return;
+    setCountryExporting(format);
+    const p = new URLSearchParams(rangeParams);
+    if (cf.search) p.set('search', cf.search);
+    if (cf.status) p.set('status', cf.status);
+    if (cf.sender) p.set('sender', cf.sender);
+    if (cf.destination) p.set('destination', cf.destination);
+    p.set('format', format);
+    const token = localStorage.getItem('xtel_token');
+    const url = `${API_BASE}/reports/client/${clientId}/by-country/export?${p}`;
+    if (format === 'pdf') {
+      fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+        .then((r) => { if (!r.ok) throw new Error('export failed'); return r.blob(); })
+        .then((b) => {
+          const blobUrl = URL.createObjectURL(b);
+          window.open(blobUrl, '_blank');
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        })
+        .catch((e) => setCountryErr((e as Error).message))
+        .finally(() => setCountryExporting(''));
+      return;
+    }
+    fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} })
+      .then((r) => { if (!r.ok) throw new Error('export failed'); return r.blob(); })
+      .then((b) => {
+        const obj = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        const safe = (selected?.name ?? 'client').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+        a.href = obj;
+        a.download = `${safe}_Country_Report.${format}`;
+        a.click();
+        URL.revokeObjectURL(obj);
+      })
+      .catch((e) => setCountryErr((e as Error).message))
+      .finally(() => setCountryExporting(''));
+  }
 
   function download(format: 'csv' | 'xls' | 'pdf'): void {
     if (!clientId) return;
@@ -291,11 +362,104 @@ export default function ClientReports(): JSX.Element {
             </span>
           </div>
 
+          {/* tab switcher */}
+          <div className="flex gap-1.5">
+            {([
+              ['overview', 'Overview'],
+              ['by-country', 'By Country'],
+            ] as const).map(([v, l]) => (
+              <button
+                key={v}
+                onClick={() => setActiveTab(v)}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${activeTab === v ? 'border-brand/50 bg-brand/10 text-emerald-300' : 'border-line text-muted hover:text-white'}`}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+
           {err && (
             <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{err}</div>
           )}
+          {countryErr && activeTab === 'by-country' && (
+            <div className="text-sm text-red-300 bg-danger/10 border border-danger/25 rounded-lg px-3 py-2">{countryErr}</div>
+          )}
 
-          {/* summary cards */}
+          {/* ── Country breakdown tab ── */}
+          {activeTab === 'by-country' && (
+            <div className="space-y-3">
+              <div className="card card-pad flex flex-wrap gap-2 items-end">
+                <div className="w-48">
+                  <label className="label">Search country / ISO</label>
+                  <input className="input" placeholder="India, IN…" value={cf.search}
+                    onChange={(e) => setCf({ ...cf, search: e.target.value })}
+                    onKeyDown={(e) => e.key === 'Enter' && loadCountries()} />
+                </div>
+                <div className="w-36">
+                  <label className="label">Status</label>
+                  <select className="input" value={cf.status} onChange={(e) => setCf({ ...cf, status: e.target.value })}>
+                    <option value="">All</option>
+                    {['delivered', 'failed', 'submitted', 'undelivered', 'expired', 'rejected'].map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="w-36">
+                  <label className="label">Sender</label>
+                  <input className="input font-mono" placeholder="SENDER" value={cf.sender}
+                    onChange={(e) => setCf({ ...cf, sender: e.target.value })}
+                    onKeyDown={(e) => e.key === 'Enter' && loadCountries()} />
+                </div>
+                <div className="w-44">
+                  <label className="label">Destination</label>
+                  <input className="input font-mono" placeholder="9198…" value={cf.destination}
+                    onChange={(e) => setCf({ ...cf, destination: e.target.value })}
+                    onKeyDown={(e) => e.key === 'Enter' && loadCountries()} />
+                </div>
+                <div className="w-36">
+                  <label className="label">Sort</label>
+                  <select className="input" value={cf.sort} onChange={(e) => setCf({ ...cf, sort: e.target.value })}>
+                    <option value="">Amount ↓</option>
+                    <option value="total">SMS ↓</option>
+                    <option value="failed">Failed ↓</option>
+                  </select>
+                </div>
+                <button className="btn" onClick={loadCountries} disabled={countryLoading}>{countryLoading ? 'Loading…' : 'Search'}</button>
+                {(cf.search || cf.status || cf.sender || cf.destination || cf.sort) && (
+                  <button className="btn-ghost" onClick={() => setCf({ search: '', status: '', sender: '', destination: '', sort: '' })}>Clear</button>
+                )}
+                <span className="ml-auto flex gap-1.5">
+                  <button className="btn-ghost !py-1.5 !text-xs" disabled={!!countryExporting} onClick={() => downloadCountry('csv')}>{countryExporting === 'csv' ? '…' : '⬇ CSV'}</button>
+                  <button className="btn-ghost !py-1.5 !text-xs" disabled={!!countryExporting} onClick={() => downloadCountry('xls')}>{countryExporting === 'xls' ? '…' : '⬇ Excel'}</button>
+                  <button className="btn !py-1.5 !text-xs" disabled={!!countryExporting} onClick={() => downloadCountry('pdf')}>{countryExporting === 'pdf' ? '…' : '⬇ PDF'}</button>
+                </span>
+              </div>
+              <DataTable
+                keyOf={(r) => `${r.country_id ?? 'unknown'}-${r.country_name}`}
+                rows={countries}
+                empty={countryLoading ? 'Loading…' : 'No billable traffic in this range.'}
+                columns={[
+                  { key: 'country_name', label: 'Country', render: (r) => <span><span className="font-semibold">{r.country_name}</span>{r.iso_code ? <span className="ml-1.5 font-mono text-[11px] bg-panel2 border border-line rounded px-1 py-0.5">{r.iso_code}</span> : null}</span> },
+                  { key: 'total_sms', label: 'SMS', right: true, render: (r) => <span className="tabular-nums font-semibold">{r.total_sms.toLocaleString()}</span> },
+                  { key: 'successful', label: 'Delivered', right: true, render: (r) => <span className="tabular-nums text-emerald-300">{r.successful.toLocaleString()}</span> },
+                  { key: 'failed', label: 'Failed', right: true, render: (r) => <span className="tabular-nums text-red-300">{r.failed.toLocaleString()}</span> },
+                  { key: 'segments', label: 'Segments', right: true, render: (r) => <span className="tabular-nums text-muted">{r.segments.toLocaleString()}</span> },
+                  { key: 'rate', label: 'Rate', right: true, render: (r) => <span className="tabular-nums">{r.rate.toFixed(4)}</span> },
+                  { key: 'amount', label: 'Amount', right: true, render: (r) => <span className="tabular-nums font-semibold">{fmtMoney(r.amount, info?.currency)}</span> },
+                  { key: 'percentage', label: '%', right: true, render: (r) => <span className="tabular-nums text-muted">{r.percentage.toFixed(1)}%</span> },
+                ]}
+              />
+              {!!countries.length && (
+                <div className="card card-pad flex flex-wrap gap-x-6 gap-y-1 text-xs">
+                  <span>Total SMS: <b className="tabular-nums">{countries.reduce((s, r) => s + r.total_sms, 0).toLocaleString()}</b></span>
+                  <span>Segments: <b className="tabular-nums">{countries.reduce((s, r) => s + r.segments, 0).toLocaleString()}</b></span>
+                  <span>Amount: <b className="tabular-nums text-emerald-300">{fmtMoney(countries.reduce((s, r) => s + r.amount, 0), info?.currency)}</b></span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'overview' && (
+            <>
+              {/* summary cards */}
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
             <StatCard label="Total traffic" value={(summary?.total ?? 0).toLocaleString()} />
             <StatCard label="Delivered" value={(summary?.delivered ?? 0).toLocaleString()} tone="brand" />
@@ -463,6 +627,8 @@ export default function ClientReports(): JSX.Element {
               </div>
             )}
           </div>
+            </>
+          )}
         </>
       )}
     </div>

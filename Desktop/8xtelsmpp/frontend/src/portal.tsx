@@ -146,6 +146,7 @@ export function PortalLayout(): JSX.Element {
     { to: '/portal/send', label: 'Send SMS', end: false },
     { to: '/portal/coverage', label: 'Coverage', end: false },
     { to: '/portal/reports', label: 'Reports', end: false },
+    { to: '/portal/invoices', label: 'Invoices', end: false },
     { to: '/portal/api', label: 'API', end: false },
     { to: '/portal/wallet', label: 'Wallet', end: false },
   ];
