@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, token, fmtMoney } from '../api';
+import { api, token, fmtMoney, API_BASE } from '../api';
 import { PageHeader, DataTable, StatusBadge, Modal, Icon } from '../components';
 
 interface Invoice {
@@ -18,22 +18,33 @@ interface DetailState {
 
 async function downloadPdf(id: string, invoiceNumber: string): Promise<void> {
   const t = token();
-  const res = await fetch(`/invoices/${id}/pdf`, { headers: t ? { authorization: `Bearer ${t}` } : {} });
+  const base = (API_BASE || '').replace(/\/$/, '');
+  const url = `${base}/invoices/${id}/pdf`;
+  // Always request PDF (not HTML fallback) — backend respects ?format=pdf
+  const res = await fetch(url, { headers: t ? { authorization: `Bearer ${t}` } : {} });
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
     throw new Error((j as { error?: string }).error ?? `PDF failed ${res.status}`);
   }
   const ct = res.headers.get('content-type') ?? '';
+  const isPdf = ct.includes('pdf');
+  // Validate: if we expected PDF but got HTML/JSON, the edge proxy routed wrong
+  if (!isPdf) {
+    const text = await res.clone().text().catch(() => '');
+    if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+      throw new Error('PDF route returned HTML — check nginx /api proxy (expected /api/invoices/:id/pdf)');
+    }
+  }
   const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  const blobUrl = URL.createObjectURL(new Blob([blob], { type: isPdf ? 'application/pdf' : 'text/html' }));
+  if (isPdf) window.open(blobUrl, '_blank');
   const a = document.createElement('a');
-  a.href = url;
-  a.download = ct.includes('pdf') ? `Invoice_${invoiceNumber}.pdf` : `Invoice_${invoiceNumber}.html`;
-  // open in new tab if pdf inline viewer preferred
-  window.open(url, '_blank');
-  // trigger download as well
+  a.href = blobUrl;
+  a.download = isPdf ? `Invoice_${invoiceNumber}.pdf` : `Invoice_${invoiceNumber}.html`;
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 
 export default function Invoices(): JSX.Element {
