@@ -395,14 +395,46 @@ async function pollOne(
     }
   }
   if (!hit) {
-    const scored = pool2
-      .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
-      .sort((a, b) => b.t - a.t);
-    hit = scored.length === 1
-      ? scored[0]!.e
-      : (scored.find((s) => s.t >= 0)?.e
-        ?? pool2.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id)
-        ?? scored[0]!.e);
+    // msgid vendors (LoopMax/SamparkHub) REUSE one msgid across sends/numbers —
+    // "latest wins" is wrong here (picks a stale FAILED from an older send).
+    // Pick the entry whose delivery time is CLOSEST to this message's submit.
+    if (!reportMode && !Number.isNaN(msgCreated) && pool2.length > 1) {
+      let best = Infinity;
+      for (const e of pool2) {
+        const t = parseVendorTime(pickField(e, TIME_FIELDS));
+        if (t < 0) continue;
+        const gap = Math.abs(t - msgCreated);
+        if (gap < best) { best = gap; hit = e; }
+      }
+      // Tight window: a reused msgid whose closest row is hours away is not ours.
+      if (hit && best > 30 * 60 * 1000) hit = undefined;
+      if (hit) {
+        // leave hit set; fallback below skipped
+      } else {
+        // No in-window hit — do not settle stale rows; re-poll next round.
+        await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+        return;
+      }
+    }
+    if (!hit) {
+      const scored = pool2
+        .map((e) => ({ e, t: parseVendorTime(pickField(e, TIME_FIELDS)) }))
+        .sort((a, b) => b.t - a.t);
+      hit = scored.length === 1
+        ? scored[0]!.e
+        : (scored.find((s) => s.t >= 0)?.e
+          ?? pool2.find((e) => String(pickField(e, ['id', 'msgid', 'message_id', 'msg_id']) ?? '') === msg.vendor_msg_id)
+          ?? scored[0]!.e);
+      // Final safety: even single-hit msgid reuse — if its time is far from our
+      // submit, don't settle on a stale sibling's row.
+      if (!reportMode && hit && !Number.isNaN(msgCreated)) {
+        const ht = parseVendorTime(pickField(hit, TIME_FIELDS));
+        if (ht >= 0 && Math.abs(ht - msgCreated) > 30 * 60 * 1000) {
+          await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
+          return;
+        }
+      }
+    }
   }
 
   if (!hit) return;

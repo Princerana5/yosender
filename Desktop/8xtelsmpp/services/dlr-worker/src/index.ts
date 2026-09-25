@@ -82,14 +82,22 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     return;
   }
 
-  // Duplicate / late DLR after final state → keep raw, don't regress (§37)
+  // Duplicate / late DLR after final state → keep raw, don't regress (§37).
+  // Exception: a late DELIVRD for a reused msgid may arrive AFTER the poller
+  // incorrectly settled on a stale sibling's FAILED row (LoopMax reuses msgid
+  // 23731). Allow a delivered upgrade to correct that false FAILED — but never
+  // let a later non-delivered overwrite a confirmed delivered.
   if (FINAL.has(msg.status)) {
-    await pool.query(
-      `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'dlr',$3)
-       ON CONFLICT DO NOTHING`,
-      [msg.id, vendor_id, `duplicate ${vendorStatus} ignored (final=${msg.status})`],
-    ).catch(() => undefined);
-    return;
+    if (msg.status !== 'delivered' && vendorStatus === 'delivered') {
+      // proceed to upgrade failed→delivered below
+    } else {
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'dlr',$3)
+         ON CONFLICT DO NOTHING`,
+        [msg.id, vendor_id, `duplicate ${vendorStatus} ignored (final=${msg.status})`],
+      ).catch(() => undefined);
+      return;
+    }
   }
 
   // Client-visible status always mirrors the vendor outcome (§19: raw NEVER
