@@ -240,6 +240,8 @@ router.get('/:id', async (req, res) => {
   const routes = await query(
     `SELECT r.id, r.name, r.strategy, r.status, r.prefix, r.sender_id,
             r.price_per_segment, COALESCE(r.price_currency,'EUR') AS price_currency,
+            rcr.price_per_segment AS rcr_price, COALESCE(rcr.currency,'EUR') AS rcr_currency,
+            COALESCE(rcr.price_per_segment, r.price_per_segment) AS effective_price_per_segment,
             r.min_margin_pct,
             (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id) AS member_count,
             (SELECT count(*) FROM route_clients rc WHERE rc.route_id=r.id AND rc.client_id=$1::uuid) AS is_member,
@@ -248,6 +250,7 @@ router.get('/:id', async (req, res) => {
             (SELECT min(vr.cost) FROM vendor_rates vr JOIN route_vendors rv2 ON rv2.vendor_id=vr.vendor_id
              WHERE rv2.route_id=r.id AND (vr.country_id IS NULL OR vr.country_id=r.country_id)) AS min_vendor_cost
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
+     LEFT JOIN route_client_rates rcr ON rcr.route_id=r.id AND rcr.client_id=$1::uuid
      WHERE r.status='active' AND r.channel='sms'
        AND (
          NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)

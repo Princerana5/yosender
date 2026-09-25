@@ -30,7 +30,7 @@ export interface ClientRateList {
 // Scoped strictly to this client: member routes + global fallback, minus
 // per-client exclusions, sms only, active status. Mirrors the routing
 // engine's candidate set (same predicates as clients.ts detail + portal.ts).
-// Price priority per route: route.price_per_segment → client_rates longest
+// Price priority per route: route_client_rates → route.price_per_segment → client_rates longest
 // prefix match → skipped (no price = not billable = not listed).
 export async function getClientActiveRates(clientId: string, validFrom: Date = new Date()): Promise<ClientRateList> {
   const client = await queryOne<{ name: string; company_name: string | null; system_id: string; currency: string; pricing_profile_id: string | null }>(
@@ -39,14 +39,17 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
   );
   if (!client) throw new Error('client not found');
   const routes = await query<{
-    name: string; prefix: string | null; price_per_segment: string | null;
+    id: string; name: string; prefix: string | null; price_per_segment: string | null;
     price_currency: string | null; country_name: string | null; iso_code: string | null;
-    calling_code: string | null;
+    calling_code: string | null; rcr_price: string | null; rcr_currency: string | null;
   }>(
-    `SELECT r.name, r.prefix, r.price_per_segment,
+    `SELECT r.id, r.name, r.prefix, r.price_per_segment,
             COALESCE(r.price_currency,'EUR') AS price_currency,
-            co.name AS country_name, co.iso_code, co.calling_code
+            co.name AS country_name, co.iso_code, co.calling_code,
+            rcr.price_per_segment AS rcr_price,
+            rcr.currency AS rcr_currency
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
+     LEFT JOIN route_client_rates rcr ON rcr.route_id=r.id AND rcr.client_id=$1
      WHERE r.status='active' AND r.channel='sms'
        AND (
          NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)
@@ -85,8 +88,9 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
   const rows: ClientRateRow[] = [];
   const time = fmtDate(validFrom);
   for (const r of routes) {
-    let price: number | null = r.price_per_segment !== null ? Number(r.price_per_segment) : null;
-    let currency = r.price_currency ?? 'EUR';
+    // Priority: per-client override (038) → route default → cardRates. EUR-only.
+    let price: number | null = r.rcr_price !== null && r.rcr_price !== undefined ? Number(r.rcr_price) : (r.price_per_segment !== null ? Number(r.price_per_segment) : null);
+    let currency = r.rcr_price !== null && r.rcr_price !== undefined ? (r.rcr_currency ?? 'EUR') : (r.price_currency ?? 'EUR');
     if (price === null && r.prefix) {
       const hit = cardRates.find((c) => c.prefix && r.prefix!.startsWith(c.prefix));
       if (hit) { price = Number(hit.price); currency = client.currency; }

@@ -68,12 +68,29 @@ export function RouteWizard({ open, onClose, onDone }: {
   const [price, setPrice] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [sendRn, setSendRn] = useState(false);
+  const [rnValidFrom, setRnValidFrom] = useState(() => {
+    const d = new Date(Date.now() + 3600_000);
+    const pad = (n:number)=>String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  const [rnCc, setRnCc] = useState('');
+  const [rnBcc, setRnBcc] = useState('');
+  const [rnIncludeAttachment, setRnIncludeAttachment] = useState(true);
+  const [rnPreview, setRnPreview] = useState<null | { to:string; cc:string[]; bcc:string[]; subject:string; html:string; attachment:{filename:string; route_count:number; countries:number; networks:number; empty:boolean; error?:string} | null }>(null);
+  const [rnBusy, setRnBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setStep(1); setVendor(null); setRoute(null); setClient(null); setPrice(''); setErr('');
     setNewRoute({ name: '', country_id: '', prefix: '', sender_id: '', strategy: 'priority', status: 'active', tps: '' });
     setVendorQ(''); setRouteQ(''); setClientQ('');
+    setSendRn(false); setRnCc(''); setRnBcc(''); setRnIncludeAttachment(true); setRnPreview(null); setRnBusy(false);
+    {
+      const d = new Date(Date.now() + 3600_000);
+      const pad = (n:number)=>String(n).padStart(2,'0');
+      setRnValidFrom(`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`);
+    }
     api<{ vendors: VendorOpt[] }>('/vendors').then((r) => setVendors(r.vendors)).catch(() => undefined);
     api<{ countries: CountryOpt[] }>('/system/countries').then((r) => setCountries(r.countries)).catch(() => undefined);
     api<{ clients: ClientOpt[] }>('/clients').then((r) => setClients(r.clients)).catch(() => undefined);
@@ -165,6 +182,37 @@ export function RouteWizard({ open, onClose, onDone }: {
             throw e;
           }
         } else throw e;
+      }
+      if (sendRn) {
+        try {
+          setRnBusy(true);
+          // Build rates for the notification: try full active-rate sample first
+          let rates: unknown[] = [];
+          try {
+            const preview = await api<{ sample: Array<{ country:string; operator:string; mcc:string; mnc:string; rate:number; currency:string }>; empty:boolean }>(`/rate-notifications/attachment-preview/${client.id}?account_id=${encodeURIComponent(client.system_id)}&system_id=${encodeURIComponent(client.system_id)}`);
+            if (!preview.empty && preview.sample?.length) {
+              rates = preview.sample.map((r) => ({
+                country: r.country, country_code: null, network_name: r.operator, mcc: r.mcc || '000', mnc: r.mnc || 'ALL', currency: r.currency || 'EUR', rate: Number(r.rate), billing_mode: 'on_submission', delivery_rate: null,
+              }));
+            }
+          } catch {}
+          if (!rates.length) {
+            const routeName = route === 'create-new' ? newRoute.name.trim() : (route as RouteOpt | null)?.name ?? 'Route';
+            const countryLabel = (route !== 'create-new' ? (route as RouteOpt | null)?.country_name : null) ?? countries.find((c) => c.id === newRoute.country_id)?.name ?? 'All Destinations';
+            rates = [{ country: countryLabel, country_code: null, network_name: `${routeName} - Default`, mcc: '000', mnc: 'ALL', currency: 'EUR', rate: Number(price), billing_mode: 'on_submission', delivery_rate: null }];
+          }
+          const ccList = rnCc.split(/[;,]/).map((s)=>s.trim().toLowerCase()).filter(Boolean);
+          const bccList = rnBcc.split(/[;,]/).map((s)=>s.trim().toLowerCase()).filter(Boolean);
+          const vf = new Date(rnValidFrom);
+          await api('/rate-notifications', {
+            method: 'POST',
+            body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }),
+          });
+        } catch (e2) {
+          setErr((e2 as Error).message);
+          setBusy(false); setRnBusy(false);
+          return;
+        } finally { setRnBusy(false); }
       }
       onDone();
       onClose();
@@ -371,6 +419,51 @@ export function RouteWizard({ open, onClose, onDone }: {
               <div><span className="text-muted">Rate:</span> <b className="text-emerald-300">€{Number(price || 0).toFixed(4)} / seg</b> <span className="text-xs text-muted">EUR · per-client route override</span></div>
               <div className="text-[11px] text-muted pt-1 border-t border-line/50 mt-2">Priority: per-client route rate → route default → country rate card → 0. This rate wins.</div>
             </div>
+            <label className="flex items-start gap-2 rounded-lg border border-brand/30 bg-brand/5 p-3 cursor-pointer">
+              <input type="checkbox" checked={sendRn} onChange={(e) => setSendRn(e.target.checked)} className="mt-0.5 accent-emerald-500" />
+              <span className="text-sm"><span className="font-semibold">You have set route for this client — send rate notification to this client now?</span><span className="block text-xs text-muted">Sends an RN email exactly like Rate Notifications (same mailer, same Excel attachment when checked). Unchecked = save rate only.</span></span>
+            </label>
+            {sendRn && (
+              <div className="rounded-lg border border-line/60 p-3 space-y-2 bg-ink/30">
+                <div>
+                  <label className="label">Valid From (GMT)</label>
+                  <input type="datetime-local" className="input max-w-[260px]" value={rnValidFrom} onChange={(e) => setRnValidFrom(e.target.value)} />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="label">CC (comma-separated)</label><input className="input font-mono !text-xs" placeholder="cc@example.com, ops@example.com" value={rnCc} onChange={(e) => setRnCc(e.target.value)} /></div>
+                  <div><label className="label">BCC (comma-separated)</label><input className="input font-mono !text-xs" placeholder="audit@example.com" value={rnBcc} onChange={(e) => setRnBcc(e.target.value)} /></div>
+                </div>
+                <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={rnIncludeAttachment} onChange={(e) => setRnIncludeAttachment(e.target.checked)} /> Attach complete client rate Excel</label>
+                <div className="flex gap-2 items-center flex-wrap">
+                  <button className="btn-ghost !text-xs !py-1" disabled={rnBusy} onClick={async () => {
+                    setRnBusy(true); setErr('');
+                    try {
+                      const ccList = rnCc.split(/[;,]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+                      const bccList = rnBcc.split(/[;,]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+                      let rates: unknown[] = [];
+                      try {
+                        const preview = await api<{ sample: Array<{ country: string; operator: string; mcc: string; mnc: string; rate: number; currency: string }>; empty: boolean }>(`/rate-notifications/attachment-preview/${client.id}?account_id=${encodeURIComponent(client.system_id)}&system_id=${encodeURIComponent(client.system_id)}`);
+                        if (!preview.empty && preview.sample?.length) {
+                          rates = preview.sample.slice(0, 1).map((r) => ({ country: r.country, country_code: null, network_name: r.operator, mcc: r.mcc || '000', mnc: r.mnc || 'ALL', currency: r.currency || 'EUR', rate: Number(r.rate), billing_mode: 'on_submission', delivery_rate: null }));
+                        }
+                      } catch { /* fallback below */ }
+                      if (!rates.length) {
+                        const routeName = route === 'create-new' ? newRoute.name.trim() : (route as RouteOpt | null)?.name ?? 'Route';
+                        const countryLabel = (route !== 'create-new' ? (route as RouteOpt | null)?.country_name : null) ?? countries.find((c) => c.id === newRoute.country_id)?.name ?? 'All Destinations';
+                        rates = [{ country: countryLabel, country_code: null, network_name: `${routeName} - Default`, mcc: '000', mnc: 'ALL', currency: 'EUR', rate: Number(price), billing_mode: 'on_submission', delivery_rate: null }];
+                      }
+                      const vf = new Date(rnValidFrom);
+                      const pv = await api<{ to: string; cc: string[]; bcc: string[]; subject: string; html: string; attachment: { filename: string; route_count: number; countries: number; networks: number; empty: boolean; error?: string } | null }>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }) });
+                      setRnPreview(pv);
+                    } catch (e) { setErr((e as Error).message); }
+                    setRnBusy(false);
+                  }}>{rnBusy ? 'Working…' : 'Preview email'}</button>
+                  {rnPreview && <span className="text-xs text-muted">To: <span className="mono">{rnPreview.to}</span> {rnPreview.attachment && !rnPreview.attachment.empty ? `· ${rnPreview.attachment.filename} (${rnPreview.attachment.route_count} routes)` : ''}</span>}
+                </div>
+                {rnPreview?.html && <div className="mt-2"><div className="label">Email preview</div><iframe title="rn-preview" className="w-full rounded-lg border border-line bg-white" style={{ height: 360 }} srcDoc={rnPreview.html} /></div>}
+                {rnPreview?.attachment?.empty && rnIncludeAttachment && <div className="text-xs text-amber-300">No active rates — attachment will be omitted unless you uncheck the Excel box.</div>}
+              </div>
+            )}
           </div>
         )}
 

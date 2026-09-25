@@ -66,6 +66,7 @@ export default function ClientDetail(): JSX.Element {
     id: string; name: string; strategy: string; status: string;
     prefix: string | null; sender_id: string | null;
     price_per_segment: string | null; price_currency: string;
+    rcr_price: string | null; rcr_currency: string | null; effective_price_per_segment: string | null;
     min_margin_pct: string | null; min_vendor_cost: string | null;
     member_count: string; // 0 = global, 1 = only me, N = shared
     is_member: string; // 1 = I'm an explicit member
@@ -550,16 +551,20 @@ export default function ClientDetail(): JSX.Element {
             {
               key: 'price', label: 'Price / seg', right: true,
               render: (r) => {
+                const eff = (r.effective_price_per_segment ?? r.price_per_segment) as string | null;
                 const floor = marginFloor(r);
-                const below = r.price_per_segment !== null && r.price_per_segment !== undefined
-                  && floor !== null && Number(r.price_per_segment) < floor;
-                return r.price_per_segment !== null && r.price_per_segment !== undefined ? (
+                const effNum = eff !== null && eff !== undefined ? Number(eff) : null;
+                const below = effNum !== null && floor !== null && effNum < floor;
+                return eff !== null && eff !== undefined ? (
                   <span>
                     <span className={`tabular-nums font-semibold ${below ? 'text-red-300' : 'text-emerald-300'}`}>
-                      {Number(r.price_per_segment).toFixed(4)}
+                      {Number(eff).toFixed(4)}
                     </span>{' '}
-                    <span className="text-[10px] text-muted">{r.price_currency}</span>
-                    <span className="block text-[10px] text-muted font-normal">via route</span>
+                    <span className="text-[10px] text-muted">{(r.rcr_currency ?? r.price_currency) as string}</span>
+                    <span className="block text-[10px] text-muted font-normal">{r.rcr_price !== null && r.rcr_price !== undefined ? 'per-client override' : 'via route'}</span>
+                    {r.rcr_price !== null && r.rcr_price !== undefined && r.price_per_segment !== null && String(r.rcr_price) !== String(r.price_per_segment) && (
+                      <span className="block text-[10px] text-muted line-through">default {Number(r.price_per_segment).toFixed(4)}</span>
+                    )}
                     {below && (
                       <span className="block text-[10px] font-bold text-red-300" title={`Floor ${floor?.toFixed(4)} = cost ${Number(r.min_vendor_cost).toFixed(4)} + ${Number(r.min_margin_pct).toFixed(1)}%`}>
                         ⚠ below margin
