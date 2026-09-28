@@ -81,6 +81,9 @@ function toStat(raw: string): string {
   // DLT-style free-text failures (e.g. "Template Not Matched") — vendors that
   // reject on template/content grounds instead of a code.
   if (/TEMPLATE|MISMATCH|NOT APPROVED|NOT WHITELIST|BLACKLIST|BLOCKED|BARRED|INVALID/i.test(raw)) return 'FAILED';
+  // Nukelite GSM (INDIA SIM): per-number status "sent" means delivered (verified live 2026-09-28).
+  // Globally "sent" is ambiguous, so handle only via resolvePollStat's nukelite branch;
+  // here keep generic SENT as ACCEPTD for other vendors.
   if (s.startsWith('ACCEPTD') || s.startsWith('ENROUTE') || s === 'SENT' || s === 'SUBMITTED' || s === 'SUBMITED' || s === 'PENDING' || s === 'P') return 'ACCEPTD';
   return 'UNKNOWN';
 }
@@ -140,10 +143,14 @@ function pickField(obj: Record<string, unknown>, names: string[]): unknown {
   return undefined;
 }
 
+/** Nukelite GSM (INDIA SIM): GET /api/ext/gsm/campaigns/:id/report
+    returns {"campaign":{...,"status":"completed"},"numbers":[{"mobile":"9876543210","status":"sent"}]}
+    with its real auth on X-API-Key. */
+
 /** Normalize the many vendor envelope shapes into a flat entry list.
     Handles: [...] | {data:[...]} | {data:{...}} | {messages:[...]} |
-    {dlr:[...]} | {result/report/reports:{...}} | {records:[...]} (HSP
-    datewise: [{"responseCode":"success","records":[...]}]) |
+    {dlr:[...]} | {result/report/reports:{...}} | {records:[...]} | {numbers:[...]} (Nukelite GSM) |
+    (HSP datewise: [{"responseCode":"success","records":[...]}]) |
     single {...} objects. */
 function extractEntries(parsed: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(parsed)) {
@@ -164,6 +171,7 @@ function extractEntries(parsed: unknown): Array<Record<string, unknown>> {
   }
   if (parsed !== null && typeof parsed === 'object') {
     const o = parsed as Record<string, unknown>;
+    if (Array.isArray(o.numbers)) return o.numbers as Array<Record<string, unknown>>;
     for (const key of ['data', 'messages', 'message', 'dlr', 'dlrs', 'result', 'report', 'reports', 'records']) {
       const v = o[key];
       if (Array.isArray(v)) return v as Array<Record<string, unknown>>;
@@ -232,12 +240,16 @@ const FORTIUS_DELIVERED_CODES = new Set(['3']);
     - Explicit delivered words (+ timestamp or not) → DELIVRD.
     - Fortius "3" → DELIVRD (vendor-confirmed delivery code).
     - Fortius "4" → FAILED (vendor-confirmed failure code).
+    - Nukelite GSM "sent" → DELIVRD when isNukelite=true (verified live 2026-09-28).
     - Other bare numerics / unrecognized → ACCEPTD when a delivery timestamp
       is present (in-flight, keep polling — the stale guard in pollOne fails
       them after N rounds with no terminal state), UNKNOWN otherwise.
       NEVER DELIVRD from any other numeric: Fortius populates delvd_time on
       failed rows too, so the timestamp alone proves nothing. */
-export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
+export function resolvePollStat(statusRaw: string, timeRaw: unknown, isNukelite = false): string {
+  // Nukelite GSM: their per-number "sent" is terminal+delivered (no DLR URL, no callback)
+  if (isNukelite && statusRaw.trim().toLowerCase() === 'sent') return 'DELIVRD';
+  if (isNukelite && statusRaw.trim().toLowerCase() === 'pending') return 'ACCEPTD';
   const stat = toStat(statusRaw);
   if (stat === 'DELIVRD') return 'DELIVRD';
   if (stat !== 'ACCEPTD' && stat !== 'UNKNOWN') return stat;
@@ -248,10 +260,25 @@ export function resolvePollStat(statusRaw: string, timeRaw: unknown): string {
   return stat;
 }
 
+function isNukeliteTpl(tpl: string): boolean { return tpl.includes('nukelite.co.in'); }
+
+async function headersForVendor(vendorId: string): Promise<Record<string, string>> {
+  try {
+    const row = await query<{ headers_enc: string | null }>(
+      `SELECT headers_enc FROM vendor_http_configs WHERE vendor_id=$1`, [vendorId],
+    ).then((r) => r[0]).catch(() => null);
+    const enc = (row as { headers_enc: string | null } | null)?.headers_enc;
+    if (!enc) return {};
+    const { decryptSecret } = await import('./connector.js');
+    return JSON.parse(decryptSecret(enc)) as Record<string, string>;
+  } catch { return {}; }
+}
+
 async function pollOne(
   vendorId: string, tpl: string, msg: PendingMsg,
 ): Promise<void> {
   const pool = getPool();
+  const nukelite = isNukeliteTpl(tpl);
 
   // Report mode (HSP): match by destination in the datewise report — the
   // synthetic http-* id is irrelevant here, skip the msgid gate below.
@@ -299,7 +326,8 @@ async function pollOne(
   const timer = setTimeout(() => ctrl.abort(), 15_000);
   let res: Response;
   try {
-    res = await fetch(url, { signal: ctrl.signal });
+    const headers = nukelite ? await headersForVendor(vendorId) : {};
+    res = await fetch(url, { signal: ctrl.signal, ...(Object.keys(headers).length ? { headers } : {}) });
   } catch (e) {
     await pool.query('UPDATE messages SET last_dlr_poll_at=now() WHERE id=$1', [msg.id]);
     console.warn(`[dlr-poll] ${vendorId} ${msg.id.slice(0, 8)} unreachable: ${(e as Error).message}`);
@@ -549,7 +577,7 @@ async function pollOne(
   // failed rows too, so it proves nothing. internal_id + destination pin the
   // DLR to THIS message — vendors reusing msgids must not credit a sibling
   // row (dlr-worker prefers the direct hit over msgid lookup).
-  const stat = resolvePollStat(statusRaw, timeRaw);
+  const stat = resolvePollStat(statusRaw, timeRaw, nukelite);
   if (stat === 'DELIVRD') {
     // Stamp the claim BEFORE settling: one report row = one message. A later
     // sibling matching the same row sees the stamp above and backs off.

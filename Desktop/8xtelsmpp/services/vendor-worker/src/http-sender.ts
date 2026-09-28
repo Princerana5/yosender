@@ -197,8 +197,15 @@ export class HttpVendorSender {
     if (!webhookBase()) {
       console.warn(`[http-sender] ${this.vendorName}: HTTP_DLR_BASE/SMPP_PUBLIC_HOST unset — {dlr_url} is empty, vendor cannot push realtime DLRs (polling only)`);
     }
+    // Nukelite GSM (INDIA SIM) expects numbers WITHOUT 91 — strip it when
+    // the vendor name matches so the same internal destination (919876...)
+    // fans out correctly to both SMPP vendors (with 91) and this GSM vendor.
+    const isIndiaSim = this.vendorName.toLowerCase().replace(/[^a-z0-9]/g, '') === 'indiasim';
+    const toForVendor = isIndiaSim
+      ? opts.destination.replace(/\D/g, '').replace(/^91(?=\d{10}$)/, '')
+      : opts.destination;
     const vars: Record<string, string> = {
-      to: opts.destination,
+      to: toForVendor,
       from: applied.from,
       text: applied.text,
       msg_id: opts.internal_id,
