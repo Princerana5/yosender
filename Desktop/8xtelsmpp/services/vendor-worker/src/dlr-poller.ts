@@ -213,10 +213,10 @@ const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at'
 /** Stale-numeric guard: a bare numeric that never advances to a terminal
     state (Fortius "2" stuck while the vendor panel already shows FAILED)
     fails after this many consecutive polls instead of sitting `submitted`
-    forever. Polls land ~1–2 min apart in practice, so 6 rounds ≈ 10 min.
-    Tracked in messages.error_code as `poll:<code>#<n>` so the count
-    survives restarts. */
-const STALE_ROUNDS = 24;
+    forever. Fortis wrong-template keeps status "2" forever while panel
+    is Failed — fail fast so UI matches panel (real DLR). 12 rounds at
+    5s poll ≈ 60s. Tracked in messages.error_code as `poll:<code>#<n>`. */
+const STALE_ROUNDS = 12;
 
 /** Words that count as an explicit DELIVERED from a poll entry.
     Anything else — including bare numerics ("1".."7") even WITH a delivery
