@@ -86,6 +86,15 @@ if (ALT_PORT && ALT_PORT !== PORT) {
 // receipts or stall another client's DLRs behind its backpressure.
 const dlrChains = new Map<string, Promise<void>>();
 
+// Per-client deliver_sm failure tracking — a hanging socket (e.g. tapsim
+// 2026-09-27: 13k receipts queued, none ACK'd, 10s timeout each) would
+// otherwise head-of-line block the single BullMQ wait list and starve
+// every other client's realtime DLRs (Televozmkt stuck 4h at queue tail).
+// After N consecutive timeouts we fast-fail that client's receipts so
+// the worker can drain the rest of the queue without waiting 10s each.
+const dlrFailStreak = new Map<string, number>();
+const dlrCircuitOpenUntil = new Map<string, number>();
+
 function sendClientDlr(
   dlr: DlrEvent & { client_id: string; source: string; destination: string },
 ): Promise<void> {
@@ -93,13 +102,18 @@ function sendClientDlr(
   const next = prev
     .catch(() => undefined)
     .then(async () => {
+      const openUntil = dlrCircuitOpenUntil.get(dlr.client_id) ?? 0;
+      if (Date.now() < openUntil) throw new Error('client DLR circuit open — skipping deliver_sm (still within cool-down)');
       const bound = pickDlrSession(dlr.client_id);
       if (!bound) {
         console.warn(`[smpp] no bound session for client ${dlr.client_id}, DLR ${dlr.internal_id} deferred`);
         throw new Error('client not bound'); // retry with backoff (§37)
       }
+      // Tighten timeout: a healthy SMPP client ACKs deliver_sm in <500ms.
+      // 4s is generous but prevents a dead socket from holding a worker slot
+      // for 10s * 50 concurrency = glacial drain (root cause of 14k backlog).
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('client deliver_sm timeout')), 10_000);
+        const timer = setTimeout(() => reject(new Error('client deliver_sm timeout')), 4_000);
         if (typeof timer.unref === 'function') timer.unref();
         try {
           bound.session.deliver_sm(
@@ -117,6 +131,7 @@ function sendClientDlr(
               if (resp && typeof resp.command_status === 'number' && resp.command_status !== 0) {
                 reject(new Error(`client deliver_sm_resp status=${resp.command_status}`));
               } else {
+                dlrFailStreak.set(dlr.client_id, 0);
                 resolve();
               }
             },
@@ -125,6 +140,18 @@ function sendClientDlr(
           clearTimeout(timer);
           reject(e);
         }
+      }).catch((e) => {
+        const msg = (e as Error).message;
+        if (msg.includes('deliver_sm timeout') || msg.includes('circuit open')) {
+          const n = (dlrFailStreak.get(dlr.client_id) ?? 0) + 1;
+          dlrFailStreak.set(dlr.client_id, n);
+          if (n >= 10) {
+            dlrCircuitOpenUntil.set(dlr.client_id, Date.now() + 90_000);
+            dlrFailStreak.set(dlr.client_id, 0);
+            console.warn(`[smpp] DLR circuit opened for ${dlr.client_id} after ${n} timeouts — pausing 90s (socket not ACKing)`);
+          }
+        }
+        throw e;
       });
     });
   dlrChains.set(dlr.client_id, next.catch(() => undefined));
