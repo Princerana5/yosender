@@ -709,8 +709,8 @@ async function tick(): Promise<void> {
   await expireSilentHttp();
 }
 
-// ── 60-min expiry (HTTP vendors only) ───────────────────────────────────────
-// A message still `submitted` 60 min after submit with an HTTP vendor assigned
+// ── 2-min expiry (HTTP vendors only) ────────────────────────────────────────
+// A message still `submitted` 2 min after submit with an HTTP vendor assigned
 // means the vendor never answered (no poll hit, no webhook). Fail it as
 // vendor:failed via a synthetic DLR so the FULL pipeline runs: status update,
 // hold refund, client callback fan-out. Late vendor DLRs after this are
@@ -722,7 +722,7 @@ async function expireSilentHttp(): Promise<void> {
      JOIN vendors v ON v.id = m.vendor_id
      WHERE m.status = 'submitted'
        AND COALESCE(v.protocol, 'smpp') = 'http'
-       AND m.submit_time < now() - interval '60 minutes'`,
+       AND m.submit_time < now() - interval '2 minutes'`,
   );
   for (const m of stale) {
     const now = dlrDate(new Date());
@@ -735,12 +735,12 @@ async function expireSilentHttp(): Promise<void> {
       destination: m.destination,
     });
     await getPool().query(
-      `UPDATE messages SET error_code='dlr-timeout:60m' WHERE id=$1
+      `UPDATE messages SET error_code='dlr-timeout:2m' WHERE id=$1
        AND (error_code IS NULL OR error_code='' OR error_code LIKE 'poll:%')`,
       [m.id],
     ).catch(() => undefined);
   }
-  if (stale.length) console.log(`[dlr-poll] expired ${stale.length} silent HTTP message(s) (>60m, no DLR)`);
+  if (stale.length) console.log(`[dlr-poll] expired ${stale.length} silent HTTP message(s) (>2m, no DLR)`);
 }
 
 /** Start the periodic poll loop. Safe to call once from vendor-worker main. */
