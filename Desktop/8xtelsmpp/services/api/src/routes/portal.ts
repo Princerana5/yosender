@@ -4,7 +4,7 @@ import crypto, { randomUUID } from 'node:crypto';
 import multer from 'multer';
 import { parse as parseCsv } from 'csv-parse/sync';
 import {
-  query, queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat,
+  query, queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat, submitQueueFor, getAnyQueue, trackBulkClient, getRedis,
   analyzeSms, normalizeToGsm, parseDestinations,
   type MessageJob,
 } from '@8xtel/core';
@@ -116,12 +116,13 @@ router.post('/send', async (req, res) => {
      VALUES ($1,$2,'sms',$3,$4,$5,$6,0,'submitted')`,
     [internalId, client.id, clientMsgId, source, destination, text],
   );
-  const job: MessageJob = {
+  const job = {
     internal_id: internalId, client_id: client.id, client_msg_id: clientMsgId,
     channel: 'sms', source, destination, country_id: null, text,
     data_coding: 0, route_id: null, attempts: 0,
-  };
-  await getQueue(QUEUES.submit).add('submit', job, { jobId: internalId });
+    _bulk: false,
+  } as MessageJob & { _bulk: boolean };
+  await getAnyQueue(submitQueueFor(job)).add('submit', job as never, { jobId: internalId });
   await incrStat('submitted');
   res.status(202).json({ id: internalId, status: 'submitted' });
 });
@@ -246,12 +247,15 @@ async function queueOne(
     [internalId, clientId, campaignId, clientMsgId, source, destination, text, dataCoding,
      op?.mnc ?? null, op?.mcc ?? null, op?.operator_name ?? null],
   );
-  const job: MessageJob = {
+  const job = {
     internal_id: internalId, client_id: clientId, client_msg_id: clientMsgId,
     channel: 'sms', source, destination, country_id: null, text,
     data_coding: dataCoding, route_id: null, attempts: 0,
-  };
-  await getQueue(QUEUES.submit).add('submit', job, { jobId: internalId });
+    _bulk: true,
+  } as MessageJob & { _bulk: boolean };
+  await getAnyQueue(submitQueueFor(job)).add('submit', job as never, { jobId: internalId });
+  await trackBulkClient(clientId);
+  getRedis().publish('bulk:hint', clientId).catch(()=>undefined);
   await incrStat('submitted');
   return { queued: true };
 }
@@ -922,6 +926,279 @@ router.post('/sender-requests', async (req, res) => {
     [cid(req), parsed.data.sender, parsed.data.country_id ?? null],
   );
   res.status(201).json({ request: rows[0] });
+});
+
+// ── RCS (portal) — separate channel, separate wallet/queues ─────────────
+// Auth is portal JWT (requirePortal above), not RCS API keys. Rich content
+// (text / rich_card / carousel) uses rcsContent schema; billing is via
+// rcs_wallets + rcs_billing_reservations + rcs_outbox → rcs-route.
+const rcsContentSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('text'), text: z.string().min(1).max(4096) }),
+  z.object({
+    type: z.literal('rich_card'), title: z.string().min(1).max(200),
+    description: z.string().max(2000).optional(),
+    media_url: z.string().url().max(2048).optional(),
+    suggestions: z.array(z.object({
+      type: z.enum(['reply', 'open_url', 'dial', 'view_location']),
+      text: z.string().min(1).max(80),
+      url: z.string().url().max(2048).optional(),
+      phone_number: z.string().max(32).optional(),
+    })).max(10).default([]),
+  }),
+  z.object({
+    type: z.literal('carousel'),
+    cards: z.array(z.object({
+      title: z.string().min(1).max(200), description: z.string().max(2000).optional(),
+      media_url: z.string().url().max(2048).optional(),
+      suggestions: z.array(z.object({
+        type: z.enum(['reply', 'open_url', 'dial', 'view_location']),
+        text: z.string().min(1).max(80),
+        url: z.string().url().max(2048).optional(),
+        phone_number: z.string().max(32).optional(),
+      })).max(10).default([]),
+    })).min(1).max(10),
+  }),
+]);
+
+function normalizeRcsDest(v: string): string | null {
+  const t = v.trim().replace(/[\s().-]/g, '');
+  if (!/^\+?[1-9]\d{6,14}$/.test(t)) return null;
+  return t.startsWith('+') ? t : `+${t}`;
+}
+
+router.get('/rcs/me', async (req, res) => {
+  const id = cid(req);
+  const me = await queryOne<{ rcs_enabled: boolean; balance: string; reserved: string; currency: string }>(
+    `SELECT COALESCE(c.rcs_enabled,false) AS rcs_enabled,
+            COALESCE(w.balance,0)::text AS balance, COALESCE(w.reserved,0)::text AS reserved,
+            COALESCE(w.currency,'USD') AS currency
+     FROM clients c LEFT JOIN rcs_wallets w ON w.client_id=c.id WHERE c.id=$1`, [id],
+  );
+  res.json({ rcs_enabled: me?.rcs_enabled ?? false, wallet: me ?? { balance: '0', reserved: '0', currency: 'USD' } });
+});
+
+router.get('/rcs/senders', async (req, res) => {
+  const rows = await query(
+    `SELECT s.sender, s.status, s.country_id, co.name AS country_name
+     FROM rcs_senders s LEFT JOIN countries co ON co.id=s.country_id
+     WHERE s.client_id=$1 ORDER BY s.sender`, [cid(req)],
+  );
+  res.json({ senders: rows });
+});
+
+router.post('/rcs/estimate', async (req, res) => {
+  const p = z.object({
+    content: rcsContentSchema, recipients: z.number().int().min(1).max(50000).optional(),
+    to: z.string().optional(),
+  }).safeParse(req.body);
+  if (!p.success) { res.status(400).json({ error: 'invalid payload', details: p.error.flatten() }); return; }
+  const count = p.data.recipients ?? 1;
+  const size = Buffer.byteLength(JSON.stringify(p.data.content));
+  const limit = await queryOne<{ v: string }>(`SELECT (value#>>'{}') AS v FROM rcs_settings WHERE key='max_content_bytes'`);
+  const maxBytes = Number(limit?.v ?? 32768);
+  if (size > maxBytes) { res.status(413).json({ error: `content too large (${size} > ${maxBytes} bytes)` }); return; }
+  // cheapest rate for this client (country-agnostic estimate; precise per-number is after country resolve)
+  const rate = await queryOne<{ price: string }>(
+    `SELECT min(price)::text AS price FROM rcs_rates WHERE client_id=$1 AND effective_from<=now()`, [cid(req)],
+  );
+  const unit = Number(rate?.price ?? 0);
+  res.json({ size_bytes: size, max_bytes: maxBytes, recipients: count, unit_price: unit, estimated_cost: +(unit * count).toFixed(6) });
+});
+
+async function createPortalRcsMessage(opts: {
+  clientId: string; from: string; to: string; content: unknown;
+  idempotencyKey?: string; clientMessageId?: string;
+}): Promise<{ id: string; status: string; duplicate: boolean; price: string }> {
+  const norm = normalizeRcsDest(opts.to);
+  if (!norm) throw Object.assign(new Error('destination must be E.164'), { status: 400, code: 'INVALID_DESTINATION' });
+  const contentParsed = rcsContentSchema.safeParse(opts.content);
+  if (!contentParsed.success) throw Object.assign(new Error('invalid RCS content'), { status: 400 });
+  const size = Buffer.byteLength(JSON.stringify(contentParsed.data));
+  const lim = await queryOne<{ v: string }>(`SELECT (value#>>'{}') AS v FROM rcs_settings WHERE key='max_content_bytes'`);
+  if (size > Number(lim?.v ?? 32768)) throw Object.assign(new Error('content too large'), { status: 413 });
+  const sender = await queryOne<{ status: string }>(`SELECT status FROM rcs_senders WHERE client_id=$1 AND sender=$2 ORDER BY country_id NULLS LAST LIMIT 1`, [opts.clientId, opts.from]);
+  if (!sender || sender.status !== 'approved') throw Object.assign(new Error('sender not approved for RCS'), { status: 422 });
+  const enabled = await queryOne<{ rcs_enabled: boolean }>(`SELECT rcs_enabled FROM clients WHERE id=$1`, [opts.clientId]);
+  if (!enabled?.rcs_enabled) throw Object.assign(new Error('RCS not enabled for this account'), { status: 403 });
+  const country = await queryOne<{ id: string }>(`SELECT id FROM countries WHERE status='active' AND $1 LIKE '+'||calling_code||'%' ORDER BY length(calling_code) DESC LIMIT 1`, [norm]);
+  if (!country) throw Object.assign(new Error('unsupported destination country'), { status: 422 });
+  const db = getPool(); const tx = await db.connect();
+  try {
+    await tx.query('BEGIN');
+    if (opts.idempotencyKey) {
+      const ex = await tx.query(`SELECT id,status,price::text AS price FROM rcs_messages WHERE client_id=$1 AND idempotency_key=$2`, [opts.clientId, opts.idempotencyKey]);
+      if (ex.rowCount) { await tx.query('COMMIT'); return { id: ex.rows[0].id, status: ex.rows[0].status, duplicate: true, price: ex.rows[0].price }; }
+    }
+    const rate = await tx.query(`SELECT price::text AS price FROM rcs_rates WHERE client_id=$1 AND country_id=$2 AND effective_from<=now() ORDER BY effective_from DESC LIMIT 1`, [opts.clientId, country.id]);
+    if (!rate.rowCount) throw Object.assign(new Error('RCS rate not configured for this destination'), { status: 422 });
+    const price = String(rate.rows[0].price);
+    const wallet = await tx.query(`SELECT balance, reserved, credit_limit FROM rcs_wallets WHERE client_id=$1 FOR UPDATE`, [opts.clientId]);
+    if (!wallet.rowCount) {
+      await tx.query(`INSERT INTO rcs_wallets(client_id, currency) VALUES($1,'USD') ON CONFLICT(client_id) DO NOTHING`, [opts.clientId]);
+      throw Object.assign(new Error('RCS wallet is empty — ask admin to credit RCS balance'), { status: 422 });
+    }
+    const w = wallet.rows[0];
+    if (Number(w.balance) - Number(w.reserved) + Number(w.credit_limit) < Number(price)) throw Object.assign(new Error('insufficient RCS balance'), { status: 422 });
+    const msgId = randomUUID();
+    const ins = await tx.query(
+      `INSERT INTO rcs_messages(id, client_id, client_message_id, idempotency_key, sender, destination, country_id, content, status, price)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,'queued',$9) ON CONFLICT(client_id, idempotency_key) DO NOTHING RETURNING id,status,price::text AS price`,
+      [msgId, opts.clientId, opts.clientMessageId ?? null, opts.idempotencyKey ?? null, opts.from, norm, country.id, JSON.stringify(contentParsed.data), price],
+    );
+    if (!ins.rowCount) {
+      const ex = await tx.query(`SELECT id,status,price::text AS price FROM rcs_messages WHERE client_id=$1 AND idempotency_key=$2`, [opts.clientId, opts.idempotencyKey]);
+      await tx.query('COMMIT'); return { id: ex.rows[0].id, status: ex.rows[0].status, duplicate: true, price: ex.rows[0].price };
+    }
+    const rv = await tx.query(`INSERT INTO rcs_billing_reservations(client_id, message_id, amount) VALUES($1,$2,$3) RETURNING id`, [opts.clientId, msgId, price]);
+    const upd = await tx.query(`UPDATE rcs_wallets SET reserved=reserved+$1, updated_at=now() WHERE client_id=$2 RETURNING balance, reserved`, [price, opts.clientId]);
+    await tx.query(`INSERT INTO rcs_ledger(client_id, reservation_id, message_id, type, amount, balance_after, reserved_after, event_key) VALUES($1,$2,$3,'reserve',$4,$5,$6,$7)`,
+      [opts.clientId, rv.rows[0].id, msgId, price, upd.rows[0].balance, upd.rows[0].reserved, `reserve:${msgId}`]);
+    await tx.query(`INSERT INTO rcs_outbox(message_id, queue_name, dispatch_key) VALUES($1,'rcs-route','initial') ON CONFLICT DO NOTHING`, [msgId]);
+    await tx.query('COMMIT');
+    // publish — best effort; outbox poller will also dispatch
+    const { getRcsQueue, RCS_QUEUES: RQ } = await import('@8xtel/core');
+    await getRcsQueue(RQ.route).add('route', { message_id: msgId }, { jobId: `${msgId}:outbox:initial` }).catch(() => undefined);
+    return { id: msgId, status: 'queued', duplicate: false, price };
+  } catch (e) { await tx.query('ROLLBACK').catch(() => undefined); throw e; } finally { tx.release(); }
+}
+
+router.post('/rcs/send', async (req, res) => {
+  const p = z.object({
+    from: z.string().min(1).max(40), to: z.string().min(7).max(20),
+    content: rcsContentSchema,
+    idempotency_key: z.string().min(8).max(128).optional(),
+    client_message_id: z.string().max(128).optional(),
+  }).safeParse(req.body);
+  if (!p.success) { res.status(400).json({ error: 'invalid payload', details: p.error.flatten() }); return; }
+  try { const r = await createPortalRcsMessage({ clientId: cid(req), from: p.data.from, to: p.data.to, content: p.data.content, idempotencyKey: p.data.idempotency_key, clientMessageId: p.data.client_message_id }); res.status(r.duplicate ? 200 : 202).json(r); }
+  catch (e) { const err = e as Error & { status?: number }; res.status(err.status ?? 500).json({ error: err.message }); }
+});
+
+router.post('/rcs/campaigns', async (req, res) => {
+  const schema = z.object({
+    name: z.string().min(1).max(160).optional(),
+    from: z.string().min(1).max(40), content: rcsContentSchema,
+    recipients: z.array(z.string().min(1)).min(1).max(10000).optional(),
+    bulk: z.string().max(1_000_000).optional(),
+    destinations: z.array(z.string().min(1)).min(1).max(10000).optional(),
+  });
+  const p = schema.safeParse(req.body);
+  if (!p.success) { res.status(400).json({ error: 'invalid payload', details: p.error.flatten() }); return; }
+  const rawList = p.data.recipients ?? p.data.destinations ?? [];
+  const bulkExtra = p.data.bulk ? p.data.bulk.split(/[,;\s\n\r\t|]+/).filter(Boolean) : [];
+  const seen = new Set<string>(); const all = [...rawList, ...bulkExtra].filter((v) => { const k = v.trim(); if (!k || seen.has(k)) return false; seen.add(k); return true; });
+  if (!all.length) { res.status(400).json({ error: 'no recipients' }); return; }
+  const senderOk = await queryOne<{ status: string }>(`SELECT status FROM rcs_senders WHERE client_id=$1 AND sender=$2 ORDER BY country_id NULLS LAST LIMIT 1`, [cid(req), p.data.from]);
+  if (!senderOk || senderOk.status !== 'approved') { res.status(422).json({ error: 'sender not approved for RCS' }); return; }
+  const enabled = await queryOne<{ rcs_enabled: boolean }>(`SELECT rcs_enabled FROM clients WHERE id=$1`, [cid(req)]);
+  if (!enabled?.rcs_enabled) { res.status(403).json({ error: 'RCS not enabled' }); return; }
+  const size = Buffer.byteLength(JSON.stringify(p.data.content));
+  const lim = await queryOne<{ v: string }>(`SELECT (value#>>'{}') AS v FROM rcs_settings WHERE key='max_content_bytes'`);
+  if (size > Number(lim?.v ?? 32768)) { res.status(413).json({ error: 'content too large' }); return; }
+  // validate + classify recipients
+  const rows: Array<{ destination: string; state: string; reason: string | null }> = [];
+  const seenNorm = new Set<string>();
+  for (const orig of all) {
+    const norm = normalizeRcsDest(orig);
+    if (!orig.trim()) { rows.push({ destination: '', state: 'empty', reason: 'empty' }); continue; }
+    if (seenNorm.has(norm ?? orig)) { rows.push({ destination: orig.trim(), state: 'duplicate', reason: 'duplicate' }); continue; }
+    seenNorm.add(norm ?? orig);
+    if (!norm) { rows.push({ destination: orig.trim(), state: 'invalid', reason: 'invalid E.164' }); continue; }
+    const co = await queryOne<{ id: string }>(`SELECT id FROM countries WHERE status='active' AND $1 LIKE '+'||calling_code||'%' ORDER BY length(calling_code) DESC LIMIT 1`, [norm]);
+    rows.push(co ? { destination: norm, state: 'valid', reason: null } : { destination: norm, state: 'unsupported_country', reason: 'country not supported' });
+  }
+  const valid = rows.filter((r) => r.state === 'valid');
+  if (!valid.length) { res.status(422).json({ error: 'no valid recipients', summary: { total: rows.length, valid: 0 } }); return; }
+  const rate = await queryOne<{ price: string }>(`SELECT max(price)::text AS price FROM rcs_rates WHERE client_id=$1 AND effective_from<=now()`, [cid(req)]);
+  if (!rate?.price) { res.status(422).json({ error: 'RCS rates not configured' }); return; }
+  const total = (Number(rate.price) * valid.length).toFixed(6);
+  const pool = getPool(); const tx = await pool.connect(); let campaignId = '';
+  try {
+    await tx.query('BEGIN');
+    const w = await tx.query(`SELECT balance, reserved, credit_limit FROM rcs_wallets WHERE client_id=$1 FOR UPDATE`, [cid(req)]);
+    if (!w.rowCount) {
+      await tx.query(`INSERT INTO rcs_wallets(client_id, currency) VALUES($1,'USD') ON CONFLICT(client_id) DO NOTHING`, [cid(req)]);
+      throw Object.assign(new Error('RCS wallet is empty — ask admin to credit RCS balance'), { status: 422 });
+    }
+    if (Number(w.rows[0].balance) - Number(w.rows[0].reserved) + Number(w.rows[0].credit_limit) < Number(total)) throw Object.assign(new Error('insufficient RCS balance'), { status: 422 });
+    const ins = await tx.query(
+      `INSERT INTO rcs_campaigns(client_id, name, sender, content, status, recipient_count, accepted_count, rejected_count, reserved_amount)
+       VALUES($1,$2,$3,$4,'queued',$5,$6,$7,$8) RETURNING id`,
+      [cid(req), p.data.name ?? `RCS ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, p.data.from, JSON.stringify(p.data.content), rows.length, valid.length, rows.length - valid.length, total],
+    );
+    campaignId = ins.rows[0].id;
+    for (const r of rows) await tx.query(`INSERT INTO rcs_campaign_recipients(campaign_id, destination, validation_status, reason) VALUES($1,$2,$3,$4)`, [campaignId, r.destination, r.state, r.reason]);
+    const upd = await tx.query(`UPDATE rcs_wallets SET reserved=reserved+$1, updated_at=now() WHERE client_id=$2 RETURNING balance, reserved`, [total, cid(req)]);
+    const rv = await tx.query(`INSERT INTO rcs_billing_reservations(client_id, campaign_id, amount) VALUES($1,$2,$3) RETURNING id`, [cid(req), campaignId, total]);
+    await tx.query(`INSERT INTO rcs_ledger(client_id, reservation_id, campaign_id, type, amount, balance_after, reserved_after, event_key) VALUES($1,$2,$3,'reserve',$4,$5,$6,$7)`,
+      [cid(req), rv.rows[0].id, campaignId, total, upd.rows[0].balance, upd.rows[0].reserved, `reserve-campaign:${campaignId}`]);
+    await tx.query('COMMIT');
+  } catch (e) { await tx.query('ROLLBACK').catch(() => undefined); const err = e as Error & { status?: number }; return void res.status(err.status ?? 500).json({ error: err.message }); } finally { tx.release(); }
+  const { getRcsQueue, RCS_QUEUES: RQ2 } = await import('@8xtel/core');
+  await getRcsQueue(RQ2.campaign).add('expand', { campaign_id: campaignId }, { jobId: campaignId }).catch(() => undefined);
+  res.status(202).json({ campaign_id: campaignId, status: 'queued', summary: { total: rows.length, valid: valid.length, invalid: rows.filter((r) => r.state === 'invalid').length, duplicate: rows.filter((r) => r.state === 'duplicate').length }, reserved_amount: total });
+});
+
+router.get('/rcs/messages', async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number((req.query as Record<string, string>).limit ?? 50)));
+  const q = req.query as Record<string, string>;
+  const params: unknown[] = [cid(req)]; const where = ['m.client_id=$1'];
+  if (q.status) { params.push(q.status); where.push(`m.status=$${params.length}`); }
+  if (q.destination) { params.push(`%${q.destination}%`); where.push(`m.destination LIKE $${params.length}`); }
+  params.push(limit);
+  const rows = await query(
+    `SELECT m.id, m.sender, m.destination, m.content, m.status, m.price, m.submit_time, m.dlr_time, m.created_at, m.error_code
+     FROM rcs_messages m WHERE ${where.join(' AND ')} ORDER BY m.created_at DESC LIMIT $${params.length}`, params,
+  );
+  res.json({ messages: rows });
+});
+
+router.get('/rcs/messages/:id', async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) { res.status(404).json({ error: 'not found' }); return; }
+  const row = await queryOne(`SELECT m.*, co.name AS country_name FROM rcs_messages m LEFT JOIN countries co ON co.id=m.country_id WHERE m.id=$1 AND m.client_id=$2`, [req.params.id, cid(req)]);
+  if (!row) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ message: row });
+});
+
+router.get('/rcs/campaigns', async (req, res) => {
+  const rows = await query(`SELECT c.*, (SELECT count(*) FROM rcs_messages m WHERE m.campaign_id=c.id AND m.status='delivered') AS delivered FROM rcs_campaigns c WHERE c.client_id=$1 ORDER BY c.created_at DESC LIMIT 100`, [cid(req)]);
+  res.json({ campaigns: rows });
+});
+
+router.get('/rcs/campaigns/:id', async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) { res.status(404).json({ error: 'not found' }); return; }
+  const camp = await queryOne(`SELECT * FROM rcs_campaigns WHERE id=$1 AND client_id=$2`, [req.params.id, cid(req)]);
+  if (!camp) { res.status(404).json({ error: 'not found' }); return; }
+  const recips = await query(`SELECT destination, validation_status, reason, message_id FROM rcs_campaign_recipients WHERE campaign_id=$1 ORDER BY id LIMIT 2000`, [req.params.id]);
+  const mix = await queryOne(`SELECT count(*) FILTER(WHERE status='delivered') AS delivered, count(*) FILTER(WHERE status IN ('failed','undelivered','expired','rejected')) AS failed, count(*) FILTER(WHERE status IN ('queued','accepted','submitted')) AS pending FROM rcs_messages WHERE campaign_id=$1`, [req.params.id]);
+  res.json({ campaign: camp, recipients: recips, mix: mix ?? { delivered: '0', failed: '0', pending: '0' } });
+});
+
+router.get('/rcs/wallet', async (req, res) => {
+  const w = await queryOne(`SELECT w.*, c.name AS client_name FROM rcs_wallets w JOIN clients c ON c.id=w.client_id WHERE w.client_id=$1`, [cid(req)]);
+  const ledger = await query(`SELECT type, amount, balance_after, reserved_after, created_at FROM rcs_ledger WHERE client_id=$1 ORDER BY created_at DESC LIMIT 50`, [cid(req)]);
+  res.json({ wallet: w ?? null, ledger });
+});
+
+router.get('/rcs/reports', async (req, res) => {
+  const q = req.query as Record<string, string>;
+  const day = q.day === 'yesterday' ? 'yesterday' : 'today';
+  const filter = day === 'yesterday' ? `m.created_at >= CURRENT_DATE - interval '1 day' AND m.created_at < CURRENT_DATE` : `m.created_at >= CURRENT_DATE`;
+  const rows = await query(`SELECT count(*) AS total, count(*) FILTER(WHERE status='delivered') AS delivered, count(*) FILTER(WHERE status IN ('failed','undelivered','expired','rejected')) AS failed, count(*) FILTER(WHERE status IN ('queued','accepted','submitted')) AS pending FROM rcs_messages m WHERE m.client_id=$1 AND ${filter}`, [cid(req)]);
+  const byCountry = await query(`SELECT COALESCE(co.name,'Unknown') AS country, count(*) AS total, count(*) FILTER(WHERE m.status='delivered') AS delivered FROM rcs_messages m LEFT JOIN countries co ON co.id=m.country_id WHERE m.client_id=$1 AND ${filter} GROUP BY 1 ORDER BY total DESC LIMIT 20`, [cid(req)]);
+  res.json({ day, totals: rows[0] ?? { total: '0', delivered: '0', failed: '0', pending: '0' }, by_country: byCountry });
+});
+
+router.get('/rcs/coverage', async (req, res) => {
+  const rows = await query(
+    `SELECT r.id, r.name, r.sender, co.name AS country_name, co.iso_code
+     FROM rcs_routes r LEFT JOIN countries co ON co.id=r.country_id
+     JOIN rcs_route_clients rc ON rc.route_id=r.id AND rc.client_id=$1
+     WHERE r.status='active' ORDER BY co.name NULLS LAST, r.name`, [cid(req)],
+  );
+  const rates = await query(`SELECT co.name AS country_name, co.iso_code, rr.price FROM rcs_rates rr JOIN countries co ON co.id=rr.country_id WHERE rr.client_id=$1 ORDER BY rr.effective_from DESC`, [cid(req)]);
+  const w = await queryOne<{ currency: string }>(`SELECT currency FROM rcs_wallets WHERE client_id=$1`, [cid(req)]);
+  res.json({ currency: w?.currency ?? 'USD', routes: rows, rates });
 });
 
 export default router;

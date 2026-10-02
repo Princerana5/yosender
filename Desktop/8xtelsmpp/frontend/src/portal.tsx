@@ -144,6 +144,8 @@ export function PortalLayout(): JSX.Element {
   const links = [
     { to: '/portal', label: 'Overview', end: true },
     { to: '/portal/send', label: 'Send SMS', end: false },
+    { to: '/portal/rcs/send', label: 'Send RCS', end: false },
+    { to: '/portal/rcs/history', label: 'RCS History', end: false },
     { to: '/portal/coverage', label: 'Coverage', end: false },
     { to: '/portal/reports', label: 'Reports', end: false },
     { to: '/portal/invoices', label: 'Invoices', end: false },

@@ -13,6 +13,7 @@ export interface BindPrincipal {
   credit_limit: string;
   tps_limit: number;
   bind_type: string;
+  rcs_enabled: boolean;
 }
 
 export async function authenticateBind(
@@ -25,15 +26,15 @@ export async function authenticateBind(
     // (Snakesms vs snakesms). Exact match first, then case-insensitive.
   let client = await queryOne<{
     id: string; system_id: string; password_hash: string; status: string;
-    balance: string; credit_limit: string; tps_limit: number; is_house: boolean;
-  }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house FROM clients WHERE system_id=$1', [
+    balance: string; credit_limit: string; tps_limit: number; is_house: boolean; rcs_enabled: boolean;
+  }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house, COALESCE(rcs_enabled,false) AS rcs_enabled FROM clients WHERE system_id=$1', [
     systemId,
   ]);
   if (!client) {
     client = await queryOne<{
       id: string; system_id: string; password_hash: string; status: string;
-      balance: string; credit_limit: string; tps_limit: number; is_house: boolean;
-    }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house FROM clients WHERE lower(system_id)=lower($1)', [
+      balance: string; credit_limit: string; tps_limit: number; is_house: boolean; rcs_enabled: boolean;
+    }>('SELECT id, system_id, password_hash, status, balance, credit_limit, tps_limit, COALESCE(is_house,false) AS is_house, COALESCE(rcs_enabled,false) AS rcs_enabled FROM clients WHERE lower(system_id)=lower($1)', [
       systemId,
     ]);
   }
@@ -86,6 +87,7 @@ export async function authenticateBind(
       credit_limit: client.credit_limit,
       tps_limit: client.tps_limit,
       bind_type: bindType,
+      rcs_enabled: client.rcs_enabled,
     },
   };
 }

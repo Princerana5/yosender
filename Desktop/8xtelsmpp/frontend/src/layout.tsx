@@ -36,6 +36,12 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     name: 'Routing',
     items: [
       { to: '/routes', label: 'Routes & Failover', icon: 'route' },
+      { to: '/distribution', label: 'Traffic Distribution', icon: 'chart' },
+      { to: '/routing-rules', label: 'Routing Rules', icon: 'sliders' },
+      { to: '/route-health', label: 'Route Health', icon: 'pulse' },
+      { to: '/routing-logs', label: 'Routing Logs', icon: 'mail' },
+      { to: '/failover-logs', label: 'Failover Logs', icon: 'layers' },
+      { to: '/dlr-cutting', label: 'DLR Cutting Control', icon: 'clock' },
       { to: '/otp-templates', label: 'OTP Templates', icon: 'shield' },
       { to: '/policies', label: 'Traffic Policies', icon: 'sliders' },
     ],
@@ -46,6 +52,12 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
       { to: '/messages', label: 'Message Logs', icon: 'mail' },
       { to: '/send', label: 'Send Test SMS', icon: 'plus' },
       { to: '/dlr', label: 'DLR Logs', icon: 'check' },
+    ],
+  },
+  {
+    name: 'RCS',
+    items: [
+      { to: '/rcs', label: 'RCS Console', icon: 'layers' },
     ],
   },
   {
@@ -162,7 +174,7 @@ export default function Layout(): JSX.Element {
                   key={n.to}
                   to={n.to}
                   end={n.to === '/'}
-                  className={({ isActive }) => `navlink mb-0.5 ${isActive ? 'navlink-active' : ''}`}
+                  className={({ isActive }) => `navlink mb-0.5 ${isActive ? (n.to === '/send' ? 'navlink-active navlink-active--send' : 'navlink-active') : ''}`}
                 >
                   <Icon name={n.icon} size={15} />
                   {n.label}

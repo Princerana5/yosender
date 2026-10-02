@@ -18,13 +18,20 @@ import ClientReports from './pages/ClientReports.js';
 import OtpTemplates from './pages/OtpTemplates.js';
 import SendSms from './pages/SendSms.js';
 import PortalAccounts from './pages/PortalAccounts.js';
+import DlrCutting from './pages/DlrCutting.js';
+import { RoutingLogs, FailoverLogs, RouteHealthPage, RoutingRulesPage } from './pages/RoutingLogs.js';
+import RoutingDistribution from './pages/RoutingDistribution.js';
 import { RateNotificationHistory, RateNotificationDetail, RateNotificationCreate, RateNotificationContacts } from './pages/RateNotifications.js';
 import ClientApi from './pages/ClientApi.js';
 import Docs from './pages/Docs.js';
 import Invoices from './pages/Invoices.js';
 import PaymentMethods from './pages/PaymentMethods.js';
+import VendorRates from './pages/VendorRates.js';
 import { StatusBadge, initTheme } from './components.js';
 import { token } from './api.js';
+import RcsAdmin from './pages/RcsAdmin.js';
+import PortalRcsSend from './pages/PortalRcsSend.js';
+import { PortalRcsHistory, PortalRcsReports, PortalRcsReportDetail } from './pages/PortalRcs.js';
 
 initTheme(); // saved light/dark before first paint — no theme flash
 import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
@@ -85,6 +92,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
               />
             }
           />
+          <Route path="dlr-cutting" element={<DlrCutting />} />
+          <Route path="distribution" element={<RoutingDistribution />} />
+          <Route path="routing-rules" element={<RoutingRulesPage />} />
+          <Route path="route-health" element={<RouteHealthPage />} />
+          <Route path="routing-logs" element={<RoutingLogs />} />
+          <Route path="failover-logs" element={<FailoverLogs />} />
           <Route path="messages" element={<Messages />} />
           <Route path="send" element={<SendSms />} />
           <Route
@@ -117,21 +130,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="billing" element={<Billing />} />
           <Route path="invoices" element={<Invoices />} />
           <Route path="payment-methods" element={<PaymentMethods />} />
-          <Route
-            path="rates"
-            element={
-              <TablePage
-                title="Vendor rates"
-                sub="Termination cost per vendor"
-                endpoint="/vendors"
-                columns={[
-                  { key: 'name', label: 'Vendor' },
-                  { key: 'host', label: 'Host', mono: true },
-                  { key: 'tps', label: 'TPS', right: true },
-                ]}
-              />
-            }
-          />
+          <Route path="rates" element={<VendorRates />} />
           <Route path="reports" element={<Reports />} />
           <Route path="client-reports" element={<ClientReports />} />
           <Route path="rate-notifications" element={<RateNotificationHistory />} />
@@ -203,11 +202,17 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             }
           />
           <Route path="users" element={<UsersPage />} />
+          <Route path="rcs" element={<RcsAdmin />} />
         </Route>
         {/* ── Client portal: separate login + token, no access to console ── */}
         <Route path="/portal/login" element={<PortalLogin />} />
         <Route path="/portal" element={<PortalGuard><PortalLayout /></PortalGuard>}>
           <Route index element={<PortalOverview />} />
+          <Route path="send" element={<PortalSend />} />
+          <Route path="rcs/send" element={<PortalRcsSend />} />
+          <Route path="rcs/history" element={<PortalRcsHistory />} />
+          <Route path="rcs/reports" element={<PortalRcsReports />} />
+          <Route path="rcs/reports/:id" element={<PortalRcsReportDetail />} />
           <Route path="send" element={<PortalSend />} />
           <Route path="coverage" element={<PortalCoverage />} />
           <Route path="history" element={<PortalHistory />} />
