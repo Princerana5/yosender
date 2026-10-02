@@ -164,11 +164,11 @@ export const ROLE_PERMISSIONS: Record<RoleName, string[]> = {
   super_admin: ['*'],
   admin: [
     'clients.*', 'vendors.*', 'routes.*', 'messages.read', 'messages.send', 'billing.*',
-    'reports.*', 'system.logs', 'users.manage',
+    'reports.*', 'system.logs', 'users.manage', 'rcs.*',
   ],
   operations: [
     'messages.read', 'messages.send', 'routes.read', 'routes.update', 'vendors.read',
-    'vendors.reconnect', 'system.logs', 'reports.traffic',
+    'vendors.reconnect', 'system.logs', 'reports.traffic', 'rcs.read',
   ],
   finance: ['billing.*', 'rates.*', 'reports.revenue', 'reports.cost', 'reports.profit'],
   support: ['clients.read', 'messages.read', 'system.logs'],
