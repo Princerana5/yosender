@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { PageHeader, DataTable, StatusBadge, Modal, Icon } from '../components';
 
-type View = 'vendors' | 'routes' | 'clients' | 'rates' | 'senders' | 'traffic' | 'campaigns' | 'reports' | 'webhooks';
+type View = 'vendors' | 'routes' | 'clients' | 'rates' | 'senders' | 'traffic' | 'campaigns' | 'reports' | 'webhooks' | 'wallets';
 
 export default function RcsAdmin(): JSX.Element {
   const [view, setView] = useState<View>('vendors');
   const tabs: Array<[View, string]> = [
-    ['vendors', 'Vendors'], ['routes', 'Routes'], ['clients', 'Clients'],
+    ['vendors', 'Vendors'], ['routes', 'Routes'], ['clients', 'Clients'], ['wallets', 'Wallets'],
     ['rates', 'Rates'], ['senders', 'Senders'], ['traffic', 'Traffic'],
     ['campaigns', 'Campaigns'], ['reports', 'Reports'], ['webhooks', 'Webhooks'],
   ];
@@ -25,6 +25,7 @@ export default function RcsAdmin(): JSX.Element {
       {view === 'vendors' && <RcsVendors />}
       {view === 'routes' && <RcsRoutes />}
       {view === 'clients' && <RcsClients />}
+      {view === 'wallets' && <RcsWallets />}
       {view === 'rates' && <RcsRates />}
       {view === 'senders' && <RcsSenders />}
       {view === 'traffic' && <RcsTraffic />}
@@ -339,4 +340,59 @@ function RcsWebhooks(): JSX.Element {
   return <DataTable keyOf={(r, i) => String((r as Record<string, unknown>).id ?? i)} rows={rows} empty="No webhook events yet." columns={[
     { key: 'vendor_name', label: 'Vendor' }, { key: 'provider_message_id', label: 'Provider ID', mono: true }, { key: 'processing_status', label: 'Status', render: (r) => <StatusBadge status={String(r.processing_status)} /> }, { key: 'received_at', label: 'Received', render: (r) => <span className="text-xs text-muted">{r.received_at ? new Date(String(r.received_at)).toLocaleString() : '—'}</span> },
   ]} />;
+}
+
+function RcsWallets(): JSX.Element {
+  const [rows, setRows] = useState<Array<{ client_id: string; client_name: string; system_id: string; balance: string; reserved: string; currency: string }>>([]);
+  const [clients, setClients] = useState<Array<{ id: string; name: string }>>([]);
+  const [form, setForm] = useState({ client_id: '', amount: '', remark: '', type: 'topup' as 'topup' | 'deduct' });
+  const [msg, setMsg] = useState(''); const [busy, setBusy] = useState(false);
+  const load = (): void => {
+    api<{ wallets: typeof rows }>('/rcs/wallets').then((r) => setRows(r.wallets as never)).catch(() => undefined);
+    api<{ clients: typeof clients }>('/rcs/clients').then((r) => setClients(r.clients as never)).catch(() => undefined);
+  };
+  useEffect(load, []);
+  async function submit(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    if (!form.client_id) { setMsg('Select a client.'); return; }
+    const amt = Number(form.amount);
+    if (!amt || amt <= 0) { setMsg('Enter amount > 0.'); return; }
+    if (form.type === 'deduct' && form.remark.trim().length < 3) { setMsg('Remark required for deduct.'); return; }
+    setBusy(true); setMsg('');
+    try {
+      const path = form.type === 'topup' ? 'topup' : 'deduct';
+      const body: Record<string, unknown> = { amount: amt };
+      if (form.remark.trim()) body.remark = form.remark.trim();
+      await api(`/rcs/wallets/${form.client_id}/${path}`, { method: 'POST', body: JSON.stringify(body) });
+      setMsg(`${form.type === 'topup' ? 'Credited' : 'Deducted'} ${amt} — wallet updated.`);
+      setForm({ client_id: form.client_id, amount: '', remark: '', type: 'topup' });
+      load();
+    } catch (e) { setMsg((e as Error).message); } finally { setBusy(false); }
+  }
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-muted">RCS balances are <b>separate</b> from SMS wallets (<span className="font-mono">rcs_wallets</span>). Top up here — client portal <span className="font-mono">Send RCS</span> blocks when balance is low.</div>
+      {msg && <div className={`text-sm rounded-lg px-3 py-2 border ${msg.includes('Credited') ? 'bg-brand/10 border-brand/25 text-emerald-300' : msg.includes('Deducted') ? 'bg-amber-500/10 border-amber-500/25 text-amber-300' : 'bg-danger/10 border-danger/25 text-red-300'}`}>{msg}</div>}
+      <form onSubmit={submit} className="card card-pad flex flex-wrap gap-2 items-end">
+        <label className="space-y-1"><span className="label">Portal account</span>
+          <select className="input min-w-[180px]" value={form.client_id} onChange={(e) => setForm({ ...form, client_id: e.target.value })} required>
+            <option value="">— select —</option>{clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </label>
+        <label className="space-y-1"><span className="label">Type</span>
+          <select className="input" value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as never })}><option value="topup">Top up</option><option value="deduct">Deduct</option></select>
+        </label>
+        <label className="space-y-1"><span className="label">Amount</span><input className="input w-[120px]" type="number" step="0.000001" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required /></label>
+        <label className="space-y-1 flex-1 min-w-[160px]"><span className="label">Remark {form.type === 'deduct' ? '*' : '(optional)'}</span><input className="input" value={form.remark} onChange={(e) => setForm({ ...form, remark: e.target.value })} placeholder={form.type === 'topup' ? 'e.g. Bank ref' : 'reason for deduct'} /></label>
+        <button className="btn" disabled={busy}>{busy ? '…' : form.type === 'topup' ? 'Credit RCS' : 'Deduct'}</button>
+      </form>
+      <DataTable keyOf={(r: Record<string, unknown>) => String(r.client_id)} rows={rows as unknown as Record<string, unknown>[]} empty="No RCS wallets yet — top up a portal account above to create one." columns={[
+        { key: 'client_name', label: 'Client' },
+        { key: 'system_id', label: 'System ID', mono: true },
+        { key: 'balance', label: 'Balance', render: (r: Record<string, unknown>) => <span className="font-mono tabular-nums font-semibold">{Number(r.balance).toFixed(2)} {String(r.currency ?? 'USD')}</span> },
+        { key: 'reserved', label: 'Reserved', render: (r: Record<string, unknown>) => <span className="font-mono tabular-nums text-xs">{Number(r.reserved).toFixed(2)}</span> },
+        { key: 'currency', label: 'Cur', mono: true },
+      ]} />
+    </div>
+  );
 }

@@ -247,8 +247,6 @@ export default function PortalRcsSend(): JSX.Element {
             {wallet ? (
               <div className="space-y-1 text-sm">
                 <div className="flex justify-between"><span className="text-muted">Balance</span><span className="font-mono tabular-nums font-bold">{Number(wallet.balance).toFixed(2)} {wallet.currency}</span></div>
-                <div className="flex justify-between text-xs"><span className="text-muted">Reserved</span><span className="font-mono tabular-nums">{Number(wallet.reserved).toFixed(2)}</span></div>
-                <div className="text-[11px] text-muted">Available: {(Number(wallet.balance) - Number(wallet.reserved)).toFixed(2)} {wallet.currency} — top up via admin (rcs_wallets).</div>
                 <Link to="/portal/rcs/history" className="btn-ghost !py-1 !text-xs mt-2 block text-center">View RCS history →</Link>
               </div>
             ) : <div className="text-sm text-muted">Loading wallet…</div>}

@@ -118,6 +118,49 @@ router.put('/routes/:id/clients', requirePerm('rcs.routes.manage'), audit('set_r
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   res.json({ ok: true });
 });
+router.get('/wallets', async (_req, res) => {
+  res.json({ wallets: await query(`SELECT w.*, c.name AS client_name, c.system_id, c.portal_email FROM rcs_wallets w JOIN clients c ON c.id=w.client_id ORDER BY c.name`) });
+});
+router.post('/wallets/:clientId/topup', requirePerm('billing.manage'), audit('rcs_wallet_topup', 'rcs_wallet'), async (req, res) => {
+  const p = z.object({ amount: z.number().positive(), remark: z.string().trim().min(3).optional(), currency: z.enum(['USD','EUR']).optional() }).safeParse(req.body);
+  if (!p.success) return void res.status(400).json({ error: 'invalid payload', details: p.error.flatten() });
+  const pool = getPool(); const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const w = await db.query('SELECT balance, reserved, currency FROM rcs_wallets WHERE client_id=$1 FOR UPDATE', [req.params.clientId]);
+    let cur: { balance: string; reserved: string; currency: string };
+    if (!w.rowCount) {
+      const currency = p.data.currency ?? 'USD';
+      const ins = await db.query(`INSERT INTO rcs_wallets(client_id, balance, currency) VALUES($1,$2,$3) RETURNING balance, reserved, currency`, [req.params.clientId, 0, currency]);
+      cur = ins.rows[0] as typeof cur;
+    } else cur = w.rows[0] as typeof cur;
+    const after = Number(cur.balance) + p.data.amount;
+    await db.query('UPDATE rcs_wallets SET balance=$1, updated_at=now() WHERE client_id=$2', [after, req.params.clientId]);
+    await db.query(`INSERT INTO rcs_ledger(client_id, reservation_id, type, amount, balance_after, reserved_after, event_key) VALUES($1,NULL,'credit',$2,$3,$4,$5) ON CONFLICT(event_key) DO NOTHING`, [req.params.clientId, p.data.amount, after, cur.reserved, `rcs-topup:${req.params.clientId}:${Date.now()}:${Math.random().toString(36).slice(2,6)}`]);
+    await db.query('COMMIT');
+    res.json({ wallet: { client_id: req.params.clientId, balance: String(after), currency: cur.currency }, credited: p.data.amount });
+  } catch (e) { await db.query('ROLLBACK').catch(()=>undefined); throw e; } finally { db.release(); }
+});
+router.post('/wallets/:clientId/deduct', requirePerm('billing.manage'), audit('rcs_wallet_deduct', 'rcs_wallet'), async (req, res) => {
+  const p = z.object({ amount: z.number().positive(), remark: z.string().trim().min(3) }).safeParse(req.body);
+  if (!p.success) return void res.status(400).json({ error: 'invalid payload', details: p.error.flatten() });
+  const pool = getPool(); const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    const w = await db.query('SELECT balance, currency FROM rcs_wallets WHERE client_id=$1 FOR UPDATE', [req.params.clientId]);
+    if (!w.rowCount) { await db.query('ROLLBACK'); return void res.status(404).json({ error: 'RCS wallet not found — top up first' }); }
+    const cur = w.rows[0] as { balance: string; currency: string };
+    const after = Number(cur.balance) - p.data.amount;
+    if (after < 0) { await db.query('ROLLBACK'); return void res.status(422).json({ error: 'would go negative — reduce amount' }); }
+    await db.query('UPDATE rcs_wallets SET balance=$1, updated_at=now() WHERE client_id=$2', [after, req.params.clientId]);
+    await db.query(`INSERT INTO rcs_ledger(client_id, reservation_id, type, amount, balance_after, reserved_after, event_key) VALUES($1,NULL,'debit',$2,$3,0,$4) ON CONFLICT(event_key) DO NOTHING`, [req.params.clientId, p.data.amount, after, `rcs-deduct:${req.params.clientId}:${Date.now()}`]);
+    await db.query('COMMIT');
+    res.json({ wallet: { client_id: req.params.clientId, balance: String(after) }, deducted: p.data.amount });
+  } catch (e) { await db.query('ROLLBACK').catch(()=>undefined); throw e; } finally { db.release(); }
+});
+router.get('/wallets/:clientId/ledger', async (req, res) => {
+  res.json({ entries: await query(`SELECT * FROM rcs_ledger WHERE client_id=$1 ORDER BY created_at DESC LIMIT 200`, [req.params.clientId]) });
+});
 router.get('/clients', async (_req, res) => {
   // RCS is exclusive to portal accounts (clients who have a portal login)
   res.json({ clients: await query(`SELECT id,name,system_id,portal_email,status,rcs_enabled FROM clients WHERE COALESCE(is_house,false)=false AND portal_email IS NOT NULL ORDER BY name`) });
