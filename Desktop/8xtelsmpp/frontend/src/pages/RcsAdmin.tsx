@@ -193,23 +193,55 @@ function RcsRouteDetail({ route, countries, onClose }: { route: Record<string, u
 }
 
 function RcsClients(): JSX.Element {
-  const [rows, setRows] = useState<Array<{ id: string; name: string; rcs_enabled: boolean; status: string }>>([]);
+  const [rows, setRows] = useState<Array<{ id: string; name: string; system_id: string; portal_email: string; rcs_enabled: boolean; status: string }>>([]);
   const [busy, setBusy] = useState('');
-  const load = (): void => { api<{ clients: typeof rows }>('/rcs/clients').then((r) => setRows(r.clients as never)).catch(() => undefined); };
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [msg, setMsg] = useState('');
+  const load = (): void => {
+    api<{ clients: typeof rows }>('/rcs/clients')
+      .then((r) => setRows(r.clients as never))
+      .catch((e) => setMsg((e as Error).message));
+  };
   useEffect(load, []);
   async function toggle(r: typeof rows[number]): Promise<void> {
-    setBusy(r.id);
-    try { await api(`/rcs/clients/${r.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !r.rcs_enabled }) }); load(); } finally { setBusy(''); }
+    setBusy(r.id); setMsg('');
+    try { await api(`/rcs/clients/${r.id}`, { method: 'PATCH', body: JSON.stringify({ enabled: !r.rcs_enabled }) }); load(); }
+    catch (e) { setMsg((e as Error).message); } finally { setBusy(''); }
   }
+  async function bulkEnable(enabled: boolean): Promise<void> {
+    const ids = [...selected];
+    if (!ids.length) { setMsg('Select at least one client.'); return; }
+    setBulkBusy(true); setMsg('');
+    try {
+      const res = await api<{ updated: number }>(`/rcs/clients/bulk`, { method: 'POST', body: JSON.stringify({ client_ids: ids, enabled }) });
+      setMsg(`${res.updated} portal account(s) ${enabled ? 'enabled' : 'disabled'} for RCS.`);
+      setSelected(new Set()); load();
+    } catch (e) { setMsg((e as Error).message); } finally { setBulkBusy(false); }
+  }
+  const allIds = rows.map((r) => r.id);
+  const allChecked = rows.length > 0 && selected.size === rows.length;
   return (
     <div className="space-y-3">
-      <div className="text-sm text-muted">Enable RCS per client — required for portal/SMPP RCS and route eligibility.</div>
-      <DataTable keyOf={(r: Record<string, unknown>) => String(r.id)} rows={rows as unknown as Record<string, unknown>[]} empty="No clients." columns={[
-        { key: 'name', label: 'Client', render: (r: Record<string, unknown>) => <span className="font-semibold">{String(r.name)}</span> },
+      <div className="text-sm text-muted">RCS is <b>portal-only</b> — only clients with a portal login appear here. Enable RCS per client to unlock <span className="font-mono">Send RCS</span> in their portal and SMPP RCS eligibility. You can enable multiple at once.</div>
+      {msg && <div className={`text-sm rounded-lg px-3 py-2 border ${msg.includes('enabled') ? 'bg-brand/10 border-brand/25 text-emerald-300' : 'bg-danger/10 border-danger/25 text-red-300'}`}>{msg}</div>}
+      <div className="flex flex-wrap gap-2 items-center">
+        <label className="flex items-center gap-2 text-sm border border-line rounded-lg px-3 py-1.5 bg-ink/40 cursor-pointer">
+          <input type="checkbox" checked={allChecked} onChange={(e) => setSelected(e.target.checked ? new Set(allIds) : new Set())} />
+          Select all ({rows.length})
+        </label>
+        <button className="btn !py-1.5 !text-xs" disabled={bulkBusy || !selected.size} onClick={() => void bulkEnable(true)}>{bulkBusy ? '…' : `Enable RCS (${selected.size})`}</button>
+        <button className="btn-ghost !py-1.5 !text-xs" disabled={bulkBusy || !selected.size} onClick={() => void bulkEnable(false)}>Disable selected</button>
+        <button className="btn-ghost !py-1.5 !text-xs ml-auto" onClick={load}>Refresh</button>
+      </div>
+      <DataTable keyOf={(r: Record<string, unknown>) => String(r.id)} rows={rows as unknown as Record<string, unknown>[]} empty="No portal accounts yet — create one under Portal Accounts first." columns={[
+        { key: 'select', label: '', render: (r: Record<string, unknown>) => <input type="checkbox" checked={selected.has(String(r.id))} onChange={(e) => setSelected((s) => { const n = new Set(s); if (e.target.checked) n.add(String(r.id)); else n.delete(String(r.id)); return n; })} /> },
+        { key: 'name', label: 'Portal account', render: (r: Record<string, unknown>) => <span><span className="font-semibold">{String(r.name)}</span><span className="block text-[11px] text-muted font-mono">{String(r.system_id)} · {String(r.portal_email ?? '')}</span></span> },
         { key: 'status', label: 'Status', render: (r) => <StatusBadge status={String(r.status)} /> },
         { key: 'rcs_enabled', label: 'RCS', render: (r) => <StatusBadge status={String(r.rcs_enabled) === 'true' ? 'delivered' : 'failed'} /> },
         { key: 'action', label: '', render: (r) => <button className="btn-ghost !py-1 !text-xs" disabled={busy === String(r.id)} onClick={() => void toggle(r as never)}>{busy === String(r.id) ? '…' : (String(r.rcs_enabled) === 'true' ? 'Disable' : 'Enable')}</button> },
       ]} />
+      <div className="text-[11px] text-muted">Tip: Portal Accounts → New portal account creates the login. Then come here to enable RCS and assign RCS routes/vendors in the <span className="font-semibold">Routes</span> tab.</div>
     </div>
   );
 }
