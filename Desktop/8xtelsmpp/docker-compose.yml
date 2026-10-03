@@ -44,7 +44,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
     expose:
       - "8080"
     depends_on:
@@ -68,7 +68,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
     ports:
       - "${SMPP_PORT:-2775}:2775"
       # Alt SMPP listener (same-number mapping): when SMPP_ALT_PORT is set in
@@ -90,7 +90,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,7 +106,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,7 +122,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
     depends_on:
       postgres:
         condition: service_healthy
@@ -138,7 +138,28 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
       REDIS_URL: redis://redis:6379
-      PG_POOL_MAX: ${PG_POOL_MAX:-10}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  rcs-worker:
+    build:
+      context: .
+      dockerfile: services/rcs-worker/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-xtel}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-xtelsmpp}
+      REDIS_URL: redis://redis:6379
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+      RCS_ROUTE_CONCURRENCY: ${RCS_ROUTE_CONCURRENCY:-50}
+      RCS_SEND_CONCURRENCY: ${RCS_SEND_CONCURRENCY:-50}
+      RCS_WEBHOOK_CONCURRENCY: ${RCS_WEBHOOK_CONCURRENCY:-25}
+      RCS_BILLING_CONCURRENCY: ${RCS_BILLING_CONCURRENCY:-25}
+      RCS_CAMPAIGN_CONCURRENCY: ${RCS_CAMPAIGN_CONCURRENCY:-4}
     depends_on:
       postgres:
         condition: service_healthy

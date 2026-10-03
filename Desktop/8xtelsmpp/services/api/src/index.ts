@@ -16,6 +16,8 @@ import messageRoutes from './routes/messages.js';
 import billingRoutes from './routes/billing.js';
 import reportRoutes from './routes/reports.js';
 import systemRoutes from './routes/system.js';
+import rcsAdminRoutes from './routes/rcs-admin.js';
+import rcsClientRoutes, { rcsWebhookRouter } from './routes/rcs-api.js';
 
 const app = express();
 const PORT = Number(process.env.API_PORT ?? 8080);
@@ -39,6 +41,15 @@ app.use('/vendor-dlr', (await import('./routes/vendor-dlr.js')).default);
 // Client HTTP send API — per-client API keys, no JWT.
 // (Own router with its own keyAuth; console/portal auth never applies.)
 app.use('/client/v1', (await import('./routes/client-api.js')).default);
+
+// RCS provider callbacks are public and authenticated by the provider adapter.
+app.use('/rcs/webhooks', rcsWebhookRouter);
+
+// RCS client API — independent key authentication and channel-scoped persistence.
+app.use('/rcs/v1', rcsClientRoutes);
+
+// Protected admin RCS surface (router applies granular RBAC permissions).
+app.use('/rcs', requireAuth, rcsAdminRoutes);
 
 // OpenAPI (§33)
 try {
@@ -67,6 +78,7 @@ app.use('/system', requireAuth, systemRoutes);
 
 // Channel connectors (§23)
 app.use('/connectors', requireAuth, (await import('./routes/connectors.js')).default);
+app.use('/dlr-cutting', requireAuth, (await import('./routes/dlr-cutting.js')).default);
 
 // Client self-service portal (§4) — own router, portal tokens only inside
 app.use('/portal', (await import('./routes/portal.js')).default);
