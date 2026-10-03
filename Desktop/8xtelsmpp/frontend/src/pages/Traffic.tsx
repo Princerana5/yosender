@@ -45,10 +45,12 @@ export default function Traffic(): JSX.Element {
     let dead = false;
     const load = (): void => {
       if (paused) return;
-      // Window value is either rolling minutes ("15") or "yesterday".
+      // Window value is either rolling minutes ("15") or a calendar day ("today"/"yesterday").
       const p = f.window === 'yesterday'
         ? new URLSearchParams({ day: 'yesterday' })
-        : new URLSearchParams({ minutes: f.window });
+        : f.window === 'today'
+          ? new URLSearchParams({ day: 'today' })
+          : new URLSearchParams({ minutes: f.window });
       if (f.client_id) p.set('client_id', f.client_id);
       if (f.country_id) p.set('country_id', f.country_id);
       if (f.vendor_id) p.set('vendor_id', f.vendor_id);
@@ -135,6 +137,7 @@ export default function Traffic(): JSX.Element {
             <option value="60">Last 60m</option>
             <option value="240">Last 240m</option>
             <option value="1440">Last 24 hours</option>
+            <option value="today">Today</option>
             <option value="yesterday">Yesterday</option>
             <option value="10080">Last 7 days</option>
           </select>

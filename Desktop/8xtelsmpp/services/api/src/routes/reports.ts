@@ -7,8 +7,11 @@ const router = Router();
 router.use(requirePerm('reports.read'));
 
 // ── Dashboard aggregate (§3) ────────────────────────────────────────────────
-router.get('/dashboard', async (_req, res) => {
+router.get('/dashboard', async (req, res) => {
+  const q = req.query as Record<string, string>;
   const today = new Date().toISOString().slice(0, 10);
+  const from = q.from ?? today;
+  const to = q.to ?? today;
   const month = today.slice(0, 7);
   const [counts] = await query<{
     today: string; month: string; submitted: string; delivered: string;
@@ -25,10 +28,18 @@ router.get('/dashboard', async (_req, res) => {
       COUNT(*) FILTER (WHERE status='failed') AS failed
     FROM messages WHERE created_at >= date_trunc('month', now()) - interval '1 day'`, [today, month]);
 
+  // Revenue = selling rate × segments (billed total), Margin = revenue − vendor cost.
+  // Source is billing_records (settled per-message). Bounded by ?from & ?to so the
+  // dashboard period picker actually changes the money row.
   const [money] = await query<{ revenue: string; cost: string; profit: string }>(`
     SELECT COALESCE(SUM(client_price),0) AS revenue, COALESCE(SUM(vendor_cost),0) AS cost,
            COALESCE(SUM(profit),0) AS profit FROM billing_records
-    WHERE created_at::date = $1::date`, [today]);
+    WHERE created_at >= $1::date AND created_at < ($2::date + interval '1 day')`, [from, to]);
+  // Period message totals for context (same window as money)
+  const [periodCounts] = await query<{ messages: string }>(
+    `SELECT COUNT(*) AS messages FROM messages WHERE created_at >= $1::date AND created_at < ($2::date + interval '1 day')`,
+    [from, to],
+  );
 
   const [entities] = await query<{ clients: string; vendors: string; conns: string }>(`
     SELECT (SELECT COUNT(*) FROM clients WHERE status='active') AS clients,
@@ -38,6 +49,9 @@ router.get('/dashboard', async (_req, res) => {
   const stats = await getDayStats(today).catch(() => ({}));
   const delivered = Number(counts.delivered);
   const total = delivered + Number(counts.undelivered) + Number(counts.expired) + Number(counts.rejected) + Number(counts.failed);
+  const revenue = Number(money.revenue);
+  const cost = Number(money.cost);
+  const profit = Number(money.profit);
 
   res.json({
     today: Number(counts.today),
@@ -52,9 +66,11 @@ router.get('/dashboard', async (_req, res) => {
     active_clients: Number(entities.clients),
     active_vendors: Number(entities.vendors),
     active_connections: Number(entities.conns),
-    revenue: Number(money.revenue),
-    cost: Number(money.cost),
-    profit: Number(money.profit),
+    revenue,
+    cost,
+    profit,
+    margin_pct: revenue ? +(profit / revenue * 100).toFixed(2) : 0,
+    period: { from, to, messages: Number(periodCounts.messages) },
     realtime: stats,
   });
 });
@@ -107,7 +123,11 @@ router.get('/live', async (req, res) => {
   let timeFilter: string;
   let windowLabel: string;
   let windowMinutes: number | null;
-  if (q.day === 'yesterday') {
+  if (q.day === 'today') {
+    timeFilter = `m.created_at >= CURRENT_DATE AND m.created_at < (CURRENT_DATE + interval '1 day')`;
+    windowLabel = 'today';
+    windowMinutes = null;
+  } else if (q.day === 'yesterday') {
     timeFilter = `m.created_at >= (CURRENT_DATE - interval '1 day') AND m.created_at < CURRENT_DATE`;
     windowLabel = 'yesterday';
     windowMinutes = null;
