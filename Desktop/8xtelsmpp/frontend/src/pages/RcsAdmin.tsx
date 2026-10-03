@@ -58,6 +58,7 @@ function RcsVendors(): JSX.Element {
         { key: 'endpoint', label: 'Endpoint', mono: true, render: (r) => <span className="text-[11px] max-w-[280px] truncate block">{String(r.endpoint)}</span> },
         { key: 'status', label: 'Status', render: (r) => <StatusBadge status={String(r.status)} /> },
         { key: 'tps_limit', label: 'TPS' },
+        { key: 'action', label: '', render: (r) => <button className="btn-ghost !py-1 !text-xs text-red-300" onClick={() => { if (!window.confirm(`Delete vendor "${String(r.name)}"? This cannot be undone.`)) return; api(`/rcs/vendors/${String(r.id)}`, { method: 'DELETE' }).then(load).catch((e) => alert((e as Error).message)); }}>Delete</button> },
       ]} />
       {show && (
         <Modal title="New RCS vendor" onClose={() => setShow(false)}>
@@ -110,6 +111,7 @@ function RcsRoutes(): JSX.Element {
         { key: 'strategy', label: 'Strategy', mono: true },
         { key: 'status', label: 'Status', render: (r) => <StatusBadge status={String(r.status)} /> },
         { key: 'vendors', label: 'Vendors', render: (r) => String(Array.isArray(r.vendors) ? (r.vendors as unknown[]).length : '0') },
+        { key: 'action', label: '', render: (r) => <button className="btn-ghost !py-1 !text-xs text-red-300" onClick={() => { if (!window.confirm(`Delete route "${String(r.name)}"?`)) return; api(`/rcs/routes/${String(r.id)}`, { method: 'DELETE' }).then(load).catch((e) => alert((e as Error).message)); }}>Delete</button> },
       ]} />
       {show && (
         <Modal title="New RCS route" onClose={() => setShow(false)}>
@@ -269,6 +271,7 @@ function RcsRates(): JSX.Element {
       </form>
       <DataTable keyOf={(r, i) => String(r.id ?? i)} rows={rows} empty="No RCS rates yet." columns={[
         { key: 'client_name', label: 'Client' }, { key: 'country_name', label: 'Country' }, { key: 'price', label: 'Price', render: (r) => String(r.price) },
+        { key: 'action', label: '', render: (r) => <button className="btn-ghost !py-1 !text-xs text-red-300" onClick={() => { if (!window.confirm(`Delete rate ${String(r.client_name)} / ${String(r.country_name)}?`)) return; api(`/rcs/rates/${String(r.id)}`, { method: 'DELETE' }).then(load).catch((e) => alert((e as Error).message)); }}>Delete</button> },
       ]} />
     </div>
   );

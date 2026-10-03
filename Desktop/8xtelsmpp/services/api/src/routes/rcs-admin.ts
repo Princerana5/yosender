@@ -78,6 +78,11 @@ router.patch('/vendors/:id', requirePerm('rcs.vendors.manage'), audit('updated_r
   if (!row) return void res.status(404).json({ error: 'not found' });
   res.json({ vendor: row });
 });
+router.delete('/vendors/:id', requirePerm('rcs.vendors.manage'), audit('deleted_rcs_vendor', 'rcs_vendor'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM rcs_vendors WHERE id=$1', [req.params.id]);
+  if (!r.rowCount) return void res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+});
 router.get('/routes', async (_req, res) => {
   const rows = await query(`SELECT r.*,c.name AS country_name,
     COALESCE((SELECT json_agg(json_build_object('vendor_id',v.id,'vendor_name',v.name,'priority',rv.priority,'weight',rv.weight))
@@ -93,6 +98,11 @@ router.post('/routes', requirePerm('rcs.routes.manage'), audit('created_rcs_rout
   const row = await queryOne(`INSERT INTO rcs_routes(name,country_id,sender,strategy,status,tps_limit,daily_limit,monthly_limit)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [b.name,b.country_id??null,b.sender??null,b.strategy,b.status,b.tps_limit??null,b.daily_limit??null,b.monthly_limit??null]);
   res.status(201).json({ route: row });
+});
+router.delete('/routes/:id', requirePerm('rcs.routes.manage'), audit('deleted_rcs_route', 'rcs_route'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM rcs_routes WHERE id=$1', [req.params.id]);
+  if (!r.rowCount) return void res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
 });
 router.put('/routes/:id/vendors', requirePerm('rcs.routes.manage'), audit('set_rcs_route_vendors', 'rcs_route'), async (req, res) => {
   const p = z.object({ vendors: z.array(z.object({ vendor_id: z.string().uuid(), priority: z.number().int().min(1), weight: z.number().int().min(1).max(100) })).max(100) }).safeParse(req.body);
@@ -187,6 +197,11 @@ router.post('/rates', requirePerm('rcs.rates.manage'), audit('created_rcs_rate',
   if(!p.success)return void res.status(400).json({error:'invalid payload'});
   const row=await queryOne('INSERT INTO rcs_rates(client_id,country_id,price) VALUES($1,$2,$3) RETURNING *',[p.data.client_id,p.data.country_id,p.data.price]);
   res.status(201).json({rate:row});
+});
+router.delete('/rates/:id', requirePerm('rcs.rates.manage'), audit('deleted_rcs_rate', 'rcs_rate'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM rcs_rates WHERE id=$1', [req.params.id]);
+  if (!r.rowCount) return void res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
 });
 router.get('/senders', async (_req,res)=>res.json({senders:await query(`SELECT s.*,c.name AS client_name,co.name AS country_name FROM rcs_senders s JOIN clients c ON c.id=s.client_id LEFT JOIN countries co ON co.id=s.country_id ORDER BY s.created_at DESC LIMIT 2000`)}));
 router.post('/senders', requirePerm('rcs.senders.manage'), audit('created_rcs_sender','rcs_sender'), async(req,res)=>{
