@@ -22,13 +22,14 @@ import rcsClientRoutes, { rcsWebhookRouter } from './routes/rcs-api.js';
 const app = express();
 const PORT = Number(process.env.API_PORT ?? 8080);
 
+app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 // HTTP vendors push DLRs as form-encoded bodies or query strings, not JSON —
 // without this, req.body is {} and every form POST fails validation.
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
-app.use(rateLimit({ windowMs: 60_000, max: 600 })); // §32
+app.use(rateLimit({ windowMs: 60_000, max: 600, validate: { xForwardedForHeader: false, trustProxy: false } })); // §32
 
 // Public
 app.use('/auth', authRoutes);
