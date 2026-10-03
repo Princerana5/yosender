@@ -44,6 +44,7 @@ const vendorSchema = z.object({
   protocol: z.enum(['smpp', 'http']).default('smpp'),
   connection_count: z.number().int().min(1).max(16).default(1),
   dlr_supported: z.boolean().default(true),
+  synthetic_dlr_enabled: z.boolean().default(false),
   use_tls: z.boolean().default(false),
   status: z.enum(['enabled', 'disabled']).default('disabled'),
   reconnect_interval_sec: z.number().int().min(2).default(10),
@@ -73,13 +74,13 @@ router.post('/', requirePerm('vendors.create'), audit('created_vendor', 'vendor'
   try {
     const { rows } = await pool.query(
       `INSERT INTO vendors (name, host, port, system_id, password_enc, bind_type, source_ton, source_npi,
-                            dest_ton, dest_npi, tps, protocol, connection_count, dlr_supported, use_tls, status,
+                            dest_ton, dest_npi, tps, protocol, connection_count, dlr_supported, synthetic_dlr_enabled, use_tls, status,
                             reconnect_interval_sec, sender_id_rule)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
       [
         b.name, b.host, b.port, b.system_id, encryptSecret(b.password), b.bind_type,
         b.source_ton, b.source_npi, b.dest_ton, b.dest_npi, b.tps, b.protocol, b.connection_count,
-        b.dlr_supported, b.use_tls, b.status, b.reconnect_interval_sec, b.sender_id_rule,
+        b.dlr_supported, b.synthetic_dlr_enabled, b.use_tls, b.status, b.reconnect_interval_sec, b.sender_id_rule,
       ],
     );
     const vendor = rows[0];
@@ -121,7 +122,7 @@ router.get('/:id', async (req, res) => {
 router.patch('/:id', requirePerm('vendors.update'), audit('updated_vendor', 'vendor'), async (req, res) => {
   const allowed = [
     'name', 'host', 'port', 'system_id', 'bind_type', 'source_ton', 'source_npi', 'dest_ton',
-    'dest_npi', 'tps', 'protocol', 'connection_count', 'dlr_supported', 'use_tls', 'status',
+    'dest_npi', 'tps', 'protocol', 'connection_count', 'dlr_supported', 'synthetic_dlr_enabled', 'use_tls', 'status',
     'reconnect_interval_sec', 'sender_id_rule',
   ] as const;
   const sets: string[] = [];
@@ -388,6 +389,60 @@ router.delete('/:id/dlr-tokens/:tokenId', requirePerm('vendors.update'), audit('
     return;
   }
   res.json({ ok: true });
+});
+
+// ── Vendor rate CRUD — adjusted cost recalculates margins live (§1 margin calc) ─
+router.patch('/:id/rates/:rateId', requirePerm('rates.manage'), audit('updated_vendor_rate', 'vendor_rate'), async (req, res) => {
+  const { cost, prefix, operator, country_id } = (req.body ?? {}) as { cost?: unknown; prefix?: unknown; operator?: unknown; country_id?: unknown };
+  const sets: string[] = []; const params: unknown[] = [];
+  if (cost !== undefined) {
+    const n = Number(cost);
+    if (!Number.isFinite(n) || n < 0) { res.status(400).json({ error: 'cost must be >= 0' }); return; }
+    params.push(n); sets.push(`cost = $${params.length}`);
+  }
+  if (prefix !== undefined) { params.push(prefix ? String(prefix) : null); sets.push(`prefix = $${params.length}`); }
+  if (operator !== undefined) { params.push(operator ? String(operator).trim() : null); sets.push(`operator = $${params.length}`); }
+  if (country_id !== undefined) {
+    if (country_id) {
+      const co = await queryOne('SELECT id FROM countries WHERE id=$1', [String(country_id)]);
+      if (!co) { res.status(404).json({ error: 'country not found' }); return; }
+    }
+    params.push(country_id ? String(country_id) : null); sets.push(`country_id = $${params.length}`);
+  }
+  if (!sets.length) { res.status(400).json({ error: 'nothing to update' }); return; }
+  params.push(req.params.rateId); params.push(req.params.id);
+  sets.push(`updated_at = now()`);
+  const rows = await query(
+    `UPDATE vendor_rates SET ${sets.join(', ')} WHERE id=$${params.length - 1} AND vendor_id=$${params.length} RETURNING *`, params,
+  );
+  if (!rows.length) { res.status(404).json({ error: 'rate not found' }); return; }
+  res.json({ rate: rows[0] });
+});
+
+router.delete('/:id/rates/:rateId', requirePerm('rates.manage'), audit('deleted_vendor_rate', 'vendor_rate'), async (req, res) => {
+  const r = await getPool().query('DELETE FROM vendor_rates WHERE id=$1 AND vendor_id=$2', [req.params.rateId, req.params.id]);
+  if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  res.json({ ok: true });
+});
+
+router.post('/:id/rates', requirePerm('rates.manage'), audit('created_vendor_rate', 'vendor_rate'), async (req, res) => {
+  const { country_id, prefix, operator, cost, country_iso } = (req.body ?? {}) as { country_id?: string; prefix?: string; operator?: string; cost?: unknown; country_iso?: string };
+  const n = Number(cost);
+  if (!Number.isFinite(n) || n < 0) { res.status(400).json({ error: 'cost is required and must be >= 0' }); return; }
+  let cid: string | null = country_id ?? null;
+  if (!cid && country_iso) {
+    const c = await queryOne<{ id: string }>('SELECT id FROM countries WHERE iso_code=$1', [country_iso.toUpperCase()]);
+    cid = c?.id ?? null;
+  }
+  if (cid) {
+    const co = await queryOne('SELECT id FROM countries WHERE id=$1', [cid]);
+    if (!co) { res.status(404).json({ error: 'country not found' }); return; }
+  }
+  const { rows } = await getPool().query(
+    `INSERT INTO vendor_rates (vendor_id, country_id, prefix, operator, cost) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [req.params.id, cid, prefix ?? null, operator ?? null, n],
+  );
+  res.status(201).json({ rate: rows[0] });
 });
 
 // ── Rate card CSV import (§14): vendor_id,country_iso,prefix,operator,cost ──

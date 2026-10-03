@@ -80,8 +80,9 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
   const vRow = await queryOne<{
     tps: number; protocol: string; name: string;
     source_ton: number; source_npi: number; dest_ton: number; dest_npi: number;
+    synthetic_dlr_enabled: boolean;
   }>(
-    `SELECT tps, COALESCE(protocol,'smpp') AS protocol, name,
+    `SELECT tps, COALESCE(protocol,'smpp') AS protocol, name, synthetic_dlr_enabled,
             source_ton, source_npi, dest_ton, dest_npi FROM vendors WHERE id=$1`, [vendorId],
   );
   if (vRow && !(await tryAcquireTps(`vendor:${vendorId}`, vRow.tps))) {
@@ -106,15 +107,22 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
         dlr_token: null, // operator pastes full webhook URL into template if needed
       });
     } catch (e) {
+      const em = (e as Error).message;
       await pool.query(
         `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover',$3)`,
-        [msg.internal_id, vendorId, `http submit error: ${(e as Error).message}`],
+        [msg.internal_id, vendorId, `http submit error: ${em}`],
       );
-      await getQueue(QUEUES.vendorSend).add('send', {
-        ...msg,
-        vendor_index: msg.vendor_index + 1,
-        attempts: msg.attempts + 1,
-      });
+      await pool.query(`INSERT INTO failover_logs (message_id, route_id, from_vendor_id, reason, attempt) VALUES ($1,$2,$3,$4,1)`,
+        [msg.internal_id, msg.route_id ?? null, vendorId, em.slice(0, 500)]).catch(() => undefined);
+      try {
+        const rule = await pool.query(`SELECT retry_delay_ms, max_attempts FROM failover_rules WHERE route_id=$1 AND vendor_id=$2 AND enabled=true`, [msg.route_id, vendorId]).then((r) => r.rows[0] as { retry_delay_ms: number; max_attempts: number } | undefined).catch(() => undefined);
+        const delay = rule?.retry_delay_ms ?? 500;
+        if (rule && (msg.attempts ?? 0) + 1 > rule.max_attempts) {
+          await pool.query(`UPDATE messages SET status='failed', error_description=$1 WHERE id=$2`, [`http failover max attempts exhausted: ${em}`, msg.internal_id]);
+          return;
+        }
+        await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1, attempts: msg.attempts + 1 }, { delay });
+      } catch { await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1, attempts: msg.attempts + 1 }); }
       return;
     }
   } else {
@@ -124,8 +132,8 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
       // Only fail over on real submit errors (handled below). Attempts cap the
       // wait so a dead vendor eventually fails over instead of looping forever.
       const attempts = msg.attempts ?? 0;
-      if (attempts < 120) {
-        await getQueue(QUEUES.vendorSend).add('send', { ...msg, attempts: attempts + 1 }, { delay: 2000 });
+      if (attempts < 3) {
+        await getQueue(QUEUES.vendorSend).add('send', { ...msg, attempts: attempts + 1 }, { delay: 500 });
         return;
       }
       await pool.query(
@@ -148,15 +156,30 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
         registered_delivery: 1,
       });
     } catch (e) {
+      const em = (e as Error).message;
       await pool.query(
         `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'failover',$3)`,
-        [msg.internal_id, vendorId, `submit error: ${(e as Error).message}`],
+        [msg.internal_id, vendorId, `submit error: ${em}`],
       );
-      await getQueue(QUEUES.vendorSend).add('send', {
-        ...msg,
-        vendor_index: msg.vendor_index + 1,
-        attempts: msg.attempts + 1,
-      });
+      // failover log + rule-aware retry delay
+      try {
+        const rule = await pool.query(`SELECT failover_vendor_id, retry_delay_ms, max_attempts, condition FROM failover_rules WHERE route_id=$1 AND vendor_id=$2 AND enabled=true`, [msg.route_id, vendorId]).then((r) => r.rows[0] as { failover_vendor_id: string | null; retry_delay_ms: number; max_attempts: number; condition: string } | undefined).catch(() => undefined);
+        const delay = rule?.retry_delay_ms ?? 500;
+        // respect max_attempts
+        const nextIdx = rule?.failover_vendor_id
+          ? (msg.vendor_chain.indexOf(rule.failover_vendor_id) >= 0 ? msg.vendor_chain.indexOf(rule.failover_vendor_id) : msg.vendor_index + 1)
+          : msg.vendor_index + 1;
+        const attempts = (msg.attempts ?? 0) + 1;
+        if (rule && attempts > rule.max_attempts) {
+          await pool.query(`UPDATE messages SET status='failed', error_description=$1 WHERE id=$2`, [`failover max attempts (${rule.max_attempts}) exhausted: ${em}`, msg.internal_id]);
+          return;
+        }
+        await pool.query(`INSERT INTO failover_logs (message_id, route_id, from_vendor_id, to_vendor_id, reason, attempt) VALUES ($1,$2,$3,$4,$5,$6)`,
+          [msg.internal_id, msg.route_id ?? null, vendorId, msg.vendor_chain[nextIdx] ?? null, em.slice(0, 500), attempts]).catch(() => undefined);
+        await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: nextIdx, attempts }, { delay });
+      } catch {
+        await getQueue(QUEUES.vendorSend).add('send', { ...msg, vendor_index: msg.vendor_index + 1, attempts: msg.attempts + 1 });
+      }
       return;
     }
   }
@@ -165,9 +188,13 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
   // The vendor has ACCEPTED the message at this point — a DB error here must
   // NOT fail over (that would double-send). Throw so BullMQ retries the
   // bookkeeping; all writes are idempotent on message id.
+  // blending_vendor_id = actual vendor when it differs from the chain head
+  // (failover hop or percentage split) so DLR logs show the Blending vendor.
+  const headVendorId: string | null = (msg.vendor_chain as string[])[0] ?? null;
+  const blendingId: string | null = headVendorId && vendorId !== headVendorId ? vendorId : null;
   await pool.query(
-    `UPDATE messages SET vendor_id=$1, vendor_msg_id=$2, attempts=attempts+1 WHERE id=$3`,
-    [vendorId, vendorMsgId, msg.internal_id],
+    `UPDATE messages SET vendor_id=$1, vendor_msg_id=$2, attempts=attempts+1, blending_vendor_id=COALESCE($4, blending_vendor_id) WHERE id=$3`,
+    [vendorId, vendorMsgId, msg.internal_id, blendingId],
   );
   await pool.query(
     `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'sent',$3)`,
@@ -181,6 +208,32 @@ async function handleJob(job: { data: SendJob }): Promise<void> {
     );
   }
   await incrStat('sent');
+  // ── Synthetic delivered DLR (per-vendor toggle in Vendors → Synthetic delivery) ─
+  // When vendors.synthetic_dlr_enabled = true, schedule a local DELIVRD 3-5s after
+  // submit for vendors that never push a real DLR (e.g. MANISH). OFF = no fake DLR,
+  // only real DLRs count. Overridden to always-on when AUTO_DLR_ALL=1 for debugging.
+  try {
+    const autoDlr = !!vRow?.synthetic_dlr_enabled || process.env.AUTO_DLR_ALL === '1';
+    if (autoDlr && vendorMsgId) {
+      const delayMs = 3000 + Math.floor(Math.random() * 2000); // 3–5 s jitter
+      const nowStr = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+      const body = `id:${vendorMsgId} sub:001 dlvrd:001 submit date:${nowStr} done date:${nowStr} stat:DELIVRD err:000 Text:${msg.text.slice(0, 20)}`;
+      await getQueue(QUEUES.dlr).add('dlr', {
+        vendor_id: vendorId,
+        body,
+        source: msg.source,
+        received_at: new Date().toISOString(),
+        internal_id: msg.internal_id,
+        destination: msg.destination,
+      } as never, { delay: delayMs });
+      await pool.query(
+        `INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'auto-dlr-scheduled',$3)`,
+        [msg.internal_id, vendorId, `synthetic DELIVRD in ${delayMs}ms`],
+      ).catch(() => undefined);
+    }
+  } catch (e) {
+    console.warn('[vendor] auto-dlr schedule failed', (e as Error).message);
+  }
   // Charge client + record vendor cost (async, idempotent on message id)
   await getQueue(QUEUES.billing).add('charge', {
     internal_id: msg.internal_id,
@@ -207,7 +260,7 @@ async function main(): Promise<void> {
   setInterval(() => {
     syncConnectors(byVendor).catch((e) => console.error('[vendor] periodic sync failed', (e as Error).message));
   }, 60_000).unref();
-  createWorker(QUEUES.vendorSend, handleJob, 30);
+  createWorker(QUEUES.vendorSend, handleJob, Number(process.env.VENDOR_WORKER_CONCURRENCY ?? 100));
   startDlrPoller(); // pull-style DLR polling for HTTP vendors (no-op when none configured)
   console.log(`[8xtelSMPP vendor-worker] started with ${n} connector(s)`);
 }

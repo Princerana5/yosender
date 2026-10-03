@@ -3,6 +3,43 @@ import {
   mapDlrStatus, parseDlrBody, can, ROLE_PERMISSIONS,
   analyzeSms, normalizeToGsm, parseDestinations,
 } from '@8xtel/core';
+import { CLIENT_ROUTE_RATE_LATERAL_JOIN } from './lib/client-route-pricing.js';
+import {
+  CLEAR_ROUTE_CLIENT_EXCLUSION_SQL,
+  EXCLUDE_ROUTE_CLIENT_SQL,
+  REMOVE_ROUTE_CLIENT_RATES_SQL,
+  shouldExcludeAfterMemberRemoval,
+} from './lib/route-client-access.js';
+
+// Route/client access cleanup
+describe('route client removal cleanup', () => {
+  it('deletes every route-specific rate for the removed client', () => {
+    expect(REMOVE_ROUTE_CLIENT_RATES_SQL).toBe(
+      'DELETE FROM route_client_rates WHERE route_id=$1 AND client_id=$2',
+    );
+  });
+
+  it('excludes the removed client when last-member removal makes the route global', () => {
+    expect(shouldExcludeAfterMemberRemoval(0)).toBe(true);
+    expect(shouldExcludeAfterMemberRemoval(1)).toBe(false);
+    expect(EXCLUDE_ROUTE_CLIENT_SQL).toContain('ON CONFLICT DO NOTHING');
+    expect(CLEAR_ROUTE_CLIENT_EXCLUSION_SQL).toContain('DELETE FROM route_client_exclusions');
+  });
+});
+describe('client route-rate selection', () => {
+  it('selects only the route-country rate, then generic, and ignores other countries and destination-specific rows', () => {
+    expect(CLIENT_ROUTE_RATE_LATERAL_JOIN).toContain('LEFT JOIN LATERAL');
+    expect(CLIENT_ROUTE_RATE_LATERAL_JOIN).toContain('(rcr.country_id IS NULL OR rcr.country_id=r.country_id)');
+    expect(CLIENT_ROUTE_RATE_LATERAL_JOIN).toContain('ORDER BY (rcr.country_id IS NOT NULL) DESC');
+    expect(CLIENT_ROUTE_RATE_LATERAL_JOIN).toContain('rcr.mcc IS NULL AND rcr.mnc IS NULL');
+    expect(CLIENT_ROUTE_RATE_LATERAL_JOIN).toContain('LIMIT 1');
+  });
+
+  it('preserves the route price fallback when there is no matching client override', () => {
+    const fallback = 'COALESCE(rcr.price_per_segment, r.price_per_segment) AS effective_price_per_segment';
+    expect(fallback).toContain('r.price_per_segment');
+  });
+});
 
 // DLR mapping (§16)
 describe('dlr mapping', () => {

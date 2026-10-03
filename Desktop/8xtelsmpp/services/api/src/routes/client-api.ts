@@ -3,7 +3,7 @@ import { z } from 'zod';
 import crypto from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import {
-  queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat,
+  queryOne, getPool, getQueue, QUEUES, tryAcquireTps, incrStat, submitQueueFor, getAnyQueue, trackBulkClient, getRedis,
   parseDestinations, type MessageJob,
 } from '@8xtel/core';
 
@@ -95,6 +95,7 @@ async function senderAllowed(clientId: string, source: string): Promise<string |
 
 async function enqueue(
   client: ApiClient, source: string, destination: string, text: string, dlrUrl: string | null,
+  bulk = false,
 ): Promise<{ id: string; client_msg_id: string }> {
   const internalId = randomUUID();
   const clientMsgId = `h-${internalId.slice(0, 8)}`;
@@ -103,12 +104,14 @@ async function enqueue(
      VALUES ($1,$2,'sms',$3,$4,$5,$6,0,'submitted')`,
     [internalId, client.id, clientMsgId, source, destination, text],
   );
-  const job: MessageJob = {
+  const job = {
     internal_id: internalId, client_id: client.id, client_msg_id: clientMsgId,
     channel: 'sms', source, destination, country_id: null,
     text, data_coding: 0, route_id: null, attempts: 0,
-  };
-  await getQueue(QUEUES.submit).add('submit', job, { jobId: internalId });
+    _bulk: bulk,
+  } as MessageJob & { _bulk: boolean };
+  await getAnyQueue(submitQueueFor(job)).add('submit', job as never, { jobId: internalId });
+  if (bulk) { await trackBulkClient(client.id); getRedis().publish('bulk:hint', client.id).catch(()=>undefined); }
   await incrStat('submitted');
   // Per-request DLR callback override: the dlr-worker fan-out only reads the
   // stored client URL, so a differing override becomes the new stored default
@@ -187,7 +190,7 @@ router.post('/send-bulk', async (req, res) => {
   }
   const ids: Array<{ to: string; id: string }> = [];
   for (const dest of numbers) {
-    const { id } = await enqueue(client, parsed.data.from, dest, parsed.data.text, parsed.data.dlr_url ?? null);
+    const { id } = await enqueue(client, parsed.data.from, dest, parsed.data.text, parsed.data.dlr_url ?? null, true);
     ids.push({ to: dest, id });
   }
   res.status(202).json({ accepted: ids.length, invalid: invalid.slice(0, 20), messages: ids });

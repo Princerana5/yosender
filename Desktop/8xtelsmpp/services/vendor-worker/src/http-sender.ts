@@ -104,6 +104,10 @@ async function vendorDlrToken(vendorId: string): Promise<string | null> {
   return token;
 }
 
+const httpConfigCache = new Map<string, { cfg: HttpConfig | null; at: number }>();
+const HTTP_CFG_TTL_MS = 15_000;
+const senderTemplateCache = new Map<string, { rows: Array<{ sender_id: string; template: string; is_default: boolean }>; at: number }>();
+
 export class HttpVendorSender {
   /** Always "connected" when config exists — no persistent socket to track. */
   connected = true;
@@ -115,13 +119,29 @@ export class HttpVendorSender {
   }
 
   private async loadConfig(): Promise<HttpConfig | null> {
-    return queryOne<HttpConfig>(
+    const hit = httpConfigCache.get(this.vendorId);
+    if (hit && Date.now() - hit.at < HTTP_CFG_TTL_MS) return hit.cfg;
+    const cfg = await queryOne<HttpConfig>(
       `SELECT url_template, method, body_template, headers_enc,
               msgid_json_path, timeout_ms, verify_tls,
               force_sender_id, message_template
        FROM vendor_http_configs WHERE vendor_id=$1`,
       [this.vendorId],
     );
+    httpConfigCache.set(this.vendorId, { cfg, at: Date.now() });
+    return cfg;
+  }
+
+  private async loadSenderTemplates(): Promise<Array<{ sender_id: string; template: string; is_default: boolean }>> {
+    const hit = senderTemplateCache.get(this.vendorId);
+    if (hit && Date.now() - hit.at < HTTP_CFG_TTL_MS) return hit.rows;
+    const rows = await query<{ sender_id: string; template: string; is_default: boolean }>(
+      `SELECT sender_id, template, is_default FROM vendor_sender_templates
+       WHERE vendor_id=$1 ORDER BY is_default DESC, sender_id`,
+      [this.vendorId],
+    );
+    senderTemplateCache.set(this.vendorId, { rows, at: Date.now() });
+    return rows;
   }
 
   /** Build the upstream sender + text.
@@ -133,11 +153,7 @@ export class HttpVendorSender {
          only when the vendor has zero per-SID rows.
       3. Otherwise passthrough — client sender + text go as-is. */
   private async applyTemplate(cfg: HttpConfig, source: string, text: string): Promise<{ from: string; text: string }> {
-    const rows = await query<{ sender_id: string; template: string; is_default: boolean }>(
-      `SELECT sender_id, template, is_default FROM vendor_sender_templates
-       WHERE vendor_id=$1 ORDER BY is_default DESC, sender_id`,
-      [this.vendorId],
-    );
+    const rows = await this.loadSenderTemplates();
     if (rows.length) {
       const hit = rows.find((r) => r.sender_id.toUpperCase() === source.toUpperCase())
         ?? rows.find((r) => r.is_default)
@@ -164,7 +180,7 @@ export class HttpVendorSender {
   async submit(opts: HttpSubmitOpts): Promise<string> {
     const cfg = await this.loadConfig();
     if (!cfg) throw new Error(`no http config for vendor ${this.vendorName}`);
-    const timeoutMs = cfg.timeout_ms > 0 ? cfg.timeout_ms : 10_000;
+    const timeoutMs = cfg.timeout_ms > 0 ? cfg.timeout_ms : 4_000;
 
     const applied = await this.applyTemplate(cfg, opts.source, opts.text);
     // ── HTTP-only template gate: never send unapproved content upstream ──
@@ -180,15 +196,8 @@ export class HttpVendorSender {
         `http vendor rejected: template variables missing for sender ${applied.from} (unresolved ${applied.text.match(/\{v\d+\}/i)?.[0]})`,
       );
     }
-    // Multi-SID mode: does this vendor use per-SID templates? When yes the
-    // resolved `from` MUST win even if the operator left a hardcoded SID in
-    // the URL/body template (e.g. sendername=NDRTEd). Otherwise every message
-    // goes out from the old SID no matter which template was picked.
-    const senderRows = await query<{ id: string }>(
-      `SELECT id FROM vendor_sender_templates WHERE vendor_id=$1 LIMIT 1`,
-      [this.vendorId],
-    );
-    const multiSid = senderRows.length > 0;
+    // Multi-SID mode: cached check — reuse template cache
+    const multiSid = (await this.loadSenderTemplates()).length > 0;
     // Auto-provision a push token so {dlr_url} resolves even when the
     // caller passes none (vendor-worker passes null today). Fortis-style
     // vendors then push DLRs in realtime instead of waiting for poll rounds.

@@ -328,6 +328,7 @@ export default function Invoices(): JSX.Element {
                           <button className="btn-ghost !py-0 !px-2 !text-xs" onClick={async () => { await api(`/invoices/${detail.invoice.id}/payment/${String(pp.id)}/verify`, { method: 'POST', body: JSON.stringify({ action: 'verify' }) }); await reloadDetail(); load(); }}>Verify</button>
                           <button className="btn-ghost !py-0 !px-2 !text-xs" onClick={async () => { await api(`/invoices/${detail.invoice.id}/payment/${String(pp.id)}/verify`, { method: 'POST', body: JSON.stringify({ action: 'reject' }) }); await reloadDetail(); }}>Reject</button>
                         </>}
+                        <button className="btn-ghost !py-0 !px-2 !text-xs text-red-300/80 hover:text-red-200" title={String(pp.status) === 'verified' ? 'Verified payment cannot be deleted — reject it first' : 'Delete payment'} onClick={async () => { if (!window.confirm('Delete this payment record?')) return; try { await api(`/invoices/${detail.invoice.id}/payment/${String(pp.id)}`, { method: 'DELETE' }); await reloadDetail(); load(); } catch (e) { setErrMsg((e as Error).message); } }}>Delete</button>
                       </span>
                     </div>
                   ))}

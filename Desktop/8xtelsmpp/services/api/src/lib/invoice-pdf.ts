@@ -83,7 +83,7 @@ export function buildInvoiceHtml(doc: InvoiceDoc, paymentMethods: PaymentMethodF
     @media print{body{padding:16px}}
   </style></head><body>
   <div class="header">
-    <div><div class="brand">8xtel<span>SMPP</span></div><div style="font-size:11px;color:#64748b;letter-spacing:.12em;text-transform:uppercase">Messaging Gateway</div></div>
+    <div><div class="brand">8xtel</div><div style="font-size:11px;color:#64748b;letter-spacing:.12em;text-transform:uppercase">Messaging Gateway</div></div>
     <div class="meta">
       <div style="font-size:16px;font-weight:800;color:#0f172a">${esc(doc.invoice_number)}</div>
       <div>${esc(doc.period_from)} → ${esc(doc.period_to)}</div>
@@ -107,7 +107,7 @@ export function buildInvoiceHtml(doc: InvoiceDoc, paymentMethods: PaymentMethodF
   </div>
   ${doc.notes ? `<div style="margin-top:16px;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;background:#fffbeb"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#92400e;font-weight:700">Notes</div><div style="margin-top:4px;white-space:pre-wrap">${esc(doc.notes)}</div></div>` : ''}
   ${paymentMethods.length ? `<div style="margin-top:16px"><div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#0f172a;font-weight:800;margin-bottom:8px">How to pay</div>${paymentBlockHtml(paymentMethods)}</div>` : ''}
-  <div class="footer">This is a system-generated invoice from 8xtelSMPP. For queries contact Accounts@8xtel.com</div>
+  <div class="footer">This is a system-generated invoice from 8xtel. For queries contact Accounts@8xtel.com</div>
   </body></html>`;
 }
 
@@ -129,7 +129,7 @@ async function renderWithPdfkit(PDFDocumentCtor: any, doc: InvoiceDoc, methods: 
     pdf.on('end', () => resolve(Buffer.concat(chunks)));
     pdf.on('error', reject);
     const P: any = pdf;
-    P.rect(36, 36, 523, 56).fill('#0f172a'); P.fillColor('#ffffff'); P.fontSize(18).font('Helvetica-Bold').text('8xtelSMPP', 44, 48);
+    P.rect(36, 36, 523, 56).fill('#0f172a'); P.fillColor('#ffffff'); P.fontSize(18).font('Helvetica-Bold').text('8xtel', 44, 48);
     P.fontSize(8).fillColor('#94a3b8').text('Messaging Gateway  ·  Accounts@8xtel.com', 44, 68);
     P.fillColor('#ffffff').fontSize(10).font('Helvetica-Bold').text(doc.invoice_number, 380, 48, { width: 170, align: 'right' });
     P.fontSize(7).font('Helvetica').fillColor('#cbd5e1').text(`${doc.period_from} → ${doc.period_to}  ·  ${doc.status.toUpperCase()}`, 380, 62, { width: 170, align: 'right' });
@@ -140,7 +140,7 @@ async function renderWithPdfkit(PDFDocumentCtor: any, doc: InvoiceDoc, methods: 
     y = drawTotals(P, doc, y);
     if (doc.notes) y = drawNotes(P, doc.notes, y);
     if (methods.length) y = drawHowToPay(P, methods, y);
-    P.fontSize(7).fillColor('#94a3b8').text('This is a system-generated invoice from 8xtelSMPP. For queries contact Accounts@8xtel.com', 36, 810, { align: 'center', width: 523 });
+    P.fontSize(7).fillColor('#94a3b8').text('This is a system-generated invoice from 8xtel. For queries contact Accounts@8xtel.com', 36, 810, { align: 'center', width: 523 });
     pdf.end();
   });
 }

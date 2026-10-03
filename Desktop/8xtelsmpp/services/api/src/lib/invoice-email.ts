@@ -63,7 +63,7 @@ export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#f1f5f9;font-family:Inter,Arial,Helvetica,sans-serif">
 <div style="max-width:640px;margin:0 auto;background:#ffffff">
   <div style="background:#0f172a;color:#fff;padding:20px 28px">
-    <div style="font-size:20px;font-weight:800">8xtel<span style="color:#10b981">SMPP</span> <span style="font-weight:400;font-size:13px;color:#94a3b8;margin-left:8px">Invoice — ${esc(d.invoice_number)}</span></div>
+    <div style="font-size:20px;font-weight:800">8xtel <span style="font-weight:400;font-size:13px;color:#94a3b8;margin-left:8px">Invoice — ${esc(d.invoice_number)}</span></div>
     <div style="font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;margin-top:2px">Messaging Gateway · Accounts@8xtel.com</div>
   </div>
   <div style="padding:28px;color:#0f172a;font-size:14px;line-height:1.6">
@@ -84,8 +84,6 @@ export function buildInvoiceEmailHtml(args: InvoiceEmailArgs): string {
     <div style="margin-top:18px">
       <div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#0f172a;font-weight:800;margin-bottom:8px">How to pay</div>
       ${howToPayHtml(args.paymentMethods)}
-      <div style="margin-top:10px"><a href="${esc(args.panelUrl)}/portal/invoices/${esc(args.invoiceId)}" style="display:inline-block;background:#10b981;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:700">View &amp; submit payment</a></div>
-      <div style="font-size:11px;color:#64748b;margin-top:6px">After paying, submit the transaction reference on the portal — Accounts will verify and mark the invoice as <b>paid</b>.</div>
     </div>
     ${d.notes ? `<div style="margin-top:14px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;padding:10px 12px"><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#92400e;font-weight:700">Notes</div><div style="margin-top:4px;white-space:pre-wrap">${esc(d.notes)}</div></div>` : ''}
     <p style="margin-top:18px">Attachment: <b>Invoice_${esc(d.invoice_number)}.pdf</b></p>

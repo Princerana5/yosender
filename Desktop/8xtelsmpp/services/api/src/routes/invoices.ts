@@ -225,6 +225,14 @@ router.post('/:id/payment/:pid/verify', requirePerm('billing.manage'), audit('ve
   res.json({ payment: updated[0], invoice: inv[0] });
 });
 
+router.delete('/:id/payment/:pid', requirePerm('billing.manage'), audit('deleted_invoice_payment', 'invoice_payment'), async (req, res) => {
+  const cur = await query<{ id: string; status: string }>('SELECT id, status FROM invoice_payments WHERE id=$1::uuid AND invoice_id=$2::uuid', [req.params.pid, req.params.id]);
+  if (!cur.length) { res.status(404).json({ error: 'payment not found' }); return; }
+  if (cur[0].status === 'verified') { res.status(422).json({ error: 'cannot delete verified payment — reject it first' }); return; }
+  await getPool().query('DELETE FROM invoice_payments WHERE id=$1::uuid AND invoice_id=$2::uuid', [req.params.pid, req.params.id]);
+  res.json({ ok: true });
+});
+
 // GET /invoices/:id/pdf — real PDF (pdfkit) with fallback to HTML
 router.get('/:id/pdf', async (req, res) => {
   const inv = await query('SELECT i.*, c.name AS client_name, c.company_name, c.system_id, c.portal_email FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=$1::uuid', [req.params.id]);

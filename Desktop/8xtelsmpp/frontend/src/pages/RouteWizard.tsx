@@ -61,11 +61,16 @@ export function RouteWizard({ open, onClose, onDone }: {
   const [route, setRoute] = useState<RouteOpt | null | 'create-new'>(null);
   const [routeQ, setRouteQ] = useState('');
   const [newRoute, setNewRoute] = useState({
-    name: '', country_id: '', prefix: '', sender_id: '', strategy: 'priority', status: 'active', tps: '',
+    name: '', route_code: '', country_id: '', prefix: '', sender_id: '', strategy: 'percentage' as string, status: 'active', tps: '',
+    internal_vendor_cost: '', route_type: 'generic' as string, currency: 'EUR' as string,
   });
+  // Multi-vendor distribution for new route (India 50/50 etc). Starts as just the Step-1 vendor.
+  const [distVendors, setDistVendors] = useState<Array<{ vendor_id: string; weight: number; priority: number }>>([]);
   const [client, setClient] = useState<ClientOpt | null>(null);
   const [clientQ, setClientQ] = useState('');
   const [price, setPrice] = useState('');
+  const [pricingMode, setPricingMode] = useState<'direct' | 'percent_markup' | 'fixed_markup'>('direct');
+  const [markupValue, setMarkupValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [sendRn, setSendRn] = useState(false);
@@ -79,13 +84,19 @@ export function RouteWizard({ open, onClose, onDone }: {
   const [rnIncludeAttachment, setRnIncludeAttachment] = useState(true);
   const [rnPreview, setRnPreview] = useState<null | { to:string; cc:string[]; bcc:string[]; subject:string; html:string; attachment:{filename:string; route_count:number; countries:number; networks:number; empty:boolean; error?:string} | null }>(null);
   const [rnBusy, setRnBusy] = useState(false);
+  const [rnSenders, setRnSenders] = useState<Array<{ id: string; display_name: string; email: string; is_default: boolean }>>([]);
+  const [rnSender, setRnSender] = useState('');
+  const [rnSenderNew, setRnSenderNew] = useState('');
+  const [rnSenderSaving, setRnSenderSaving] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setStep(1); setVendor(null); setRoute(null); setClient(null); setPrice(''); setErr('');
-    setNewRoute({ name: '', country_id: '', prefix: '', sender_id: '', strategy: 'priority', status: 'active', tps: '' });
-    setVendorQ(''); setRouteQ(''); setClientQ('');
+    setPricingMode('direct'); setMarkupValue('');
+    setNewRoute({ name: '', route_code: '', country_id: '', prefix: '', sender_id: '', strategy: 'percentage', status: 'active', tps: '', internal_vendor_cost: '', route_type: 'generic', currency: 'EUR' });
+    setDistVendors([]); setVendorQ(''); setRouteQ(''); setClientQ('');
     setSendRn(false); setRnCc(''); setRnBcc(''); setRnIncludeAttachment(true); setRnPreview(null); setRnBusy(false);
+    setRnSender(''); setRnSenderNew('');
     {
       const d = new Date(Date.now() + 3600_000);
       const pad = (n:number)=>String(n).padStart(2,'0');
@@ -94,8 +105,20 @@ export function RouteWizard({ open, onClose, onDone }: {
     api<{ vendors: VendorOpt[] }>('/vendors').then((r) => setVendors(r.vendors)).catch(() => undefined);
     api<{ countries: CountryOpt[] }>('/system/countries').then((r) => setCountries(r.countries)).catch(() => undefined);
     api<{ clients: ClientOpt[] }>('/clients').then((r) => setClients(r.clients)).catch(() => undefined);
+    api<{ senders: Array<{ id: string; display_name: string; email: string; is_default: boolean }> }>('/rate-notifications/senders')
+      .then((r) => { setRnSenders(r.senders ?? []); const def = r.senders?.find((s) => s.is_default); if (def) setRnSender(def.email); })
+      .catch(() => undefined);
   }, [open]);
 
+  // Keep distribution list in sync with Step-1 pick (first vendor seeds the list)
+  useEffect(() => {
+    if (!vendor) { setDistVendors([]); return; }
+    setDistVendors((prev) => {
+      if (prev.some((v) => v.vendor_id === vendor.id)) return prev;
+      if (!prev.length) return [{ vendor_id: vendor.id, weight: 100, priority: 1 }];
+      return prev;
+    });
+  }, [vendor]);
   useEffect(() => {
     if (!vendor || step < 2) return;
     api<{ routes: RouteOpt[] }>(`/routes?vendor_id=${vendor.id}`).then((r) => setRoutesForVendor(r.routes)).catch(() => setRoutesForVendor([]));
@@ -122,16 +145,28 @@ export function RouteWizard({ open, onClose, onDone }: {
   const canContinue = useMemo(() => {
     if (step === 1) return !!vendor;
     if (step === 2) {
-      if (route === 'create-new') return newRoute.name.trim().length > 0;
+      if (route === 'create-new') {
+        if (!(newRoute.name.trim().length > 0 && /^[A-Z0-9_-]{2,40}$/.test(newRoute.route_code.trim().toUpperCase()))) return false;
+        if (newRoute.strategy === 'percentage' && distVendors.length > 1) {
+          const s = distVendors.reduce((a, v) => a + (v.weight ?? 0), 0);
+          if (s !== 100) return false;
+        }
+        if (!distVendors.length) return false;
+        return true;
+      }
       return !!route;
     }
     if (step === 3) return !!client;
     if (step === 4) {
+      if (pricingMode !== 'direct') {
+        const m = Number(markupValue);
+        return markupValue.trim() !== '' && Number.isFinite(m) && m >= 0;
+      }
       const n = Number(price);
       return price.trim() !== '' && Number.isFinite(n) && n >= 0;
     }
     return true;
-  }, [step, vendor, route, newRoute.name, client, price]);
+  }, [step, vendor, route, newRoute.name, newRoute.route_code, client, price, pricingMode, markupValue]);
 
   async function save(): Promise<void> {
     if (!vendor || !client) return;
@@ -139,10 +174,18 @@ export function RouteWizard({ open, onClose, onDone }: {
     try {
       let routeId: string;
       if (route === 'create-new') {
+        const rc = newRoute.route_code.trim().toUpperCase();
+        if (!rc) { setErr('Route Code is required (e.g. IN-SMS-001)'); setBusy(false); return; }
+        if (newRoute.strategy === 'percentage' && distVendors.length > 1) {
+          const s = distVendors.reduce((a, v) => a + (v.weight ?? 0), 0);
+          if (s !== 100) { setErr(`Weights must total 100 for Weighted (now Σ ${s}%). Fix before creating.`); setBusy(false); return; }
+        }
+        const vendorChain = distVendors.length ? distVendors : [{ vendor_id: vendor.id, priority: 1, weight: 100 }];
         const created = await api<{ route: RouteOpt }>('/routes', {
           method: 'POST',
           body: JSON.stringify({
             name: newRoute.name.trim(),
+            route_code: rc,
             channel: 'sms',
             client_ids: [client.id],
             country_id: newRoute.country_id || null,
@@ -151,7 +194,11 @@ export function RouteWizard({ open, onClose, onDone }: {
             strategy: newRoute.strategy,
             status: newRoute.status,
             tps_limit: newRoute.tps ? Math.max(1, Number(newRoute.tps) || 0) : null,
-            vendors: [{ vendor_id: vendor.id, priority: 1, weight: 100 }],
+            internal_vendor_cost: newRoute.internal_vendor_cost ? Number(newRoute.internal_vendor_cost) : null,
+            internal_cost_currency: newRoute.currency || 'EUR',
+            currency: newRoute.currency || 'EUR',
+            route_type: newRoute.route_type || 'generic',
+            vendors: vendorChain,
           }),
         });
         routeId = created.route.id;
@@ -161,27 +208,66 @@ export function RouteWizard({ open, onClose, onDone }: {
         setErr('Select a route.');
         return;
       }
-      const n = Number(price);
+      // Build client-rate payload respecting pricing_mode
+      const rateBody: Record<string, unknown> = { client_id: client.id, currency: 'EUR', pricing_mode: pricingMode };
+      if (pricingMode === 'direct') {
+        rateBody.price_per_segment = Number(price);
+        rateBody.markup_value = null;
+      } else {
+        rateBody.markup_value = Number(markupValue);
+        // price_per_segment computed server-side from internal cost; don't send direct rate
+      }
+      let resolvedPrice: number | null = null;
       try {
         await api(`/routes/${routeId}/client-rates`, {
           method: 'POST',
-          body: JSON.stringify({ client_id: client.id, price_per_segment: n, currency: 'EUR' }),
+          body: JSON.stringify(rateBody),
         });
+        resolvedPrice = pricingMode === 'direct' ? Number(price) : null;
+        if (pricingMode !== 'direct') {
+          // markup → fetch the computed price so the table's fallback column can sync
+          try {
+            const cr = await api<{ rates: Array<{ price_per_segment: string | null; pricing_mode: string }> }>(`/routes/${routeId}/client-rates`);
+            const mine = cr.rates.find((r) => String((r as unknown as { client_id?: string }).client_id ?? client.id) === client.id) ?? cr.rates[0];
+            if (mine?.price_per_segment != null) resolvedPrice = Number(mine.price_per_segment);
+          } catch { /* best-effort */ }
+        }
       } catch (e) {
         const msg = (e as Error).message;
         if (msg.includes('already exists')) {
-          // try patch: find existing rate id then patch
-          const existing = await api<{ rates: Array<{ id: string; client_id: string }> }>(`/routes/${routeId}/client-rates`);
+          const existing = await api<{ rates: Array<{ id: string; client_id: string; price_per_segment?: string | null }> }>(`/routes/${routeId}/client-rates`);
           const hit = existing.rates.find((r) => r.client_id === client.id);
           if (hit) {
+            const patchBody: Record<string, unknown> = { pricing_mode: pricingMode };
+            if (pricingMode === 'direct') patchBody.price_per_segment = Number(price);
+            else patchBody.markup_value = Number(markupValue);
             await api(`/routes/${routeId}/client-rates/${hit.id}`, {
               method: 'PATCH',
-              body: JSON.stringify({ price_per_segment: n }),
+              body: JSON.stringify(patchBody),
             });
+            resolvedPrice = hit.price_per_segment != null ? Number(hit.price_per_segment) : (pricingMode === 'direct' ? Number(price) : null);
+            if (pricingMode !== 'direct') {
+              try {
+                const cr2 = await api<{ rates: Array<{ id: string; price_per_segment: string | null }> }>(`/routes/${routeId}/client-rates`);
+                const m2 = cr2.rates.find((r) => r.id === hit.id);
+                if (m2?.price_per_segment != null) resolvedPrice = Number(m2.price_per_segment);
+              } catch { /* best-effort */ }
+            }
           } else {
             throw e;
           }
         } else throw e;
+      }
+      // Keep the table's "Price / seg" (the route-level fallback column) in sync
+      // so it doesn't still read "+ set" right after you set a per-client rate.
+      // Only fills when empty — never overwrites an existing fallback.
+      if (resolvedPrice != null && Number.isFinite(resolvedPrice)) {
+        try {
+          const cur = route === 'create-new' ? null : (route as RouteOpt | null)?.price_per_segment ?? null;
+          if (cur == null || cur === '') {
+            await api(`/routes/${routeId}`, { method: 'PATCH', body: JSON.stringify({ price_per_segment: resolvedPrice, price_currency: 'EUR' }) });
+          }
+        } catch { /* non-fatal — per-client rate already saved */ }
       }
       if (sendRn) {
         try {
@@ -206,7 +292,7 @@ export function RouteWizard({ open, onClose, onDone }: {
           const vf = new Date(rnValidFrom);
           await api('/rate-notifications', {
             method: 'POST',
-            body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }),
+            body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', sender_email: rnSender || undefined, cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }),
           });
         } catch (e2) {
           setErr((e2 as Error).message);
@@ -318,6 +404,28 @@ export function RouteWizard({ open, onClose, onDone }: {
                     <input className="input" placeholder="India Premium — this vendor" value={newRoute.name} onChange={(e) => setNewRoute({ ...newRoute, name: e.target.value })} />
                   </div>
                   <div>
+                    <label className="label">Route Code * <span className="text-muted font-normal">e.g. IN-SMS-001</span></label>
+                    <input className="input font-mono !text-xs" placeholder="IN-SMS-001" value={newRoute.route_code} onChange={(e) => setNewRoute({ ...newRoute, route_code: e.target.value.toUpperCase() })} maxLength={40} />
+                    {newRoute.route_code && !/^[A-Z0-9_-]{2,40}$/.test(newRoute.route_code.trim().toUpperCase()) && <div className="text-[11px] text-red-300">A-Z 0-9 _ - only, 2-40 chars</div>}
+                  </div>
+                  <div>
+                    <label className="label">Route Type</label>
+                    <select className="input" value={newRoute.route_type} onChange={(e) => setNewRoute({ ...newRoute, route_type: e.target.value })}>
+                      {['generic','sms','otp','promotional','transactional','direct','wholesale'].map((v) => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Currency</label>
+                    <select className="input" value={newRoute.currency} onChange={(e) => setNewRoute({ ...newRoute, currency: e.target.value })}>
+                      <option value="EUR">EUR</option>
+                      <option value="USD">USD</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Internal Cost / seg <span className="text-muted font-normal">(admin-only)</span></label>
+                    <input className="input font-mono !text-xs" placeholder="0.0015" value={newRoute.internal_vendor_cost} onChange={(e) => setNewRoute({ ...newRoute, internal_vendor_cost: e.target.value })} inputMode="decimal" />
+                  </div>
+                  <div>
                     <label className="label">Country</label>
                     <select className="input" value={newRoute.country_id} onChange={(e) => setNewRoute({ ...newRoute, country_id: e.target.value })}>
                       <option value="">All countries</option>
@@ -350,6 +458,33 @@ export function RouteWizard({ open, onClose, onDone }: {
                     </select>
                   </div>
                   <div className="col-span-2 text-[11px] text-muted">{STRATEGY_HINT[newRoute.strategy]}</div>
+                  {/* ── Vendor distribution (for new route) — India 50/50 etc ── */}
+                  <div className="col-span-2 rounded-lg border border-brand/30 bg-brand/5 p-3 space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold">Vendor distribution for this new route</span>
+                      <span className={`ml-auto text-[11px] font-mono font-bold px-2 py-0.5 rounded-full border ${(() => { const s = distVendors.reduce((a,v)=>a+(v.weight??0),0); return newRoute.strategy==='percentage' && distVendors.length>1 && s!==100 ? 'bg-red-500/15 text-red-300 border-red-500/30' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'; })()}`}>Σ {distVendors.reduce((a,v)=>a+(v.weight??0),0)}%{newRoute.strategy==='percentage' && distVendors.length>1 && distVendors.reduce((a,v)=>a+(v.weight??0),0)!==100 ? ' — must be 100' : ' ✓'}</span>
+                    </div>
+                    {newRoute.strategy==='percentage' && <div className="text-[11px] text-muted">Weighted — total must be <b>100%</b>. Example: India 50/50 → Vendor A 50 + Vendor B 50.</div>}
+                    {newRoute.strategy!=='percentage' && <div className="text-[11px] text-muted">Priority order — weight is ignored, but kept for switching to Weighted later.</div>}
+                    <div className="space-y-1.5">
+                      {distVendors.map((dv,i)=> (
+                        <div key={dv.vendor_id} className="flex items-center gap-2 rounded-lg border border-line bg-ink/40 px-2.5 py-2">
+                          <span className={`w-2 h-2 rounded-sm shrink-0 ${['bg-sky-500','bg-emerald-500','bg-amber-500','bg-violet-500'][i%4]}`} />
+                          <span className="text-sm font-medium flex-1 truncate">{vendors.find((v)=>v.id===dv.vendor_id)?.name ?? dv.vendor_id.slice(0,8)}</span>
+                          <label className="flex items-center gap-1 text-xs">P <input className="input !py-1 !px-2 !w-14 font-mono" type="number" min={1} value={dv.priority} onChange={(e)=>setDistVendors(distVendors.map((x)=>x.vendor_id===dv.vendor_id?{...x, priority: Math.max(1, Number(e.target.value)||1)}:x))} /></label>
+                          <label className="flex items-center gap-1 text-xs">% <input className="input !py-1 !px-2 !w-20 font-mono" type="number" min={0} max={100} value={dv.weight} onChange={(e)=>setDistVendors(distVendors.map((x)=>x.vendor_id===dv.vendor_id?{...x, weight: Math.max(0, Math.min(100, Number(e.target.value)||0))}:x))} /></label>
+                          <button className="btn-ghost !py-1 !px-2 !text-xs text-red-300" disabled={distVendors.length<=1} title={distVendors.length<=1?'At least one vendor required':'Remove'} onClick={()=>setDistVendors(distVendors.filter((x)=>x.vendor_id!==dv.vendor_id))}>Remove</button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 items-center flex-wrap">
+                      <select className="input !py-1.5 !text-xs flex-1 min-w-[180px]" id="wizard-add-vendor" defaultValue="" onChange={(e)=>{ const id=e.target.value; if(!id) return; if(distVendors.some((v)=>v.vendor_id===id)) { (e.target as HTMLSelectElement).value=''; return; } const nextP=distVendors.length?Math.max(...distVendors.map((r)=>r.priority))+1:1; const tot=distVendors.reduce((a,v)=>a+(v.weight??0),0); const remain=Math.max(0,100-tot); setDistVendors([...distVendors, { vendor_id:id, weight: distVendors.length===0?100:remain||Math.floor(100/(distVendors.length+1)), priority: nextP }]); (e.target as HTMLSelectElement).value=''; }}>
+                        <option value="">+ Add vendor…</option>
+                        {vendors.filter((v)=>!distVendors.some((d)=>d.vendor_id===v.id)).map((v)=><option key={v.id} value={v.id}>{v.name} · {v.system_id ?? v.id.slice(0,8)}</option>)}
+                      </select>
+                      <button className="btn-ghost !py-1.5 !text-xs" disabled={distVendors.length<2} onClick={()=>{ const base=Math.floor(100/distVendors.length); const rem=100-base*distVendors.length; setDistVendors(distVendors.map((r,i)=>({...r, weight: base+(i<rem?1:0)}))); }}>Even split (50/50)</button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
@@ -392,20 +527,39 @@ export function RouteWizard({ open, onClose, onDone }: {
         {step === 4 && (
           <div className="space-y-3">
             <div className="text-sm font-semibold">Step 4 — Set Rate (per-client route rate)</div>
-            <p className="text-xs text-muted">Price this client pays on this route. Overrides the route default and the country rate card. EUR only.</p>
-            <div>
-              <label className="label">Price / segment (€) *</label>
-              <div className="flex gap-1.5">
-                <input className="input font-mono flex-1" placeholder="0.0045" value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" autoFocus />
-                <span className="input !w-auto text-muted">€ EUR</span>
-              </div>
-              {price.trim() !== '' && Number.isFinite(Number(price)) && Number(price) >= 0 && (
-                <div className="text-xs text-muted mt-1">Preview: €{Number(price).toFixed(4)} × 1 seg = <b className="text-emerald-300">€{Number(price).toFixed(4)}</b></div>
-              )}
-              {price.trim() !== '' && (!Number.isFinite(Number(price)) || Number(price) < 0) && (
-                <div className="text-xs text-red-300 mt-1">Enter a valid price ≥ 0.</div>
-              )}
+            <p className="text-xs text-muted">Price this client pays on this route. Choose how to price it: direct or markup off internal cost.</p>
+            <div className="flex gap-1.5">
+              {(['direct','percent_markup','fixed_markup'] as const).map((m) => (
+                <button key={m} onClick={() => setPricingMode(m)}
+                  className={`text-xs font-semibold px-3 py-1.5 rounded-lg border ${pricingMode===m?'border-brand/50 text-emerald-300 bg-brand/10':'border-line text-muted'}`}>
+                  {m==='direct'?'Direct price':m==='percent_markup'?'% markup':'Fixed markup'}
+                </button>
+              ))}
             </div>
+            {pricingMode==='direct' ? (
+              <div>
+                <label className="label">Price / segment (€) *</label>
+                <div className="flex gap-1.5">
+                  <input className="input font-mono flex-1" placeholder="0.0045" value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" autoFocus />
+                  <span className="input !w-auto text-muted">€ EUR</span>
+                </div>
+                {price.trim() !== '' && Number.isFinite(Number(price)) && Number(price) >= 0 && (
+                  <div className="text-xs text-muted mt-1">Preview: €{Number(price).toFixed(4)} × 1 seg = <b className="text-emerald-300">€{Number(price).toFixed(4)}</b></div>
+                )}
+                {price.trim() !== '' && (!Number.isFinite(Number(price)) || Number(price) < 0) && (
+                  <div className="text-xs text-red-300 mt-1">Enter a valid price ≥ 0.</div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div>
+                  <label className="label">{pricingMode==='percent_markup'?'Markup % *':'Fixed add (€) *'}</label>
+                  <input className="input font-mono flex-1" placeholder={pricingMode==='percent_markup'?'25 for +25%':'0.0010'} value={markupValue} onChange={(e) => setMarkupValue(e.target.value)} inputMode="decimal" autoFocus />
+                  <div className="text-[11px] text-muted mt-1">Computed from route internal cost. Set it in Step 2 if not yet set.</div>
+                </div>
+                {markupValue.trim() !== '' && !Number.isFinite(Number(markupValue)) && <div className="text-xs text-red-300">Enter a number.</div>}
+              </div>
+            )}
           </div>
         )}
 
@@ -425,6 +579,42 @@ export function RouteWizard({ open, onClose, onDone }: {
             </label>
             {sendRn && (
               <div className="rounded-lg border border-line/60 p-3 space-y-2 bg-ink/30">
+                <div>
+                  <label className="label">From (sender address) *</label>
+                  <div className="flex gap-2">
+                    <select className="input font-mono !text-xs flex-1" value={rnSender} onChange={(e) => setRnSender(e.target.value)}>
+                      <option value="">— choose sender —</option>
+                      {rnSenders.map((s) => (
+                        <option key={s.id} value={s.email}>{s.display_name} &lt;{s.email}&gt;{s.is_default ? ' · default' : ''}</option>
+                      ))}
+                    </select>
+                    <span className="text-[11px] text-muted self-center hidden sm:inline">{rnSenders.length} saved</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="label">Add new sender mail</label>
+                  <div className="flex gap-2">
+                    <input className="input font-mono !text-xs flex-1" placeholder="rates-new@8xtel.com" value={rnSenderNew} onChange={(e) => setRnSenderNew(e.target.value)} />
+                    <button className="btn-ghost !text-xs whitespace-nowrap" disabled={rnSenderSaving || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rnSenderNew.trim())}
+                      onClick={async () => {
+                        const email = rnSenderNew.trim().toLowerCase();
+                        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setErr('Enter a valid sender email.'); return; }
+                        setRnSenderSaving(true); setErr('');
+                        try {
+                          const r = await api<{ sender: { id: string; display_name: string; email: string; is_default: boolean } }>('/rate-notifications/senders', {
+                            method: 'POST', body: JSON.stringify({ email, display_name: email.split('@')[0]!.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) }),
+                          });
+                          setRnSenders((prev) => [...prev, r.sender]);
+                          setRnSender(r.sender.email);
+                          setRnSenderNew('');
+                        } catch (e) { setErr((e as Error).message); }
+                        setRnSenderSaving(false);
+                      }}>
+                      {rnSenderSaving ? 'Saving…' : '+ Add sender'}
+                    </button>
+                  </div>
+                  <div className="text-[11px] text-muted mt-1">Saved senders are reused next time. Chosen sender becomes the From &amp; Reply-To.</div>
+                </div>
                 <div>
                   <label className="label">Valid From (GMT)</label>
                   <input type="datetime-local" className="input max-w-[260px]" value={rnValidFrom} onChange={(e) => setRnValidFrom(e.target.value)} />
@@ -453,7 +643,7 @@ export function RouteWizard({ open, onClose, onDone }: {
                         rates = [{ country: countryLabel, country_code: null, network_name: `${routeName} - Default`, mcc: '000', mnc: 'ALL', currency: 'EUR', rate: Number(price), billing_mode: 'on_submission', delivery_rate: null }];
                       }
                       const vf = new Date(rnValidFrom);
-                      const pv = await api<{ to: string; cc: string[]; bcc: string[]; subject: string; html: string; attachment: { filename: string; route_count: number; countries: number; networks: number; empty: boolean; error?: string } | null }>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }) });
+                      const pv = await api<{ to: string; cc: string[]; bcc: string[]; subject: string; html: string; attachment: { filename: string; route_count: number; countries: number; networks: number; empty: boolean; error?: string } | null }>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify({ client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', sender_email: rnSender || undefined, cc: ccList, bcc: bccList, include_attachment: rnIncludeAttachment, rates }) });
                       setRnPreview(pv);
                     } catch (e) { setErr((e as Error).message); }
                     setRnBusy(false);

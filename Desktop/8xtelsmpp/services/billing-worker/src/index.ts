@@ -95,17 +95,33 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   );
   const creditHeld = component === 'submission' ? Number(creditRow?.reserved_credits ?? 0) : 0;
 
-  const msg = await queryOne<{ destination: string; country_id: string | null }>(
-    'SELECT destination, country_id FROM messages WHERE id=$1', [internal_id],
+  const msg = await queryOne<{ destination: string; country_id: string | null; segments: number }>(
+    'SELECT destination, country_id, segments FROM messages WHERE id=$1', [internal_id],
   );
   const digits = (msg?.destination ?? '').replace(/\D/g, '');
-  const costRow = await queryOne<{ cost: string }>(
-    `SELECT cost FROM vendor_rates WHERE vendor_id=$1
-       AND ($2 LIKE COALESCE(prefix,'') || '%' OR country_id=$3)
-     ORDER BY length(COALESCE(prefix,'')) DESC LIMIT 1`,
-    [vendor_id, digits, msg?.country_id ?? null],
-  );
-  const vendorCost = component === 'submission' ? Number(costRow?.cost ?? 0) : 0;
+  const segs = Number(msg?.segments ?? creditRow?.segments ?? 1) || 1;
+  let vendorCost = 0;
+  if (component === 'submission') {
+    const costRow = await queryOne<{ cost: string }>(
+      `SELECT cost FROM vendor_rates WHERE vendor_id=$1
+         AND ($2 LIKE COALESCE(prefix,'') || '%' OR country_id=$3)
+       ORDER BY length(COALESCE(prefix,'')) DESC LIMIT 1`,
+      [vendor_id, digits, msg?.country_id ?? null],
+    );
+    let perSeg = costRow?.cost != null ? Number(costRow.cost) : null;
+    if (perSeg == null) {
+      // Fallback to route's internal_vendor_cost snapshot on the message
+      const rc = await queryOne<{ vendor_cost: string | null }>('SELECT vendor_cost FROM messages WHERE id=$1', [internal_id]);
+      perSeg = rc?.vendor_cost != null ? Number(rc.vendor_cost) / segs : 0;
+      if (!perSeg) {
+        const rr = await queryOne<{ internal_vendor_cost: string | null }>(
+          `SELECT r.internal_vendor_cost FROM messages m JOIN routes r ON r.id=m.route_id WHERE m.id=$1`, [internal_id],
+        );
+        perSeg = rr?.internal_vendor_cost != null ? Number(rr.internal_vendor_cost) : 0;
+      }
+    }
+    vendorCost = +(perSeg * segs).toFixed(6);
+  }
 
   const db = await pool.connect();
   try {

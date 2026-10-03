@@ -214,9 +214,9 @@ const TIME_FIELDS = ['delvd_time', 'delv_time', 'delivered_time', 'delivered_at'
     state (Fortius "2" stuck while the vendor panel already shows FAILED)
     fails after this many consecutive polls instead of sitting `submitted`
     forever. Fortis wrong-template keeps status "2" forever while panel
-    is Failed — fail fast so UI matches panel (real DLR). 12 rounds at
-    5s poll ≈ 60s. Tracked in messages.error_code as `poll:<code>#<n>`. */
-const STALE_ROUNDS = 12;
+    is Failed — fail fast so UI matches panel (real DLR). 30 rounds at
+    2s poll ≈ 60s. Tracked in messages.error_code as `poll:<code>#<n>`. */
+const STALE_ROUNDS = 30;
 
 /** Words that count as an explicit DELIVERED from a poll entry.
     Anything else — including bare numerics ("1".."7") even WITH a delivery
@@ -694,7 +694,7 @@ async function tick(): Promise<void> {
          AND vendor_msg_id IS NOT NULL AND vendor_msg_id <> ''
          AND (last_dlr_poll_at IS NULL OR last_dlr_poll_at < now() - ($2 || ' seconds')::interval)
          AND created_at > now() - interval '48 hours'
-       ORDER BY last_dlr_poll_at NULLS FIRST, created_at LIMIT 50`,
+       ORDER BY last_dlr_poll_at NULLS FIRST, created_at LIMIT 200`,
       [v.vendor_id, String(interval)],
     );
     await Promise.allSettled(
@@ -748,6 +748,6 @@ export function startDlrPoller(): void {
   const loop = (): void => {
     tick().catch((e) => console.error('[dlr-poll] tick failed', (e as Error).message));
   };
-  setTimeout(loop, 5_000); // let binds settle first
-  setInterval(loop, 5_000).unref();
+  setTimeout(loop, 2_000); // let binds settle first
+  setInterval(loop, 2_000).unref();
 }

@@ -78,8 +78,15 @@ router.patch('/:id', requirePerm('billing.manage'), audit('updated_payment_metho
 });
 
 router.delete('/:id', requirePerm('billing.manage'), audit('deleted_payment_method', 'payment_method'), async (req, res) => {
-  const r = await getPool().query('UPDATE system_payment_methods SET is_active=false, updated_at=now() WHERE id=$1', [req.params.id]);
-  if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  const hard = String((req.query as Record<string, string>).hard ?? '') === '1';
+  const pool = getPool();
+  if (hard) {
+    const r = await pool.query('DELETE FROM system_payment_methods WHERE id=$1', [req.params.id]);
+    if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  } else {
+    const r = await pool.query('UPDATE system_payment_methods SET is_active=false, updated_at=now() WHERE id=$1', [req.params.id]);
+    if (!r.rowCount) { res.status(404).json({ error: 'not found' }); return; }
+  }
   res.json({ ok: true });
 });
 

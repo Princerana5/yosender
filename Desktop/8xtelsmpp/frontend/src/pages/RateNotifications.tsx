@@ -574,6 +574,10 @@ export function RateNotificationCreate(): JSX.Element {
     };
   }
 
+  const [senders, setSenders] = useState<Array<{ id: string; display_name: string; email: string; is_default: boolean }>>([]);
+  const [senderEmail, setSenderEmail] = useState('');
+  const [senderNew, setSenderNew] = useState('');
+  const [senderSaving, setSenderSaving] = useState(false);
   const [rateEmailDraft, setRateEmailDraft] = useState('');
 
   async function saveRateEmail(): Promise<void> {
@@ -646,6 +650,9 @@ export function RateNotificationCreate(): JSX.Element {
 
   useEffect(() => {
     api<{ countries: Country[] }>('/rate-notifications/countries').then((r) => setCountries(r.countries)).catch(() => undefined);
+    api<{ senders: Array<{ id: string; display_name: string; email: string; is_default: boolean }> }>('/rate-notifications/senders')
+      .then((r) => { setSenders(r.senders ?? []); const def = r.senders?.find((s) => s.is_default); if (def) setSenderEmail(def.email); })
+      .catch(() => undefined);
   }, []);
   useEffect(() => {
     const t = setTimeout(() => {
@@ -670,7 +677,7 @@ export function RateNotificationCreate(): JSX.Element {
 
   const [formError, setFormError] = useState('');
 
-  function payload(): { client_id: string; valid_from: string; timezone: string; cc: string[]; bcc: string[]; include_attachment: boolean; rates: unknown[] } | null {
+  function payload(): { client_id: string; valid_from: string; timezone: string; sender_email?: string; cc: string[]; bcc: string[]; include_attachment: boolean; rates: unknown[] } | null {
     const fail = (m: string): null => { setFormError(m); return null; };
     if (!client) return fail('Select a client first.');
     if (!client.email) return fail('Selected client has no email on file — set "Send mail to" in section 1.');
@@ -711,7 +718,7 @@ export function RateNotificationCreate(): JSX.Element {
       if (ccSet.has(e.toLowerCase())) return fail(`Email must not be in both CC and BCC: ${e}`);
     }
     setFormError('');
-    return { client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', cc, bcc, include_attachment: includeAttachment, rates };
+    return { client_id: client.id, valid_from: vf.toISOString(), timezone: 'GMT', sender_email: senderEmail || undefined, cc, bcc, include_attachment: includeAttachment, rates };
   }
 
   async function loadAttachSample(): Promise<void> {
@@ -738,7 +745,7 @@ export function RateNotificationCreate(): JSX.Element {
   // Send button: validate → fetch a fresh preview → open the confirm popup.
   // (Previously it required a preview to exist first, which made the button
   // look dead when clicked before Preview Email.)
-  async function doPreviewThenConfirm(p: { client_id: string; valid_from: string; timezone: string; cc: string[]; bcc: string[]; include_attachment: boolean; rates: unknown[] }): Promise<void> {
+  async function doPreviewThenConfirm(p: { client_id: string; valid_from: string; timezone: string; cc: string[]; bcc: string[]; include_attachment: boolean; rates: unknown[]; sender_email?: string }): Promise<void> {
     setBusy(true); setMsg('');
     try {
       setPreview(await api<Preview>('/rate-notifications/preview', { method: 'POST', body: JSON.stringify(p) }));
@@ -867,6 +874,33 @@ export function RateNotificationCreate(): JSX.Element {
             </div>
             <RecipientPicker label="CC — multiple allowed" values={cc} onChange={setCc} exclude={[...bcc, client.email ?? '']} />
             <RecipientPicker label="BCC — multiple allowed, hidden from TO/CC" values={bcc} onChange={setBcc} exclude={[...cc, client.email ?? '']} />
+          </div>
+        )}
+        {client && (
+          <div className="mt-3 rounded-lg border border-line/60 p-3 space-y-2">
+            <div className="card-title !text-xs">Sender (From)</div>
+            <div className="flex gap-2">
+              <select className="input mono !text-xs flex-1" value={senderEmail} onChange={(e) => setSenderEmail(e.target.value)}>
+                <option value="">— default —</option>
+                {senders.map((s) => <option key={s.id} value={s.email}>{s.display_name} &lt;{s.email}&gt;{s.is_default ? ' · default' : ''}</option>)}
+              </select>
+              <span className="text-[11px] text-muted self-center hidden sm:inline">{senders.length} saved</span>
+            </div>
+            <div className="flex gap-2">
+              <input className="input mono !text-xs flex-1" placeholder="Add sender: rates-new@8xtel.com" value={senderNew} onChange={(e) => setSenderNew(e.target.value)} />
+              <button className="btn-ghost !text-xs whitespace-nowrap" disabled={senderSaving || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderNew.trim())}
+                onClick={async () => {
+                  const email = senderNew.trim().toLowerCase();
+                  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setMsg('Enter a valid sender email.'); return; }
+                  setSenderSaving(true); setMsg('');
+                  try {
+                    const r = await api<{ sender: { id: string; display_name: string; email: string; is_default: boolean } }>('/rate-notifications/senders', { method: 'POST', body: JSON.stringify({ email, display_name: email.split('@')[0]!.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) }) });
+                    setSenders((prev) => [...prev, r.sender]); setSenderEmail(r.sender.email); setSenderNew(''); setMsg(`Sender ${r.sender.email} added ✓`);
+                  } catch (e) { setMsg(`Add sender failed: ${(e as Error).message}`); }
+                  setSenderSaving(false);
+                }}>{senderSaving ? 'Saving…' : '+ Add sender'}</button>
+            </div>
+            <div className="text-[11px] text-muted">Chosen sender is the From &amp; Reply-To on the email.</div>
           </div>
         )}
         <div className="flex gap-2 mt-3 justify-end">

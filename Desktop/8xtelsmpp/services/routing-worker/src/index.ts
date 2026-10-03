@@ -1,5 +1,6 @@
 import {
-  createWorker, getQueue, QUEUES, getPool, tryAcquireTps, incrStat, analyzeSms, type MessageJob,
+  createWorker, getQueue, QUEUES, getPool, tryAcquireTps, incrStat, analyzeSms, requeueSubmit, type MessageJob,
+  resolveCuttingConfig, shouldSelectForDelay,
 } from '@8xtel/core';
 import { resolveCountry, applyFilters, findRoutes, orderVendors, recordEvent } from './engine.js';
 import { tryOtpTransform } from './otp.js';
@@ -61,12 +62,40 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   const clientTps: number = Number(clientRow.rows[0]?.tps_limit ?? 0);
   if (clientTps > 0 && !(await tryAcquireTps(`client:${msg.client_id}`, clientTps))) {
     const jitter = 1000 + Math.floor(Math.random() * 2000);
-    await getQueue(QUEUES.submit).add('submit', msg, { delay: jitter });
+    await requeueSubmit(msg, { delay: jitter });
     return;
   }
 
   const country = await resolveCountry(msg.destination);
   const countryId = country?.id ?? null;
+
+  // ── Routing rules (MCC/MNC/sender/type/source/time) steer selection ──────
+  let ruleVendorHint: string | null = null;
+  let activeRuleId: string | null = null;
+  try {
+    const { resolveRoutingRule } = await import('./engine.js');
+    // classify message type from text (otp if 4-6 digit code present)
+    const isOtp = /\b\d{4,6}\b/.test(msg.text ?? '');
+    const mtype = isOtp ? 'otp' : 'promotional';
+    const rr = await resolveRoutingRule({
+      countryId, sender: msg.source, messageType: mtype,
+      sourceType: (msg as unknown as { source_type?: string }).source_type ?? 'smpp',
+    });
+    if (rr?.route_id) { ruleVendorHint = rr.route_id; activeRuleId = rr.id; }
+    else if (rr?.route_group_id) {
+      // group → pick one route from members (weighted, exact counter)
+      const gm = await pool.query(`SELECT route_id, weight FROM route_group_members WHERE group_id=$1 ORDER BY priority`, [rr.route_group_id]);
+      if (gm.rows.length) {
+        const total = gm.rows.reduce((s: number, r: { weight: number }) => s + r.weight, 0) || 1;
+        let ctr = 0;
+        try { const { getRedis } = await import('@8xtel/core'); ctr = Number(await getRedis().incr(`gdist:${rr.route_group_id}`)); if (ctr > 10_000_000) await getRedis().set(`gdist:${rr.route_group_id}`, String(ctr % total)); } catch { ctr = Math.floor(Math.random() * total) + 1; }
+        const roll = ((ctr - 1) % total + total) % total;
+        let acc = 0; let pick = gm.rows[0].route_id;
+        for (const r of gm.rows) { acc += r.weight; if (roll < acc) { pick = r.route_id; break; } }
+        ruleVendorHint = pick; activeRuleId = rr.id;
+      }
+    }
+  } catch { /* best-effort */ }
 
   const filter = await applyFilters(msg.client_id, msg.destination, msg.source, countryId);
   if (filter.action === 'block' || filter.action === 'reject') {
@@ -78,11 +107,28 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     return;
   }
 
+  const forceRouteId = (msg as { force_route_id?: string | null }).force_route_id ?? null;
+  const forceVendorId = (msg as { force_vendor_id?: string | null }).force_vendor_id ?? null;
+
   let candidates = await findRoutes(msg.client_id, msg.channel, countryId, msg.destination, msg.source);
+  // Routing-rule override: pin to rule's route if present (takes priority over filter reroute, but not over force)
+  if (ruleVendorHint && !forceRouteId && !forceVendorId) {
+    const pinned = candidates.find((c) => c.route_id === ruleVendorHint);
+    if (pinned) candidates = [pinned, ...candidates.filter((c) => c.route_id !== pinned.route_id)];
+    else {
+      const forced = await pool.query('SELECT id, name, strategy FROM routes WHERE id=$1', [ruleVendorHint]);
+      if (forced.rowCount) {
+        const r = forced.rows[0];
+        const vendors = await pool.query(
+          `SELECT v.id AS vendor_id, v.name AS vendor_name, rv.priority, rv.weight, NULL AS cost, v.tps
+           FROM route_vendors rv JOIN vendors v ON v.id=rv.vendor_id WHERE rv.route_id=$1 ORDER BY rv.priority`, [ruleVendorHint],
+        );
+        candidates = [{ route_id: r.id, route_name: `${r.name} (rule)`, strategy: r.strategy, vendors: vendors.rows }, ...candidates];
+      }
+    }
+  }
   // Test override (Send Test SMS page): force a route, optionally a single vendor.
   // Skips route matching AND reroute filters; block/reject filters above still apply.
-  const forceRouteId = msg.force_route_id ?? null;
-  const forceVendorId = msg.force_vendor_id ?? null;
   if (forceRouteId || forceVendorId) {
     const forced = forceRouteId
       ? await pool.query('SELECT id, name, strategy FROM routes WHERE id=$1', [forceRouteId])
@@ -181,7 +227,7 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     : { rows: [] as Array<{ tps_limit: number | null }> };
   const routeTps: number | null = routeRow.rows[0]?.tps_limit ?? null;
   if (routeTps && !(await tryAcquireTps(`route:${chosen.route_id}`, routeTps))) {
-    await getQueue(QUEUES.submit).add('submit', msg, { delay: 1000 });
+    await requeueSubmit(msg, { delay: 1000 });
     return;
   }
 
@@ -193,10 +239,13 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   let clientPrice: string | null = null;
   let priceSource = 'none';
   if (isUuid) {
-    // Highest priority: per-client route override (Vendor→Route→Client)
+    // Highest priority: per-client route override (country-specific > generic)
     const rcr = await pool.query(
-      'SELECT price_per_segment FROM route_client_rates WHERE route_id=$1 AND client_id=$2',
-      [chosen.route_id, msg.client_id],
+      `SELECT price_per_segment FROM route_client_rates
+       WHERE route_id=$1 AND client_id=$2
+         AND (country_id IS NULL OR country_id=$3)
+       ORDER BY country_id NULLS LAST LIMIT 1`,
+      [chosen.route_id, msg.client_id, countryId],
     );
     const rcrPrice = rcr.rows[0]?.price_per_segment;
     if (rcrPrice !== null && rcrPrice !== undefined) {
@@ -262,6 +311,19 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   const { billsOnSubmit } = await import('@8xtel/core');
   const submitBilled = billsOnSubmit(billingMode as never);
   const reserveAmount = submitBilled ? Number(clientPrice ?? 0) : 0;
+  // ── DLR Cutting selection ──────────────────────────────────────────────
+  let cuttingSelected = false;
+  let cuttingConfigId: string | null = null;
+  let cuttingDelaySec: number | null = null;
+  try {
+    const cfg = await resolveCuttingConfig({ route_id: isUuid ? chosen.route_id : null, client_id: msg.client_id, country_id: countryId });
+    if (cfg) {
+      const sel = await shouldSelectForDelay(cfg as never);
+      cuttingSelected = sel.selected;
+      cuttingConfigId = cfg.id;
+      cuttingDelaySec = cfg.delay_seconds;
+    }
+  } catch { /* never block routing */ }
 
   // ── Credit-mode reservation: 1 credit per segment, no money moves ─────────
   // Clients with billing_mode='credit' burn SMS credits instead of funds.
@@ -361,10 +423,19 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     );
   }
 
+  // margin snapshot for profitability (§23)
+  let vendorCost: number | null = null;
+  try {
+    const vc = await pool.query(`SELECT internal_vendor_cost FROM routes WHERE id=$1`, [chosen.route_id]).catch(() => ({ rows: [] as never[] }));
+    vendorCost = vc.rows[0]?.internal_vendor_cost != null ? Number(vc.rows[0].internal_vendor_cost) : null;
+    if (vendorCost == null && chain[0]?.cost != null) vendorCost = Number(chain[0].cost);
+  } catch { /* ignore */ }
+  const margin = vendorCost != null && clientPrice != null ? +(Number(clientPrice) - vendorCost * segments).toFixed(6) : null;
+
   await pool.query(
-    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6, billing_mode=$7, billing_status=$8 WHERE id=$9',
+    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6, billing_mode=$7, billing_status=$8, dlr_cutting_selected=$9, dlr_cutting_config_id=$10, dlr_cutting_delay_seconds=$11 WHERE id=$12',
     [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, reserveCredits,
-     billingMode, submitBilled ? 'submitted' : 'awaiting_delivery', msg.internal_id],
+     billingMode, submitBilled ? 'submitted' : 'awaiting_delivery', cuttingSelected, cuttingConfigId, cuttingDelaySec, msg.internal_id],
   );
   await recordEvent(
     msg.internal_id, chain[0]?.vendor_id ?? null, 'routed',
@@ -372,6 +443,18 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
       ? `${chosen.route_name} [${chain.map((v) => v.vendor_name).join(' → ')}] · hold ${reserveCredits} credit(s)`
       : `${chosen.route_name} [${chain.map((v) => v.vendor_name).join(' → ')}] · hold ${reserveAmount} (${priceSource})`,
   );
+  // routing log (best-effort, never block send)
+  try {
+    await pool.query(
+      `INSERT INTO routing_logs (message_id, client_id, route_id, route_code, country_id, destination, source, channel, strategy, traffic_mode, vendor_chain, selected_vendor_id, selected_vendor_name, price_per_segment, vendor_cost, margin, routing_rule_id)
+       VALUES ($1,$2,$3,(SELECT route_code FROM routes WHERE id=$3),$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16)`,
+      [msg.internal_id, msg.client_id, isUuid ? chosen.route_id : null, countryId, msg.destination, msg.source, msg.channel,
+       chosen.strategy, (await pool.query(`SELECT traffic_mode FROM routes WHERE id=$1`, [chosen.route_id]).catch(() => ({ rows: [{ traffic_mode: chosen.strategy }] }))).rows[0]?.traffic_mode ?? chosen.strategy,
+       JSON.stringify(chain.map((v) => ({ id: v.vendor_id, name: v.vendor_name, priority: v.priority, weight: v.weight }))),
+       chain[0]?.vendor_id ?? null, chain[0]?.vendor_name ?? null,
+       clientPrice != null ? Number(clientPrice) / segments : null, vendorCost, margin, activeRuleId],
+    );
+  } catch { /* table may not exist yet */ }
 
   await getQueue(QUEUES.vendorSend).add('send', {
     ...msg,
@@ -387,8 +470,66 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  createWorker(QUEUES.submit, handleJob, 20);
-  console.log('[8xtelSMPP routing-worker] started');
+  const fastConc = Number(process.env.ROUTING_FAST_CONCURRENCY ?? process.env.ROUTING_WORKER_CONCURRENCY ?? 60);
+  const bulkConc = Number(process.env.ROUTING_BULK_CONCURRENCY ?? 40);
+  const perBulkConc = Math.max(4, Math.min(12, Math.floor(bulkConc / 2) || 8));
+  createWorker(QUEUES.submit, handleJob, fastConc);
+  // Bulk dispatcher: one dedicated queue per client (sms-submit-bulk:<clientId>)
+  // so 5 clients each sending 10k to different vendors never block each other.
+  // We keep pooled workers capped: total bulk concurrency stays near bulkConc
+  // by giving each active client a small fair share and rebalancing on churn.
+  const { getRedis, bulkQueueName, getBulkQueue } = await import('@8xtel/core');
+  const bulkWorkers = new Map<string, ReturnType<typeof createWorker>>();
+  // Fallback shared bulk queue for jobs that arrived before sharding
+  createWorker(QUEUES.submitBulk, handleJob, Math.max(4, perBulkConc));
+  async function ensureBulkWorker(clientId: string): Promise<void> {
+    if (bulkWorkers.has(clientId)) return;
+    const qName = bulkQueueName(clientId);
+    bulkWorkers.set(clientId, createWorker(qName as never, handleJob, perBulkConc));
+    console.log(`[routing-worker] bulk lane up for client ${clientId.slice(0,8)} (${qName} x${perBulkConc})`);
+  }
+  // Discover active bulk clients from Redis set 'bulk:clients' (populated
+  // by portal/client-api/smpp-session on every bulk enqueue). Also eagerly
+  // seed from any existing client IDs we already know.
+  async function scanBulkClients(): Promise<void> {
+    try {
+      const redis = getRedis();
+      const ids = await redis.smembers('bulk:clients');
+      for (const id of ids) await ensureBulkWorker(id);
+      // Also scan Queue keys that exist even if set was cleared (reconnect)
+      // lightweight: only if no ids found, do a KEYS scan once per minute
+    } catch {}
+  }
+  await scanBulkClients();
+  setInterval(scanBulkClients, 3000).unref();
+  // Subscribe to new bulk clients via Redis keyspace notifier is overkill;
+  // the 3s poll is enough for <5s first-message latency. For even faster
+  // reaction, also watch for BRPOP-style hint key.
+  try {
+    const sub = getRedis().duplicate();
+    // Use a tiny pub/sub hint: producers publish to 'bulk:hint' (<20b)
+    // best-effort, no need for persistence.
+    await sub.subscribe('bulk:hint');
+    sub.on('message', (_ch: string, cid: string) => { if (cid) void ensureBulkWorker(cid.trim()); });
+  } catch {}
+  // auto health protection: every 60s mark OPEN when submit<90% or timeout>5%, cooldown 5m
+  setInterval(async () => {
+    try {
+      const pool = getPool();
+      const rows = await pool.query(`SELECT route_id, vendor_id, circuit_state FROM route_health WHERE circuit_state IN ('HEALTHY','DEGRADED')`).then((r) => r.rows as Array<{ route_id: string; vendor_id: string; circuit_state: string }>).catch(() => []);
+      for (const h of rows) {
+        const s = await pool.query(`SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE m.status='delivered') AS ok FROM routing_logs l LEFT JOIN messages m ON m.id=l.message_id WHERE l.route_id=$1 AND l.selected_vendor_id=$2 AND l.created_at > now() - interval '10 minutes'`, [h.route_id, h.vendor_id]).then((r) => r.rows[0] as { total: string; ok: string }).catch(() => null);
+        const total = Number(s?.total ?? 0); if (total < 20) continue;
+        const pct = Number(s?.ok ?? 0) / total * 100;
+        if (pct < 90) {
+          await pool.query(`UPDATE route_health SET circuit_state='OPEN', opened_at=now(), recover_at=now() + interval '5 minutes', updated_at=now() WHERE route_id=$1 AND vendor_id=$2`, [h.route_id, h.vendor_id]);
+        }
+      }
+      // recover OPEN whose cooldown expired → RECOVERING
+      await pool.query(`UPDATE route_health SET circuit_state='RECOVERING', updated_at=now() WHERE circuit_state='OPEN' AND recover_at IS NOT NULL AND recover_at <= now()`).catch(() => undefined);
+    } catch { /* ignore */ }
+  }, 60_000).unref();
+  console.log(`[8xtelSMPP routing-worker] started fast=${fastConc} bulk=${bulkConc} (submit=${QUEUES.submit} bulk=${QUEUES.submitBulk})`);
 }
 
 main().catch((e) => {

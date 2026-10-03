@@ -267,7 +267,7 @@ export class VendorConnector {
   }): Promise<string> {
     const session = this.session;
     if (!session) throw new Error('not connected');
-    const timeoutMs = Number(process.env.VENDOR_SUBMIT_TIMEOUT_MS ?? 10_000);
+    const timeoutMs = Number(process.env.VENDOR_SUBMIT_TIMEOUT_MS ?? 4_000);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`submit timeout after ${timeoutMs}ms`));

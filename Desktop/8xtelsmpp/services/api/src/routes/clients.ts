@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { query, queryOne, getPool } from '@8xtel/core';
 import { requirePerm, audit } from '../middleware.js';
 import { hashPassword } from '../auth.js';
+import { CLIENT_ROUTE_RATE_LATERAL_JOIN } from '../lib/client-route-pricing.js';
 
 const router = Router();
 router.use(requirePerm('clients.read'));
@@ -250,7 +251,7 @@ router.get('/:id', async (req, res) => {
             (SELECT min(vr.cost) FROM vendor_rates vr JOIN route_vendors rv2 ON rv2.vendor_id=vr.vendor_id
              WHERE rv2.route_id=r.id AND (vr.country_id IS NULL OR vr.country_id=r.country_id)) AS min_vendor_cost
      FROM routes r LEFT JOIN countries co ON co.id=r.country_id
-     LEFT JOIN route_client_rates rcr ON rcr.route_id=r.id AND rcr.client_id=$1::uuid
+     ${CLIENT_ROUTE_RATE_LATERAL_JOIN}
      WHERE r.status='active' AND r.channel='sms'
        AND (
          NOT EXISTS (SELECT 1 FROM route_clients rc WHERE rc.route_id=r.id)

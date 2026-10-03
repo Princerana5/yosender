@@ -173,13 +173,14 @@ export default function ClientDetail(): JSX.Element {
     const members = Number(r.member_count ?? 0);
     const mine = Number(r.is_member ?? 0) === 1;
     if (members > 0 && mine) {
-      // I'm an explicit member → remove me from the membership. Route keeps
-      // serving its other members. Last-member removal makes it global again.
+      // I'm an explicit member → remove me from the membership and delete my
+      // route-specific rates. Route keeps serving its other members.
+      // Last-member removal makes it global again but excludes this client.
       const last = members === 1;
       if (!window.confirm(
         last
-          ? `Remove this client from "${r.name}"?\n\n⚠ This is the LAST member — the route becomes GLOBAL (serves everyone).`
-          : `Remove this client from "${r.name}"?\n\nIt keeps serving its ${members - 1} other member(s).`,
+          ? `Remove this client from "${r.name}"?\n\nThis is the LAST member — the route becomes GLOBAL for other clients, but this client is excluded. Its route-specific rates are deleted.`
+          : `Remove this client from "${r.name}"?\n\nIt keeps serving its ${members - 1} other member(s). This client's route-specific rates are deleted.`,
       )) return;
       try {
         await api(`/routes/${r.id}/members/${id}`, { method: 'DELETE' });
@@ -189,10 +190,10 @@ export default function ClientDetail(): JSX.Element {
       }
       return;
     }
-    // Global = serves everyone → DETACH from this client only. The route
-    // keeps working for all other clients. Full delete lives on the Routes
-    // page behind a typed confirmation.
-    if (!window.confirm(`Detach GLOBAL route "${r.name}" from this client only?\n\nIt keeps serving ALL other clients. This client falls back to its remaining routes.`)) return;
+    // Global = serves everyone → DETACH from this client only and remove its
+    // route-specific rates. The route keeps working for all other clients.
+    // Full delete lives on the Routes page behind a typed confirmation.
+    if (!window.confirm(`Detach GLOBAL route "${r.name}" from this client only?\n\nIt keeps serving ALL other clients. This client falls back to its remaining routes, and its route-specific rates are deleted.`)) return;
     try {
       await api(`/routes/${r.id}/detach`, { method: 'POST', body: JSON.stringify({ client_id: id }) });
       load();

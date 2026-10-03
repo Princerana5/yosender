@@ -10,15 +10,32 @@ const router = Router();
 // seed change is required (admins/operations already hold it).
 router.use(requirePerm('clients.update'));
 
-const SENDER_NAME = '8xtel Rate Notification';
-const SENDER_EMAIL = 'rates@8xtel.com';
+const DEFAULT_SENDER_NAME = '8xtel Rate Notification';
+const DEFAULT_SENDER_EMAIL = 'rates@8xtel.com';
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const norm = (e: string): string => e.trim().toLowerCase();
 
+async function resolveSender(senderEmail?: string | null): Promise<{ name: string; email: string }> {
+  if (senderEmail && EMAIL_RE.test(senderEmail)) {
+    const row = await queryOne<{ display_name: string; email: string }>(
+      'SELECT display_name, email FROM rate_notification_senders WHERE lower(email)=lower($1) AND active=true LIMIT 1',
+      [senderEmail],
+    ).catch(() => null);
+    if (row) return { name: row.display_name, email: row.email };
+    // allow ad-hoc sender that matches email format even if not yet saved — use local part as name
+    return { name: senderEmail.split('@')[0]!.replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()), email: senderEmail.toLowerCase() };
+  }
+  const def = await queryOne<{ display_name: string; email: string }>(
+    'SELECT display_name, email FROM rate_notification_senders WHERE is_default=true AND active=true LIMIT 1',
+  ).catch(() => null);
+  if (def) return { name: def.display_name, email: def.email };
+  return { name: DEFAULT_SENDER_NAME, email: DEFAULT_SENDER_EMAIL };
+}
+
 // ── Mail sender (env-only credentials, never frontend) ────────────────────────
 export interface RnAttachment { filename: string; content: Buffer; }
-async function sendRnMail(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
+async function sendRnMail(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[]; fromEmail?: string; fromName?: string }): Promise<void> {
   const mode = (process.env.RN_MAIL_MODE ?? 'auto').toLowerCase();
   const smtpErr = await trySmtp(opts).catch((e) => e as Error);
   if (!smtpErr) return;
@@ -29,7 +46,7 @@ async function sendRnMail(opts: { to: string; cc?: string[]; bcc?: string[]; sub
 }
 
 let transporter: Transporter | null = null;
-function trySmtp(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
+function trySmtp(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[]; fromEmail?: string; fromName?: string }): Promise<void> {
   const { RN_SMTP_HOST, RN_SMTP_PORT, RN_SMTP_USER, RN_SMTP_PASS, RN_SMTP_SECURE } = process.env;
   if (!RN_SMTP_HOST || !RN_SMTP_USER || !RN_SMTP_PASS) {
     return Promise.reject(new Error('rate-notification SMTP not configured (RN_SMTP_HOST/RN_SMTP_USER/RN_SMTP_PASS)'));
@@ -43,21 +60,24 @@ function trySmtp(opts: { to: string; cc?: string[]; bcc?: string[]; subject: str
     });
   }
   const t = transporter;
+  // opts may carry from/fromName when caller resolved a custom sender
+  const fromEmail = (opts as { fromEmail?: string }).fromEmail ?? DEFAULT_SENDER_EMAIL;
+  const fromName = (opts as { fromName?: string }).fromName ?? DEFAULT_SENDER_NAME;
   return t.sendMail({
-    from: `"${SENDER_NAME}" <${SENDER_EMAIL}>`,
+    from: `"${fromName}" <${fromEmail}>`,
     to: opts.to,
     cc: opts.cc?.length ? opts.cc.join(', ') : undefined,
     bcc: opts.bcc?.length ? opts.bcc.join(', ') : undefined,
-    replyTo: SENDER_EMAIL,
+    replyTo: fromEmail,
     subject: opts.subject,
     html: opts.html,
     attachments: (opts.attachments ?? []).map((a) => ({ filename: a.filename, content: a.content, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })),
   }).then(() => undefined);
 }
 
-async function sendViaRoundcube(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[] }): Promise<void> {
+async function sendViaRoundcube(opts: { to: string; cc?: string[]; bcc?: string[]; subject: string; html: string; attachments?: RnAttachment[]; fromEmail?: string; fromName?: string }): Promise<void> {
   const base = (process.env.RN_WEBMAIL_BASE ?? 'https://nvme05.netcloudns.com:2096').replace(/\/$/, '');
-  const user = process.env.RN_SMTP_USER ?? SENDER_EMAIL;
+  const user = process.env.RN_SMTP_USER ?? DEFAULT_SENDER_EMAIL;
   const pass = process.env.RN_SMTP_PASS;
   if (!pass) throw new Error('roundcube fallback needs RN_SMTP_PASS');
   const jar: string[] = [];
@@ -135,6 +155,7 @@ const createSchema = z.object({
   client_id: z.string().uuid(),
   valid_from: z.string().datetime({ offset: true }),
   timezone: z.string().max(32).default('GMT'),
+  sender_email: z.string().email().max(254).nullable().optional(),
   cc: emailList,
   bcc: emailList,
   include_attachment: z.boolean().default(true),
@@ -170,7 +191,7 @@ const BILLING_MODE_STYLES: Record<string, string> = {
 };
 
 export function buildEmailHtml(args: {
-  validFrom: Date; systemId: string; attachmentFilename?: string | null;
+  validFrom: Date; systemId: string; attachmentFilename?: string | null; replyTo?: string;
   rates: Array<{ country: string; network_name: string; mcc: string; mnc: string; currency: string; rate: string; billing_mode?: string; delivery_rate?: string | null }>;
 }): string {
   const rows = args.rates.map((r) => {
@@ -213,7 +234,7 @@ ${args.attachmentFilename ? `<p>The complete current rate list for your account 
 <p style="font-size:12px;color:#64748b;"><strong>Note</strong> - SMS sent to any destination not included in this price list will be charged according to the applicable default rate.</p>
 <p>Regards,<br><strong>8xtel</strong></p>
 </div>
-<div style="background:#f8fafc;padding:12px 28px;font-size:11px;color:#94a3b8;">This is an automated rate notification from 8xtel. Please reply to ${esc(SENDER_EMAIL)} with any questions.</div>
+<div style="background:#f8fafc;padding:12px 28px;font-size:11px;color:#94a3b8;">This is an automated rate notification from 8xtel. Please reply to ${esc(args.replyTo ?? DEFAULT_SENDER_EMAIL)} with any questions.</div>
 </div></body></html>`;
 }
 
@@ -437,6 +458,53 @@ router.delete('/contacts/:id', audit('deleted_rn_contact', 'rn_contact'), async 
   res.json({ ok: true });
 });
 
+// ── Sender addresses (From) ────────────────────────────────────────────
+router.get('/senders', async (_req, res) => {
+  const rows = await query<{ id: string; display_name: string; email: string; is_default: boolean; active: boolean }>(
+    'SELECT id, display_name, email, is_default, active FROM rate_notification_senders WHERE active=true ORDER BY is_default DESC, display_name',
+  ).catch(() => []);
+  // fallback if table not yet migrated
+  if (!rows.length) {
+    const def = await resolveSender(null);
+    res.json({ senders: [{ id: 'default', display_name: def.name, email: def.email, is_default: true, active: true }] });
+    return;
+  }
+  res.json({ senders: rows });
+});
+
+router.post('/senders', audit('created_rn_sender', 'rn_sender'), async (req, res) => {
+  const parsed = z.object({ display_name: z.string().min(1).max(120), email: z.string().email().max(254), is_default: z.boolean().optional() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid payload', details: parsed.error.flatten() }); return; }
+  const actor = (req as unknown as { user?: { id?: string } }).user;
+  try {
+    if (parsed.data.is_default) await getPool().query('UPDATE rate_notification_senders SET is_default=false');
+    const { rows } = await getPool().query(
+      'INSERT INTO rate_notification_senders (display_name, email, is_default, created_by) VALUES ($1,$2,$3,$4) ON CONFLICT (email) DO UPDATE SET display_name=EXCLUDED.display_name, is_default=EXCLUDED.is_default, active=true, updated_at=now() RETURNING id, display_name, email, is_default, active',
+      [parsed.data.display_name.trim(), norm(parsed.data.email), parsed.data.is_default ?? false, actor?.id ?? null],
+    );
+    res.status(201).json({ sender: rows[0] });
+  } catch (e) { res.status(400).json({ error: (e as Error).message.slice(0, 200) }); }
+});
+
+router.patch('/senders/:id', audit('updated_rn_sender', 'rn_sender'), async (req, res) => {
+  const parsed = z.object({ display_name: z.string().min(1).max(120).optional(), is_default: z.boolean().optional(), active: z.boolean().optional() }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'invalid payload' }); return; }
+  if (parsed.data.is_default) await getPool().query('UPDATE rate_notification_senders SET is_default=false WHERE id <> $1', [req.params.id]);
+  const sets: string[] = ['updated_at=now()']; const vals: unknown[] = []; let i = 1;
+  for (const [k, v] of Object.entries(parsed.data)) { if (v === undefined) continue; sets.push(`${k}=$${i++}`); vals.push(typeof v === 'string' ? v.trim() : v); }
+  if (!vals.length) { res.status(400).json({ error: 'nothing to update' }); return; }
+  vals.push(req.params.id);
+  const { rows } = await getPool().query(`UPDATE rate_notification_senders SET ${sets.join(', ')} WHERE id=$${i} RETURNING id, display_name, email, is_default, active`, vals);
+  if (!rows.length) { res.status(404).json({ error: 'sender not found' }); return; }
+  res.json({ sender: rows[0] });
+});
+
+router.delete('/senders/:id', audit('deleted_rn_sender', 'rn_sender'), async (req, res) => {
+  const r = await getPool().query('UPDATE rate_notification_senders SET active=false, updated_at=now() WHERE id=$1', [req.params.id]);
+  if (!r.rowCount) { res.status(404).json({ error: 'sender not found' }); return; }
+  res.json({ ok: true });
+});
+
 // ── Saved rate card for a client (prefills the create form) ──────────────────
 router.get('/saved-rates/:clientId', async (req, res) => {
   const rows = await query<{
@@ -546,6 +614,7 @@ router.post('/preview', async (req, res) => {
   if (v.error) { res.status(422).json({ error: v.error }); return; }
   const subject = buildSubject(client.system_id, client.system_id);
   const validFrom = new Date(parsed.data.valid_from);
+  const sender = await resolveSender(parsed.data.sender_email ?? null);
   const filename = attachmentFilename(client.system_id, client.system_id);
   let attachment = null;
   if (parsed.data.include_attachment) {
@@ -558,6 +627,7 @@ router.post('/preview', async (req, res) => {
     validFrom,
     systemId: client.system_id,
     attachmentFilename: parsed.data.include_attachment ? filename : null,
+    replyTo: sender.email,
     rates: parsed.data.rates.map((r) => ({
       ...r, rate: String(r.rate),
       delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
@@ -565,8 +635,8 @@ router.post('/preview', async (req, res) => {
   });
   res.json({
     to: norm(to), cc: v.cc, bcc: v.bcc, attachment,
-    from: SENDER_EMAIL,
-    from_name: SENDER_NAME,
+    from: sender.email,
+    from_name: sender.name,
     subject,
     valid_from_display: fmtValidFrom(validFrom),
     html,
@@ -596,6 +666,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
   const bcc = v.bcc ?? [];
   const pool = getPool();
   const subject = buildSubject(client.system_id, client.system_id);
+  const sender = await resolveSender(parsed.data.sender_email ?? null);
   const validFrom = new Date(parsed.data.valid_from);
   if (Number.isNaN(validFrom.getTime())) { res.status(400).json({ error: 'invalid valid_from' }); return; }
   for (let i = 0; i < parsed.data.rates.length; i++) {
@@ -634,6 +705,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     validFrom,
     systemId: client.system_id,
     attachmentFilename: xlsx ? filename : null,
+    replyTo: sender.email,
     rates: parsed.data.rates.map((r) => ({
       ...r, rate: String(r.rate),
       delivery_rate: r.delivery_rate !== null && r.delivery_rate !== undefined ? String(r.delivery_rate) : null,
@@ -646,7 +718,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
         valid_from, timezone, status, created_by, created_by_email)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'sending',$9,$10) RETURNING id`,
     [parsed.data.client_id, client.system_id, client.system_id, to,
-     SENDER_EMAIL, subject, validFrom.toISOString(), parsed.data.timezone,
+     sender.email, subject, validFrom.toISOString(), parsed.data.timezone,
      actor?.id ?? null, actor?.email ?? null],
   );
   const rnId: string = rows[0].id;
@@ -682,7 +754,7 @@ router.post('/', audit('sent_rate_notification', 'rate_notification'), async (re
     );
   }
   try {
-    await sendRnMail({ to, cc, bcc, subject, html, attachments: xlsx ? [{ filename, content: xlsx }] : [] });
+    await sendRnMail({ to, cc, bcc, subject, html, attachments: xlsx ? [{ filename, content: xlsx }] : [], fromEmail: sender.email, fromName: sender.name });
     await pool.query(
       `UPDATE rate_notifications SET status='sent', sent_at=now() WHERE id=$1`, [rnId],
     );
@@ -977,8 +1049,8 @@ router.get('/attachment-preview/:clientId', async (req, res) => {
 
 // ── Copy notification → new draft ────────────────────────────────────────────
 router.post('/:id/copy', audit('copied_rate_notification', 'rate_notification'), async (req, res) => {
-  const rn = await queryOne<{ client_id: string; account_id: string; system_id: string; recipient_email: string; subject: string; valid_from: string; timezone: string }>(
-    'SELECT client_id, account_id, system_id, recipient_email, subject, valid_from, timezone FROM rate_notifications WHERE id=$1',
+  const rn = await queryOne<{ client_id: string; account_id: string; system_id: string; recipient_email: string; sender_email: string; subject: string; valid_from: string; timezone: string }>(
+    'SELECT client_id, account_id, system_id, recipient_email, sender_email, subject, valid_from, timezone FROM rate_notifications WHERE id=$1',
     [req.params.id],
   );
   if (!rn) { res.status(404).json({ error: 'not found' }); return; }
@@ -988,7 +1060,7 @@ router.post('/:id/copy', audit('copied_rate_notification', 'rate_notification'),
     `INSERT INTO rate_notifications
        (client_id, account_id, system_id, recipient_email, sender_email, subject, valid_from, timezone, status, created_by, created_by_email)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'draft',$9,$10) RETURNING id`,
-    [rn.client_id, rn.account_id, rn.system_id, rn.recipient_email, SENDER_EMAIL, rn.subject, rn.valid_from, rn.timezone, actor?.id ?? null, actor?.email ?? null],
+    [rn.client_id, rn.account_id, rn.system_id, rn.recipient_email, rn.sender_email, rn.subject, rn.valid_from, rn.timezone, actor?.id ?? null, actor?.email ?? null],
   );
   const newId: string = rows[0].id;
   await pool.query(

@@ -15,6 +15,7 @@ interface Vendor {
   id: string; name: string; host: string; port: number; system_id: string;
   status: string; tps: number; protocol?: string; bind_type?: string; connection_count?: number;
   reconnect_interval_sec?: number; sender_id_rule?: string; use_tls?: boolean;
+  synthetic_dlr_enabled?: boolean;
   connections: Conn[] | null;
 }
 
@@ -146,6 +147,18 @@ export default function Vendors(): JSX.Element {
     }
   }
 
+  async function toggleSynthetic(v: Vendor): Promise<void> {
+    try {
+      await api(`/vendors/${v.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ synthetic_dlr_enabled: !v.synthetic_dlr_enabled }),
+      });
+      load();
+    } catch (e) {
+      window.alert(`Could not update Synthetic delivery: ${(e as Error).message}`);
+    }
+  }
+
   async function removeVendor(v: Vendor): Promise<void> {
     const ok = window.confirm(
       `Delete vendor "${v.name}" (${v.host}:${v.port})?\n\nRoutes using it lose this hop. Message history is kept (detached). This cannot be undone.\n\nType DELETE in the next prompt to confirm.`,
@@ -236,15 +249,23 @@ export default function Vendors(): JSX.Element {
                     {conns[0].last_error}
                   </div>
                 )}
-                <div className="flex items-center gap-1.5 mt-3">
+                <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                   <button className={`btn-ghost !py-1 !px-2.5 !text-xs ${v.status === 'enabled' ? '' : '!border-brand/40 !text-emerald-300'}`}
                     onClick={() => toggleStatus(v)}>
                     {v.status === 'enabled' ? 'Disable' : 'Enable'}
+                  </button>
+                  <button
+                    className={`btn-ghost !py-1 !px-2.5 !text-xs flex items-center gap-1 ${v.synthetic_dlr_enabled ? '!border-amber-500/40 !text-amber-300 bg-amber-500/10' : ''}`}
+                    onClick={() => toggleSynthetic(v)}
+                    title={v.synthetic_dlr_enabled ? 'Synthetic DELIVRD 3-5s after submit is ON — click to turn OFF' : 'Synthetic DELIVRD is OFF — only real vendor DLRs will mark delivered. Click to turn ON'}>
+                    <span className={`w-2 h-2 rounded-full ${v.synthetic_dlr_enabled ? 'bg-amber-400' : 'bg-zinc-600'}`} />
+                    Synthetic delivery {v.synthetic_dlr_enabled ? 'ON' : 'OFF'}
                   </button>
                   <button className="btn-ghost !py-1 !px-2.5 !text-xs ml-auto" onClick={() => copyStatus(v)}>
                     {copied === v.id ? 'Copied ✓' : 'Copy status'}
                   </button>
                 </div>
+                <div className="text-[11px] text-muted mt-1">Synthetic delivery: when ON, fakes DELIVRD after 3–5s for vendors that never push a real DLR.</div>
               </div>
             );
           })}
@@ -379,6 +400,11 @@ export default function Vendors(): JSX.Element {
           {editing && (editing.protocol ?? 'smpp') === 'http' && (
             <div className="mt-4 pt-4 border-t border-line">
               <HttpConfigEditor vendorId={editing.id} />
+            </div>
+          )}
+          {editing && (
+            <div className="mt-4 pt-4 border-t border-line">
+              <VendorRatesEditor vendorId={editing.id} />
             </div>
           )}
         </Modal>
@@ -601,6 +627,100 @@ function HttpConfigEditor({ vendorId }: { vendorId: string }): JSX.Element {
         ))}
         <button className="btn-ghost !py-1.5 !text-xs mt-1" onClick={() => void createToken()}>+ New webhook token</button>
       </div>
+    </div>
+  );
+}
+
+// ── Per-SID templates (one row per approved Sender ID + its DLT template) ───
+// At send time the worker matches the client sender; on no match the default
+interface VendorRate { id: string; prefix: string | null; operator: string | null; country_name: string | null; cost: string; country_id: string | null; }
+
+function VendorRatesEditor({ vendorId }: { vendorId: string }): JSX.Element {
+  const [rates, setRates] = useState<VendorRate[]>([]);
+  const [countries, setCountries] = useState<Array<{ id: string; name: string; iso_code: string }>>([]);
+  const [newRate, setNewRate] = useState({ country_id: '', prefix: '', operator: '', cost: '' });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editCost, setEditCost] = useState('');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = (): void => {
+    api<{ rates: VendorRate[] }>(`/vendors/${vendorId}`).then((r) => setRates(r.rates ?? [])).catch(() => undefined);
+    api<{ countries: Array<{ id: string; name: string; iso_code: string }> }>('/system/countries').then((r) => setCountries(r.countries ?? [])).catch(() => undefined);
+  };
+  useEffect(load, [vendorId]);
+
+  async function create(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    const n = Number(newRate.cost);
+    if (!Number.isFinite(n) || n < 0) { setMsg('Cost must be ≥ 0'); return; }
+    setBusy(true); setMsg('');
+    try {
+      await api(`/vendors/${vendorId}/rates`, { method: 'POST', body: JSON.stringify({ country_id: newRate.country_id || null, prefix: newRate.prefix || null, operator: newRate.operator || null, cost: n }) });
+      setNewRate({ country_id: '', prefix: '', operator: '', cost: '' });
+      setMsg('Rate saved ✓ — margins recalc on next Routes load');
+      load();
+    } catch (er) { setMsg((er as Error).message); } finally { setBusy(false); }
+  }
+  async function saveEdit(id: string): Promise<void> {
+    const n = Number(editCost);
+    if (!Number.isFinite(n) || n < 0) { setMsg('Cost must be ≥ 0'); return; }
+    setBusy(true); setMsg('');
+    try {
+      await api(`/vendors/${vendorId}/rates/${id}`, { method: 'PATCH', body: JSON.stringify({ cost: n }) });
+      setEditingId(null); setMsg('Updated ✓');
+      load();
+    } catch (er) { setMsg((er as Error).message); } finally { setBusy(false); }
+  }
+  async function del(id: string): Promise<void> {
+    if (!window.confirm('Delete this vendor rate? Margins update immediately.')) return;
+    try { await api(`/vendors/${vendorId}/rates/${id}`, { method: 'DELETE' }); load(); } catch (er) { setMsg((er as Error).message); }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="card-title">Vendor rates — drives margin <span className="text-gray-600 font-normal">(cost/seg · min across vendors = route cost)</span></div>
+      <div className="text-[11px] text-muted">Adjusting a rate updates <b className="text-gray-300">route margin floor</b> and <b className="text-gray-300">profitability</b> immediately (no restart).</div>
+      {rates.length ? (
+        <div className="space-y-1 max-h-52 overflow-y-auto">
+          {rates.map((r) => (
+            <div key={r.id} className="flex items-center gap-2 text-xs font-mono bg-ink/60 border border-line/60 rounded px-2.5 py-1.5">
+              <span className="text-muted">{r.country_name ?? r.prefix ?? r.operator ?? 'default'}</span>
+              {r.prefix && <span className="text-gray-500">{r.prefix}</span>}
+              {r.operator && <span className="text-gray-500">{r.operator}</span>}
+              {editingId === r.id ? (
+                <span className="flex items-center gap-1.5 ml-auto">
+                  <input className="input !py-0.5 !text-xs w-24 font-mono" value={editCost} onChange={(e) => setEditCost(e.target.value)} inputMode="decimal" autoFocus />
+                  <button className="btn !py-0.5 !px-2 !text-[11px]" disabled={busy} onClick={() => void saveEdit(r.id)}>{busy ? '…' : 'Save'}</button>
+                  <button className="btn-ghost !py-0.5 !px-2 !text-[11px]" onClick={() => setEditingId(null)}>Cancel</button>
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 ml-auto">
+                  <span className="font-semibold text-emerald-300">{Number(r.cost).toFixed(6)}</span>
+                  <button className="btn-ghost !py-0.5 !px-2 !text-[11px]" onClick={() => { setEditingId(r.id); setEditCost(String(r.cost)); }}>Edit</button>
+                  <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300" onClick={() => void del(r.id)}>Delete</button>
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : <div className="text-[11px] text-muted">No rates yet — add one below. Import via API for bulk.</div>}
+      <form onSubmit={create} className="grid grid-cols-[1fr_110px_110px_110px] gap-2 items-end pt-2 border-t border-line/60">
+        <div>
+          <label className="label">Country</label>
+          <select className="input !py-1 !text-xs" value={newRate.country_id} onChange={(e) => setNewRate({ ...newRate, country_id: e.target.value })}>
+            <option value="">— default —</option>
+            {countries.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.iso_code})</option>)}
+          </select>
+        </div>
+        <div><label className="label">Prefix</label><input className="input font-mono !text-xs" placeholder="9198" value={newRate.prefix} onChange={(e) => setNewRate({ ...newRate, prefix: e.target.value })} /></div>
+        <div><label className="label">Operator</label><input className="input !text-xs" placeholder="Airtel" value={newRate.operator} onChange={(e) => setNewRate({ ...newRate, operator: e.target.value })} /></div>
+        <div className="flex gap-1">
+          <div className="flex-1"><label className="label">Cost</label><input className="input font-mono !text-xs" placeholder="0.0015" value={newRate.cost} onChange={(e) => setNewRate({ ...newRate, cost: e.target.value })} inputMode="decimal" required /></div>
+          <button className="btn !py-1 !px-2 !text-xs self-end" type="submit" disabled={busy}>{busy ? '…' : '+'}</button>
+        </div>
+      </form>
+      {msg && <div className="text-xs text-muted">{msg}</div>}
     </div>
   );
 }
