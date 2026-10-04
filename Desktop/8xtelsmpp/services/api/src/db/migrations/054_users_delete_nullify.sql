@@ -1,7 +1,7 @@
 -- 054_users_delete_nullify — allow deleting console users referenced by history
 -- Several tables reference users(id) without ON DELETE SET NULL, so
 -- DELETE FROM users is blocked when the user created/verified an invoice,
--- rate, etc. Fix by recreating those FKs as ON DELETE SET NULL.
+-- rate, etc. Handles invoices.sent_by which does NOT exist (it's invoice_emails.sent_by).
 -- Idempotent: safe to re-run.
 
 DO $$
@@ -23,11 +23,24 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoices_generated_by_fkey') THEN
     ALTER TABLE invoices ADD CONSTRAINT invoices_generated_by_fkey FOREIGN KEY (generated_by) REFERENCES users(id) ON DELETE SET NULL;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoices_sent_by_fkey') THEN
-    ALTER TABLE invoices ADD CONSTRAINT invoices_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL;
-  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoices_paid_by_fkey') THEN
     ALTER TABLE invoices ADD CONSTRAINT invoices_paid_by_fkey FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL;
+  END IF;
+  -- invoice_emails (not invoices) has sent_by
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoice_emails_sent_by_fkey') THEN
+    BEGIN
+      ALTER TABLE invoice_emails ADD CONSTRAINT invoice_emails_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL;
+    EXCEPTION WHEN duplicate_object THEN NULL;
+      WHEN undefined_column THEN NULL;
+    END;
+  ELSE
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoice_emails_sent_by_fkey' AND pg_get_constraintdef(oid) ILIKE '%ON DELETE SET NULL%') THEN
+        ALTER TABLE invoice_emails DROP CONSTRAINT invoice_emails_sent_by_fkey;
+        ALTER TABLE invoice_emails ADD CONSTRAINT invoice_emails_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES users(id) ON DELETE SET NULL;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='invoice_payments_created_by_fkey') THEN
     ALTER TABLE invoice_payments ADD CONSTRAINT invoice_payments_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL;

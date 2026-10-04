@@ -399,7 +399,7 @@ router.delete('/users/:id', requirePerm('users.manage'), audit('deleted_user', '
   // Null them out first so the delete succeeds on existing DBs.
   try {
     await query('UPDATE invoices SET generated_by=NULL WHERE generated_by=$1', [req.params.id]);
-    await query('UPDATE invoices SET sent_by=NULL WHERE sent_by=$1', [req.params.id]);
+    await query('UPDATE invoice_emails SET sent_by=NULL WHERE sent_by=$1', [req.params.id]);
     await query('UPDATE invoices SET paid_by=NULL WHERE paid_by=$1', [req.params.id]);
     await query('UPDATE invoice_payments SET created_by=NULL WHERE created_by=$1', [req.params.id]);
     await query('UPDATE invoice_payments SET verified_by=NULL WHERE verified_by=$1', [req.params.id]);
