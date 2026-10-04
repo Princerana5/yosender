@@ -338,7 +338,7 @@ router.patch('/users/:id', requirePerm('users.manage'), audit('updated_user', 'u
   params.push(req.params.id);
   const rows = await query(
     `UPDATE users SET ${sets.join(', ')}, updated_at=now() WHERE id=$${params.length}
-     RETURNING u.id, u.email, u.full_name, u.is_active`,
+     RETURNING id, email, full_name, is_active`,
     params,
   );
   // re-join role name (UPDATE … RETURNING can't join)
