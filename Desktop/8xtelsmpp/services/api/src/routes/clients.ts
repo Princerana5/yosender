@@ -684,13 +684,16 @@ router.delete('/:id', requirePerm('clients.delete'), audit('deleted_client', 'cl
     await db.query('DELETE FROM client_saved_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM route_client_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM invoices WHERE client_id=$1', [req.params.id]).catch(() => undefined);
-    await db.query('DELETE FROM rcs_billing_records WHERE client_id=$1', [req.params.id]).catch(() => undefined);
-    await db.query('DELETE FROM rcs_billing_reservations WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    // RCS — order matters: ledger references reservations, reservations reference campaigns
     await db.query('DELETE FROM rcs_ledger WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_outbox WHERE message_id IN (SELECT id FROM rcs_messages WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_billing_records WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_dead_letters WHERE message_id IN (SELECT id FROM rcs_messages WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_api_request_logs WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_messages WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_billing_reservations WHERE client_id=$1', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM rcs_campaign_recipients WHERE campaign_id IN (SELECT id FROM rcs_campaigns WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM rcs_campaigns WHERE client_id=$1', [req.params.id]).catch(() => undefined);
-    await db.query('DELETE FROM rcs_messages WHERE client_id=$1', [req.params.id]).catch(() => undefined);
-    await db.query('DELETE FROM rcs_outbox WHERE message_id IN (SELECT id FROM rcs_messages WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM rcs_wallets WHERE client_id=$1', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM rcs_senders WHERE client_id=$1', [req.params.id]).catch(() => undefined);
     await db.query('DELETE FROM rcs_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
