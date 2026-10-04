@@ -393,7 +393,41 @@ router.delete('/users/:id', requirePerm('users.manage'), audit('deleted_user', '
       return;
     }
   }
-  await query('DELETE FROM users WHERE id=$1', [req.params.id]);
+  // FKs without ON DELETE SET NULL block DELETE when the user is referenced
+  // (invoices.generated_by/sent_by/paid_by, invoice_payments.created_by/verified_by,
+  //  route_client_rates.created_by, route_rate_history.changed_by/sent_by, etc.).
+  // Null them out first so the delete succeeds on existing DBs.
+  try {
+    await query('UPDATE invoices SET generated_by=NULL WHERE generated_by=$1', [req.params.id]);
+    await query('UPDATE invoices SET sent_by=NULL WHERE sent_by=$1', [req.params.id]);
+    await query('UPDATE invoices SET paid_by=NULL WHERE paid_by=$1', [req.params.id]);
+    await query('UPDATE invoice_payments SET created_by=NULL WHERE created_by=$1', [req.params.id]);
+    await query('UPDATE invoice_payments SET verified_by=NULL WHERE verified_by=$1', [req.params.id]);
+    await query('UPDATE route_client_rates SET created_by=NULL WHERE created_by=$1', [req.params.id]);
+    await query('UPDATE route_rate_history SET changed_by=NULL WHERE changed_by=$1', [req.params.id]);
+    await query('UPDATE route_rate_history SET sent_by=NULL WHERE sent_by=$1', [req.params.id]);
+    // rate_notifications / rn_* already have ON DELETE SET NULL, but be defensive:
+    await query('UPDATE rate_notifications SET created_by=NULL WHERE created_by=$1', [req.params.id]).catch(() => undefined);
+    await query('UPDATE rn_recipients SET created_by=NULL WHERE created_by=$1', [req.params.id]).catch(() => undefined);
+    await query('UPDATE rn_sender_addresses SET created_by=NULL WHERE created_by=$1', [req.params.id]).catch(() => undefined);
+    await query('UPDATE audit_logs SET actor_id=NULL WHERE actor_id=$1', [req.params.id]).catch(() => undefined);
+  } catch {
+    // best-effort — if a table/column doesn't exist yet, still try the DELETE
+  }
+  try {
+    await query('DELETE FROM users WHERE id=$1', [req.params.id]);
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    // 23503 = foreign_key_violation — still referenced somewhere we missed
+    if (code === '23503') {
+      res.status(409).json({
+        error: 'cannot delete user — still referenced by invoices, payments, rates or other records. Disable the account instead, or contact a super_admin to reassign those records first.',
+        code,
+      });
+      return;
+    }
+    throw e;
+  }
   res.json({ ok: true });
 });
 
