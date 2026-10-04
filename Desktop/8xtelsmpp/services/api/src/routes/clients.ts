@@ -671,11 +671,33 @@ router.delete('/:id', requirePerm('clients.delete'), audit('deleted_client', 'cl
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    // Detach history so message/DLR reports survive the delete
+    // History tables — keep messages/billing for reports, just detach the client
     await db.query('UPDATE billing_records SET client_id=NULL WHERE client_id=$1', [req.params.id]);
     await db.query('UPDATE messages SET client_id=NULL WHERE client_id=$1', [req.params.id]);
     await db.query('UPDATE campaigns SET client_id=NULL WHERE client_id=$1', [req.params.id]);
     await db.query('UPDATE routes SET client_id=NULL WHERE client_id=$1', [req.params.id]);
+    // Tables that FK to clients with NO ACTION / RESTRICT — must be cleared first
+    // (billing_charges is the one from your error: FK without ON DELETE)
+    await db.query('DELETE FROM billing_charges WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM credit_transactions WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rate_notifications WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM client_saved_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM route_client_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM invoices WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_billing_records WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_billing_reservations WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_ledger WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_campaign_recipients WHERE campaign_id IN (SELECT id FROM rcs_campaigns WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_campaigns WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_messages WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_outbox WHERE message_id IN (SELECT id FROM rcs_messages WHERE client_id=$1)', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_wallets WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_senders WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_rates WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_route_clients WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM client_api_keys WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('DELETE FROM rcs_api_request_logs WHERE client_id=$1', [req.params.id]).catch(() => undefined);
+    await db.query('UPDATE dlrs SET vendor_msg_id=vendor_msg_id WHERE false', []).catch(() => undefined); // no-op, keeps dlrs intact
     // Membership + exclusions cascade via FK, but be explicit for clarity —
     // a deleted client simply stops being a member anywhere.
     await db.query('DELETE FROM route_clients WHERE client_id=$1', [req.params.id]);
