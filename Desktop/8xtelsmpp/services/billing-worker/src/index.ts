@@ -100,8 +100,11 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   );
   const digits = (msg?.destination ?? '').replace(/\D/g, '');
   const segs = Number(msg?.segments ?? creditRow?.segments ?? 1) || 1;
+  // Vendor cost: resolved for ANY component (submission or delivery) so
+  // on_delivery/operator_delivery modes still get a cost even though they
+  // bill only on the delivery component.
   let vendorCost = 0;
-  if (component === 'submission') {
+  {
     const costRow = await queryOne<{ cost: string }>(
       `SELECT cost FROM vendor_rates WHERE vendor_id=$1
          AND ($2 LIKE COALESCE(prefix,'') || '%' OR country_id=$3)
@@ -110,7 +113,6 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
     );
     let perSeg = costRow?.cost != null ? Number(costRow.cost) : null;
     if (perSeg == null) {
-      // Fallback to route's internal_vendor_cost snapshot on the message
       const rc = await queryOne<{ vendor_cost: string | null }>('SELECT vendor_cost FROM messages WHERE id=$1', [internal_id]);
       perSeg = rc?.vendor_cost != null ? Number(rc.vendor_cost) / segs : 0;
       if (!perSeg) {
@@ -207,16 +209,26 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
       );
     }
     void debit;
-    await db.query(
-      `INSERT INTO billing_records (message_id, client_id, vendor_id, client_price, vendor_cost)
-       VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-      [internal_id, client_id, vendor_id, price, vendorCost],
-    );
-    if (component === 'delivery') {
-      // Accumulate onto the existing record (submission part already there).
+    if (component === 'submission') {
       await db.query(
-        `UPDATE billing_records SET client_price = client_price + $1 WHERE message_id=$2`, [price, internal_id],
+        `INSERT INTO billing_records (message_id, client_id, vendor_id, client_price, vendor_cost)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [internal_id, client_id, vendor_id, price, vendorCost],
       );
+    } else {
+      // delivery component: insert fresh for on_delivery modes, accumulate otherwise
+      const ex = await queryOne<{ vendor_cost: string }>('SELECT vendor_cost FROM billing_records WHERE message_id=$1', [internal_id]);
+      if (ex) {
+        await db.query(
+          `UPDATE billing_records SET client_price = client_price + $1, vendor_cost = GREATEST(vendor_cost, $2) WHERE message_id=$3`, [price, vendorCost, internal_id],
+        );
+      } else {
+        await db.query(
+          `INSERT INTO billing_records (message_id, client_id, vendor_id, client_price, vendor_cost) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+          [internal_id, client_id, vendor_id, price, vendorCost],
+        );
+      }
+      await db.query('UPDATE messages SET vendor_cost=GREATEST(COALESCE(vendor_cost,0),$1) WHERE id=$2', [vendorCost, internal_id]);
     }
     await db.query(
       `INSERT INTO billing_charges (message_id, component, client_id, amount, currency, billing_event)

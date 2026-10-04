@@ -423,7 +423,7 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     );
   }
 
-  // margin snapshot for profitability (§23)
+  // margin snapshot for profitability (§23) — per-segment cost, also persisted for billing fallback
   let vendorCost: number | null = null;
   try {
     const vc = await pool.query(`SELECT internal_vendor_cost FROM routes WHERE id=$1`, [chosen.route_id]).catch(() => ({ rows: [] as never[] }));
@@ -431,10 +431,11 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
     if (vendorCost == null && chain[0]?.cost != null) vendorCost = Number(chain[0].cost);
   } catch { /* ignore */ }
   const margin = vendorCost != null && clientPrice != null ? +(Number(clientPrice) - vendorCost * segments).toFixed(6) : null;
+  const totalVendorCost = vendorCost != null ? +(vendorCost * segments).toFixed(6) : null;
 
   await pool.query(
-    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, reserved_amount=$5, reserved_credits=$6, billing_mode=$7, billing_status=$8, dlr_cutting_selected=$9, dlr_cutting_config_id=$10, dlr_cutting_delay_seconds=$11 WHERE id=$12',
-    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, reserveAmount, reserveCredits,
+    'UPDATE messages SET route_id=$1, country_id=$2, client_price=$3, segments=$4, vendor_cost=$5, reserved_amount=$6, reserved_credits=$7, billing_mode=$8, billing_status=$9, dlr_cutting_selected=$10, dlr_cutting_config_id=$11, dlr_cutting_delay_seconds=$12 WHERE id=$13',
+    [isUuid ? chosen.route_id : null, countryId, clientPrice, segments, totalVendorCost, reserveAmount, reserveCredits,
      billingMode, submitBilled ? 'submitted' : 'awaiting_delivery', cuttingSelected, cuttingConfigId, cuttingDelaySec, msg.internal_id],
   );
   await recordEvent(
