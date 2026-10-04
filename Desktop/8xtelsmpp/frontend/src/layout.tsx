@@ -22,6 +22,7 @@ const GROUPS: Array<{ name: string; items: NavItem[] }> = [
     items: [
       { to: '/clients', label: 'Clients', icon: 'users' },
       { to: '/portal-accounts', label: 'Portal Accounts', icon: 'shield' },
+      { to: '/client-vault', label: 'Client Vault', icon: 'shield' },
       { to: '/client-api', label: 'HTTP API', icon: 'plug' },
     ],
   },

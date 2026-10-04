@@ -32,6 +32,7 @@ import { token } from './api.js';
 import RcsAdmin from './pages/RcsAdmin.js';
 import PortalRcsSend from './pages/PortalRcsSend.js';
 import { PortalRcsHistory, PortalRcsReports, PortalRcsReportDetail } from './pages/PortalRcs.js';
+import ClientVault from './pages/ClientVault.js';
 
 initTheme(); // saved light/dark before first paint — no theme flash
 import { PortalLogin, PortalLayout, PortalOverview, portalToken } from './portal.js';
@@ -72,6 +73,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="clients" element={<Clients />} />
           <Route path="clients/:id" element={<ClientDetail />} />
           <Route path="portal-accounts" element={<PortalAccounts />} />
+          <Route path="client-vault" element={<ClientVault />} />
           <Route path="client-api" element={<ClientApi />} />
           <Route path="docs" element={<Docs />} />
           <Route path="vendors" element={<Vendors />} />

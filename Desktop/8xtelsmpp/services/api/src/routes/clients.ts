@@ -9,6 +9,139 @@ import { CLIENT_ROUTE_RATE_LATERAL_JOIN } from '../lib/client-route-pricing.js';
 const router = Router();
 router.use(requirePerm('clients.read'));
 
+function isSuperAdmin(req: { user?: { role?: string } }): boolean {
+  return req.user?.role === 'super_admin';
+}
+
+// ── Client Vault (super_admin only) — unified SMPP + portal view ──────────────
+// GET /clients/vault?q=&kind=smpp|portal|all&status=&limit=&offset=
+// super_admin sees every client with both identities: system_id (SMPP) + portal_email (portal).
+// Passwords are hashed — never returned; reveal endpoints rotate + return once.
+router.get('/vault', async (req, res) => {
+  if (!isSuperAdmin(req)) {
+    res.status(403).json({ error: 'super_admin only' });
+    return;
+  }
+  const q = (req.query as Record<string, string>).q?.trim() ?? '';
+  const kind = (req.query as Record<string, string>).kind ?? 'all'; // smpp | portal | all
+  const status = (req.query as Record<string, string>).status ?? '';
+  const limit = Math.min(500, Math.max(1, Number((req.query as Record<string, string>).limit ?? 200)));
+  const offset = Math.max(0, Number((req.query as Record<string, string>).offset ?? 0));
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(c.name ILIKE $${params.length} OR c.system_id ILIKE $${params.length} OR c.company_name ILIKE $${params.length} OR c.portal_email ILIKE $${params.length})`);
+  }
+  if (status) {
+    params.push(status);
+    where.push(`c.status = $${params.length}`);
+  }
+  if (kind === 'smpp') {
+    where.push(`c.system_id IS NOT NULL`);
+  } else if (kind === 'portal') {
+    where.push(`c.portal_email IS NOT NULL`);
+  }
+  // house accounts are included but flagged — vault is the only place to see them alongside others
+  params.push(limit, offset);
+  const rows = await query(
+    `SELECT c.id, c.name, c.company_name, c.system_id, c.status, c.balance, c.credit_limit, c.currency,
+            c.tps_limit, c.daily_limit, c.monthly_limit, c.dlr_mode, c.dlr_callback_url,
+            c.portal_email, c.portal_enabled, COALESCE(c.is_house,false) AS is_house,
+            c.rcs_enabled, c.pricing_profile_id, c.default_route_id, c.notes,
+            c.created_at, c.updated_at,
+            c.password_hash IS NOT NULL AS has_smpp_password,
+            c.portal_password_hash IS NOT NULL AS has_portal_password,
+            (SELECT count(*) FROM client_ips i WHERE i.client_id=c.id AND i.enabled) AS ip_count,
+            (SELECT count(*) FROM client_binds b WHERE b.client_id=c.id) AS bind_count,
+            (SELECT max(b.last_activity_at) FROM client_binds b WHERE b.client_id=c.id) AS bind_last_activity,
+            (SELECT max(l.created_at) FROM smpp_logs l WHERE l.client_id=c.id) AS last_seen_at,
+            (SELECT count(*) FROM client_api_keys k WHERE k.client_id=c.id) AS api_key_count,
+            COALESCE(w.balance,0) AS wallet_balance, COALESCE(w.sms_credits,0) AS sms_credits
+     FROM clients c LEFT JOIN wallets w ON w.client_id=c.id
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY c.created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+  const countParams = params.slice(0, params.length - 2);
+  const countWhere = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const [total] = await query<{ count: string }>(
+    `SELECT count(*) AS count FROM clients c ${countWhere}`,
+    countParams,
+  );
+  res.json({ clients: rows, total: Number(total?.count ?? rows.length), limit, offset });
+});
+
+const vaultRevealLimiter = new Map<string, number[]>();
+function vaultRateLimited(key: string, max = 10, windowMs = 60000): boolean {
+  const now = Date.now();
+  const arr = (vaultRevealLimiter.get(key) ?? []).filter((t) => now - t < windowMs);
+  if (arr.length >= max) return true;
+  arr.push(now);
+  vaultRevealLimiter.set(key, arr);
+  return false;
+}
+
+router.post('/:id/vault/reveal-smpp-password', requirePerm('clients.update'), audit('revealed_smpp_password', 'client'), async (req, res) => {
+  if (!isSuperAdmin(req)) {
+    res.status(403).json({ error: 'super_admin only' });
+    return;
+  }
+  const key = `smpp:${String(req.user?.id ?? req.ip)}:${req.params.id}`;
+  if (vaultRateLimited(key)) {
+    res.status(429).json({ error: 'too many reveals — try again in a minute' });
+    return;
+  }
+  const row = await queryOne<{ id: string; system_id: string; is_house: boolean }>(
+    'SELECT id, system_id, COALESCE(is_house,false) AS is_house FROM clients WHERE id=$1',
+    [req.params.id],
+  );
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  const plain = crypto.randomBytes(12).toString('base64url');
+  await query('UPDATE clients SET password_hash=$1, updated_at=now() WHERE id=$2', [
+    await hashPassword(plain),
+    req.params.id,
+  ]);
+  res.json({ system_id: row.system_id, password: plain });
+});
+
+router.post('/:id/vault/reveal-portal-password', requirePerm('clients.update'), audit('revealed_portal_password', 'client'), async (req, res) => {
+  if (!isSuperAdmin(req)) {
+    res.status(403).json({ error: 'super_admin only' });
+    return;
+  }
+  const row = await queryOne<{ id: string; portal_email: string | null; is_house: boolean }>(
+    'SELECT id, portal_email, COALESCE(is_house,false) AS is_house FROM clients WHERE id=$1',
+    [req.params.id],
+  );
+  if (!row) {
+    res.status(404).json({ error: 'not found' });
+    return;
+  }
+  if (row.is_house) {
+    res.status(422).json({ error: 'house accounts cannot have portal access' });
+    return;
+  }
+  if (!row.portal_email) {
+    res.status(422).json({ error: 'no portal email — set one first' });
+    return;
+  }
+  const key = `portal:${String(req.user?.id ?? req.ip)}:${req.params.id}`;
+  if (vaultRateLimited(key)) {
+    res.status(429).json({ error: 'too many reveals — try again in a minute' });
+    return;
+  }
+  const plain = crypto.randomBytes(12).toString('base64url');
+  await query('UPDATE clients SET portal_password_hash=$1, portal_enabled=true, updated_at=now() WHERE id=$2', [
+    await hashPassword(plain),
+    req.params.id,
+  ]);
+  res.json({ portal_email: row.portal_email, password: plain });
+});
+
 // ── Portal accounts: clients with portal login (excludes house) ─────────────
 router.get('/portal-accounts', async (req, res) => {
   const { q } = req.query as { q?: string };
