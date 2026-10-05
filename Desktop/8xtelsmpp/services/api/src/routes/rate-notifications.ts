@@ -200,8 +200,8 @@ export function buildEmailHtml(args: {
     const bm = BILLING_MODE_LABELS[bmKey] ?? 'On Submission';
     const bmStyle = BILLING_MODE_STYLES[bmKey] ?? BILLING_MODE_STYLES.on_submission;
     const rateCell = r.delivery_rate !== null && r.delivery_rate !== undefined && String(r.delivery_rate) !== ''
-      ? `${sym}${esc(Number(r.rate).toFixed(3))} + ${sym}${esc(Number(r.delivery_rate).toFixed(3))} ${esc(r.currency)}`
-      : `${sym}${esc(Number(r.rate).toFixed(3))} ${esc(r.currency)}`;
+      ? `${sym}${esc(Number(r.rate).toFixed(4))} + ${sym}${esc(Number(r.delivery_rate).toFixed(4))} ${esc(r.currency)}`
+      : `${sym}${esc(Number(r.rate).toFixed(4))} ${esc(r.currency)}`;
     return `<tr>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(r.country)}</td>
       <td style="padding:10px 12px;border:1px solid #e2e8f0;">${esc(r.network_name)}</td>

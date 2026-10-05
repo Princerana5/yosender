@@ -407,7 +407,7 @@ export function RateNotificationDetail(): JSX.Element {
               <td className="font-medium">{r.country}</td><td>{r.network_name}</td>
               <td className="text-center mono">{r.mcc}</td><td className="text-center mono">{r.mnc}</td>
               <td>{r.currency}</td>
-              <td className="!text-right mono">{Number(r.rate).toFixed(3)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(3)}` : ''}</td>
+              <td className="!text-right mono">{Number(r.rate).toFixed(4)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(4)}` : ''}</td>
               <td><BmPill mode={r.billing_mode ?? 'on_submission'} /></td>
               <td className="text-xs whitespace-nowrap">{fmtDT(String(n.valid_from ?? ''))}</td>
             </tr>
@@ -979,7 +979,7 @@ export function RateNotificationCreate(): JSX.Element {
               <div className="label">Saved ({saved.length})</div>
               {saved.map((r) => (
                 <div key={r.id} className="flex items-center gap-2 py-1 text-xs">
-                  <span className="flex-1">{r.country} · {r.network_name} · {r.mcc}/{r.mnc} · {r.currency} {Number(r.rate).toFixed(3)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(3)}` : ''} · {bmLabel(r.billing_mode)}</span>
+                  <span className="flex-1">{r.country} · {r.network_name} · {r.mcc}/{r.mnc} · {r.currency} {Number(r.rate).toFixed(4)}{r.delivery_rate ? ` +${Number(r.delivery_rate).toFixed(4)}` : ''} · {bmLabel(r.billing_mode)}</span>
                   <button className="btn-ghost !py-0.5 !px-2 !text-[11px] text-red-300" onClick={() => void deleteSaved(r.id)}>Remove</button>
                 </div>
               ))}

@@ -145,59 +145,115 @@ export async function buildClientRatesXlsx(args: {
   const wb = new ExcelJS.Workbook();
   wb.creator = '8xtel';
   wb.created = new Date();
-  const ws = wb.addWorksheet('Rates');
-  // Panel theme: emerald brand #10B981 + sky accent #38BDF8 on slate #0F172A.
-  // Top block: brand + account context, then the 7-column table.
-  // No route/vendor names anywhere — only country operators.
-  const band = ws.addRow(['8xtel — Rate List']);
-  band.font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } };
-  band.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF10B981' } };
-  band.alignment = { vertical: 'middle' };
-  ws.getRow(1).height = 28;
-  const ctx = ws.addRow([`System ID: ${args.systemId}   Client ID: ${args.accountId}`]);
-  ctx.font = { bold: true, color: { argb: 'FF0F172A' } };
-  ctx.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } };
-  const cur = ws.addRow([`Currency: ${args.currency}   Timezone: ${args.timezone}`]);
-  cur.font = { bold: true, color: { argb: 'FF0F172A' } };
-  cur.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE0F2FE' } };
+  const ws = wb.addWorksheet('Rates', {
+    properties: { defaultRowHeight: 18 },
+    pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true },
+  });
+  ws.properties.defaultRowHeight = 18;
+  // Brand palette — matches panel (emerald #10B981, slate #0F172A, sky #0EA5E9) + RateNotifications email header
+  const EMERALD = 'FF0CBF8A';
+  const EMERALD_DARK = 'FF0A8F6A';
+  const SLATE = 'FF0F172A';
+  const SKY = 'FF38BDF8';
+  const SLATE_LIGHT = 'FFF1F5F9';
+  const BORDER_CLR = 'FFE2E8F0';
+  const BAND = 'FFF0FDF4';
+
+  // ── Title band
+  const brand = ws.addRow(['8XTEL — Rate List']);
+  brand.font = { bold: true, size: 18, color: { argb: 'FFFFFFFF' }, name: 'Inter' };
+  brand.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EMERALD } };
+  brand.alignment = { vertical: 'middle', horizontal: 'left' };
+  ws.getRow(1).height = 34;
+  ws.mergeCells('A1:G1');
+
+  // ── Client / account context
+  const meta = ws.addRow([`Client: ${args.clientName}  ·  System ID: ${args.systemId}  ·  Account: ${args.accountId}`]);
+  meta.font = { size: 9, color: { argb: 'FF475569' }, name: 'Inter', italic: true };
+  meta.alignment = { vertical: 'middle' };
+  ws.mergeCells('A2:G2');
+  ws.getRow(2).height = 18;
+  const meta2 = ws.addRow([`Currency: ${args.currency}  ·  Timezone: ${args.timezone}  ·  Generated: ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC  ·  Destinations: ${args.list.rows.length}  ·  Countries: ${args.list.countries}`]);
+  meta2.font = { size: 8, color: { argb: 'FF64748B' }, name: 'Inter' };
+  meta2.alignment = { vertical: 'middle' };
+  ws.mergeCells('A3:G3');
+  ws.getRow(3).height = 16;
+  // thin emerald rule
+  const rule = ws.addRow(['']);
+  rule.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: EMERALD } };
+  ws.getRow(4).height = 2;
+  ws.mergeCells('A4:G4');
   ws.addRow([]);
+  ws.getRow(5).height = 4;
   ws.addRow([]);
+  ws.getRow(6).height = 4;
   ws.addRow([]);
-  ws.addRow([]);
+  ws.getRow(7).height = 4;
   const header = ws.addRow(RN_COLUMNS);
-  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F172A' } };
-  header.alignment = { vertical: 'middle' };
+  header.font = { bold: true, size: 9, color: { argb: 'FFFFFFFF' }, name: 'Inter' };
+  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SLATE } };
+  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  header.height = 22;
+  for (let c = 1; c <= 7; c++) {
+    const cell = header.getCell(c);
+    cell.border = {
+      top: { style: 'thin', color: { argb: BORDER_CLR } },
+      bottom: { style: 'thin', color: { argb: BORDER_CLR } },
+      left: { style: 'thin', color: { argb: BORDER_CLR } },
+      right: { style: 'thin', color: { argb: BORDER_CLR } },
+    };
+  }
   args.list.rows.forEach((r, idx) => {
     const row = ws.addRow([r.country, r.operator, r.mcc, r.mnc, r.rate, r.currency, r.time]);
+    row.height = 17;
+    row.font = { size: 9, name: 'Inter', color: { argb: 'FF1E293B' } };
+    row.getCell(1).alignment = { horizontal: 'left' };
+    row.getCell(2).alignment = { horizontal: 'left' };
+    row.getCell(3).alignment = { horizontal: 'center' };
+    row.getCell(4).alignment = { horizontal: 'center' };
+    row.getCell(5).alignment = { horizontal: 'right' };
     row.getCell(5).numFmt = '0.0000';
-    // Alternating emerald-tinted banding for readability.
+    row.getCell(5).font = { size: 9, name: 'JetBrains Mono', color: { argb: 'FF0F172A' }, bold: true };
+    row.getCell(6).alignment = { horizontal: 'center' };
+    row.getCell(7).alignment = { horizontal: 'center' };
+    // Alternating band
     if (idx % 2 === 1) {
       for (let c = 1; c <= 7; c++) {
-        row.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFECFDF5' } };
+        row.getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } };
       }
     }
+    // Currency pill tint on Rate cell border
+    for (let c = 1; c <= 7; c++) {
+      row.getCell(c).border = {
+        top: { style: 'thin', color: { argb: BORDER_CLR } },
+        bottom: { style: 'thin', color: { argb: BORDER_CLR } },
+        left: { style: 'thin', color: { argb: BORDER_CLR } },
+        right: { style: 'thin', color: { argb: BORDER_CLR } },
+      };
+    }
   });
+  // Footer note
+  const footRow = ws.addRow(['Rates are per segment, EUR · Contact rates@8xtel.com for questions']);
+  footRow.font = { size: 7, color: { argb: 'FF94A3B8' }, name: 'Inter', italic: true };
+  footRow.alignment = { horizontal: 'center' };
+  ws.mergeCells(`A${RN_HEADER_ROW + args.list.rows.length + 1}:G${RN_HEADER_ROW + args.list.rows.length + 1}`);
+  ws.getRow(RN_HEADER_ROW + args.list.rows.length + 1).height = 14;
+
   ws.columns = [
-    { width: 24 }, { width: 22 }, { width: 10 }, { width: 10 },
+    { width: 26 }, { width: 24 }, { width: 10 }, { width: 10 },
     { width: 14 }, { width: 10 }, { width: 14 },
   ];
   ws.views = [{ state: 'frozen', ySplit: RN_HEADER_ROW }];
+  // Print titles + filter
   ws.autoFilter = {
     from: { row: RN_HEADER_ROW, column: 1 },
     to: { row: RN_HEADER_ROW - 1 + args.list.rows.length, column: 7 },
   };
-  const lastRow = RN_HEADER_ROW - 1 + args.list.rows.length;
-  for (let i = RN_HEADER_ROW; i <= lastRow; i++) {
-    for (let c = 1; c <= 7; c++) {
-      ws.getRow(i).getCell(c).border = {
-        top: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-        bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-        left: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-        right: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-      };
-    }
-  }
+  // Print setup: repeat header row, fit to width
+  (ws as unknown as { pageSetup: Record<string, unknown> }).pageSetup.printTitlesRow = `${RN_HEADER_ROW}:${RN_HEADER_ROW}`;
+  (ws as unknown as { headerFooter: Record<string, string> }).headerFooter.oddHeader = '&C&10&K8A9B8A 8XTEL Rate List  &R &K64748B Page &P of &N';
+  (ws as unknown as { headerFooter: Record<string, string> }).headerFooter.oddFooter = '&C&8&K94A3B8 Rates per segment · Generated ' + new Date().toISOString().slice(0, 10) + ' UTC';
+
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf as unknown as Uint8Array);
 }
