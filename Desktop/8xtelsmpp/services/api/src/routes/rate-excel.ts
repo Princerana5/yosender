@@ -96,8 +96,8 @@ export async function getClientActiveRates(clientId: string, validFrom: Date = n
       if (hit) { price = Number(hit.price); currency = client.currency; }
     }
     if (price === null || !Number.isFinite(price)) continue;
-    // Only list rates in the client's own currency — never mislabel.
-    if (currency !== client.currency) continue;
+    // Only list rates in the client's own currency — never mislabel (trim CHAR padding).
+    if (String(currency).trim().toUpperCase() !== String(client.currency ?? 'EUR').trim().toUpperCase()) continue;
     // Never fall back to the route name: routes without a linked country
     // (e.g. 'HSP-OTP-INDIA') would leak internal route names into the file.
     if (!r.country_name) continue;
