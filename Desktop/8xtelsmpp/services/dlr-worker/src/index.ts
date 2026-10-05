@@ -99,7 +99,12 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     'SELECT dlr_cutting_selected, dlr_cutting_config_id, dlr_cutting_delay_seconds, route_id, country_id, client_id FROM messages WHERE id=$1',
     [msg.id],
   ).catch(() => null);
-  const shouldDelay = !!cutRowProbe?.dlr_cutting_selected && Number(cutRowProbe?.dlr_cutting_delay_seconds ?? 0) > 0 && !!cutRowProbe?.dlr_cutting_config_id;
+  // SMPP clients need realtime deliver_sm — never park their DLR behind
+  // dlr_delay_queue. Cutting is a blending/display control, not a transport
+  // delay for bound SMPP sessions. Park would keep their panel at
+  // PROCESSING while your dashboard already shows DELIVRD.
+  const isRealtimeSmpp = msg.dlr_mode === 'smpp';
+  const shouldDelay = !isRealtimeSmpp && !!cutRowProbe?.dlr_cutting_selected && Number(cutRowProbe?.dlr_cutting_delay_seconds ?? 0) > 0 && !!cutRowProbe?.dlr_cutting_config_id;
 
   await pool.query(
     `INSERT INTO dlrs (message_id, vendor_msg_id, raw_body, vendor_status, client_status, delivered_at)
@@ -346,6 +351,36 @@ async function main(): Promise<void> {
   createWorker(QUEUES.clientDlrHttp, processClientDlr, 20);
   try {
     const pool = getPool();
+    // Realtime fix for SMPP clients: release any already-queued delayed DLRs
+    // that are still sitting in dlr_delay_queue. Before the hotfix, SMPP
+    // traffic like SmsWorld UK was parked for delay_seconds, so the client
+    // saw PROCESSING while the dashboard showed delivered. Flush them now.
+    try {
+      const flushed = await pool.query(
+        `UPDATE dlr_delay_queue q SET queue_status='released', released_at=now(), updated_at=now()
+         FROM clients c
+         WHERE q.client_id=c.id AND q.queue_status='queued' AND c.dlr_mode='smpp'
+         RETURNING q.id, q.message_id, q.original_status, q.vendor_id, q.client_id`,
+      );
+      for (const r of flushed.rows as Array<{ id: string; message_id: string; original_status: string; vendor_id: string; client_id: string }>) {
+        const msgId = r.message_id;
+        const st = r.original_status;
+        await pool.query('UPDATE messages SET status=$1, dlr_time=now(), error_code=$2 WHERE id=$3', [st, st === 'delivered' ? null : 'vendor:' + st, msgId]).catch(() => undefined);
+        await pool.query(`INSERT INTO message_events (message_id, vendor_id, event, detail) VALUES ($1,$2,'dlr-delay-released-flush',$3)`, [msgId, r.vendor_id, `flushed smpp realtime (was queued)`]).catch(() => undefined);
+        const dlr = await queryOne<{ vendor_msg_id: string | null; raw_body: string }>('SELECT vendor_msg_id, raw_body FROM dlrs WHERE message_id=$1', [msgId]);
+        const msgRow = await queryOne<{ client_id: string; source: string; destination: string; dlr_mode: string; dlr_callback_url: string | null }>(
+          'SELECT m.client_id, m.source, m.destination, c.dlr_mode, c.dlr_callback_url FROM messages m JOIN clients c ON c.id=m.client_id WHERE m.id=$1', [msgId],
+        );
+        if (msgRow) {
+          await doSettlementAndFanout(
+            { id: msgId, client_id: msgRow.client_id, source: msgRow.source, destination: msgRow.destination, dlr_mode: msgRow.dlr_mode, dlr_callback_url: msgRow.dlr_callback_url },
+            r.vendor_id ?? '', dlr?.raw_body ?? '', dlr?.vendor_msg_id ?? null, st,
+          ).catch((e) => console.warn('[dlr] flush fanout failed', (e as Error).message));
+        }
+        await incrStat('dlr_delay_released');
+      }
+      if (flushed.rowCount) console.log(`[dlr] flushed ${flushed.rowCount} smpp delayed DLR(s) for realtime delivery`);
+    } catch (e) { console.warn('[dlr] smpp flush failed', (e as Error).message); }
     const overdue = await pool.query("SELECT id, message_id, release_at FROM dlr_delay_queue WHERE queue_status='queued'");
     for (const r of overdue.rows as Array<{ id: string; message_id: string; release_at: string }>) {
       const delay = Math.max(0, new Date(r.release_at).getTime() - Date.now());

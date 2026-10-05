@@ -312,16 +312,22 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   const submitBilled = billsOnSubmit(billingMode as never);
   const reserveAmount = submitBilled ? Number(clientPrice ?? 0) : 0;
   // ── DLR Cutting selection ──────────────────────────────────────────────
+  // SMPP clients are realtime — never select for cutting. Cutting is a
+  // display/blending control; parking SMPP DLRs makes client see
+  // PROCESSING while dashboard shows DELIVRD.
   let cuttingSelected = false;
   let cuttingConfigId: string | null = null;
   let cuttingDelaySec: number | null = null;
   try {
-    const cfg = await resolveCuttingConfig({ route_id: isUuid ? chosen.route_id : null, client_id: msg.client_id, country_id: countryId });
-    if (cfg) {
-      const sel = await shouldSelectForDelay(cfg as never);
-      cuttingSelected = sel.selected;
-      cuttingConfigId = cfg.id;
-      cuttingDelaySec = cfg.delay_seconds;
+    const cliMode = await pool.query('SELECT dlr_mode FROM clients WHERE id=$1', [msg.client_id]).then((r) => String(r.rows[0]?.dlr_mode ?? '')).catch(() => '');
+    if (cliMode !== 'smpp') {
+      const cfg = await resolveCuttingConfig({ route_id: isUuid ? chosen.route_id : null, client_id: msg.client_id, country_id: countryId });
+      if (cfg) {
+        const sel = await shouldSelectForDelay(cfg as never);
+        cuttingSelected = sel.selected;
+        cuttingConfigId = cfg.id;
+        cuttingDelaySec = cfg.delay_seconds;
+      }
     }
   } catch { /* never block routing */ }
 
