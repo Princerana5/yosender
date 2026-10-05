@@ -312,24 +312,26 @@ async function handleJob(job: { data: MessageJob }): Promise<void> {
   const submitBilled = billsOnSubmit(billingMode as never);
   const reserveAmount = submitBilled ? Number(clientPrice ?? 0) : 0;
   // ── DLR Cutting selection ──────────────────────────────────────────────
-  // SMPP clients are realtime — never select for cutting. Cutting is a
-  // display/blending control; parking SMPP DLRs makes client see
-  // PROCESSING while dashboard shows DELIVRD.
+  // CUTTING DISABLED for realtime: parking DLRs made clients see
+  // PROCESSING while dashboard showed DELIVRD. Re-enable only with
+  // ENABLE_DLR_CUTTING=1 and per-client opt-in.
   let cuttingSelected = false;
   let cuttingConfigId: string | null = null;
   let cuttingDelaySec: number | null = null;
-  try {
-    const cliMode = await pool.query('SELECT dlr_mode FROM clients WHERE id=$1', [msg.client_id]).then((r) => String(r.rows[0]?.dlr_mode ?? '')).catch(() => '');
-    if (cliMode !== 'smpp') {
-      const cfg = await resolveCuttingConfig({ route_id: isUuid ? chosen.route_id : null, client_id: msg.client_id, country_id: countryId });
-      if (cfg) {
-        const sel = await shouldSelectForDelay(cfg as never);
-        cuttingSelected = sel.selected;
-        cuttingConfigId = cfg.id;
-        cuttingDelaySec = cfg.delay_seconds;
+  if (process.env.ENABLE_DLR_CUTTING === '1') {
+    try {
+      const cliMode = await pool.query('SELECT dlr_mode FROM clients WHERE id=$1', [msg.client_id]).then((r) => String(r.rows[0]?.dlr_mode ?? '')).catch(() => '');
+      if (cliMode !== 'smpp') {
+        const cfg = await resolveCuttingConfig({ route_id: isUuid ? chosen.route_id : null, client_id: msg.client_id, country_id: countryId });
+        if (cfg) {
+          const sel = await shouldSelectForDelay(cfg as never);
+          cuttingSelected = sel.selected;
+          cuttingConfigId = cfg.id;
+          cuttingDelaySec = cfg.delay_seconds;
+        }
       }
-    }
-  } catch { /* never block routing */ }
+    } catch { /* never block routing */ }
+  }
 
   // ── Credit-mode reservation: 1 credit per segment, no money moves ─────────
   // Clients with billing_mode='credit' burn SMS credits instead of funds.

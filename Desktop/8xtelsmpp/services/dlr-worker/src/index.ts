@@ -92,6 +92,9 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
   // -- For cut-selected messages: park the status update until release so
   // the client does not see delivered early. Write the raw DLR row but
   // leave messages.status untouched until the delay expires.
+  // DISABLED globally for realtime — routing-worker only sets cutting
+  // when ENABLE_DLR_CUTTING=1. Extra guard: SMPP always realtime even
+  // if an old message was marked before the disable.
   const cutRowProbe = await queryOne<{
     dlr_cutting_selected: boolean; dlr_cutting_config_id: string | null; dlr_cutting_delay_seconds: number | null;
     route_id: string | null; country_id: string | null; client_id: string;
@@ -99,12 +102,9 @@ async function handleJob(job: { data: IncomingDlr }): Promise<void> {
     'SELECT dlr_cutting_selected, dlr_cutting_config_id, dlr_cutting_delay_seconds, route_id, country_id, client_id FROM messages WHERE id=$1',
     [msg.id],
   ).catch(() => null);
-  // SMPP clients need realtime deliver_sm — never park their DLR behind
-  // dlr_delay_queue. Cutting is a blending/display control, not a transport
-  // delay for bound SMPP sessions. Park would keep their panel at
-  // PROCESSING while your dashboard already shows DELIVRD.
+  const cuttingEnabled = process.env.ENABLE_DLR_CUTTING === '1';
   const isRealtimeSmpp = msg.dlr_mode === 'smpp';
-  const shouldDelay = !isRealtimeSmpp && !!cutRowProbe?.dlr_cutting_selected && Number(cutRowProbe?.dlr_cutting_delay_seconds ?? 0) > 0 && !!cutRowProbe?.dlr_cutting_config_id;
+  const shouldDelay = cuttingEnabled && !isRealtimeSmpp && !!cutRowProbe?.dlr_cutting_selected && Number(cutRowProbe?.dlr_cutting_delay_seconds ?? 0) > 0 && !!cutRowProbe?.dlr_cutting_config_id;
 
   await pool.query(
     `INSERT INTO dlrs (message_id, vendor_msg_id, raw_body, vendor_status, client_status, delivered_at)
