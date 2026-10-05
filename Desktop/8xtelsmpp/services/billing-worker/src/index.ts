@@ -105,12 +105,27 @@ async function charge(job: { data: ChargeJob }): Promise<void> {
   // bill only on the delivery component.
   let vendorCost = 0;
   {
-    const costRow = await queryOne<{ cost: string }>(
-      `SELECT cost FROM vendor_rates WHERE vendor_id=$1
-         AND ($2 LIKE COALESCE(prefix,'') || '%' OR country_id=$3)
-       ORDER BY length(COALESCE(prefix,'')) DESC LIMIT 1`,
-      [vendor_id, digits, msg?.country_id ?? null],
-    );
+    // Vendor cost must match the message's COUNTRY, not just any rate for the vendor.
+    // Previous query: (digits LIKE prefix OR country_id=$3) with empty prefix '' always
+    // matched ('' LIKE '%' = true) -> a Turkey +905 msg could pick UK 0.0135 row
+    // instead of Turkey 0.0035. Fixed: require country_id=$3 when present.
+    let costRow: { cost: string } | null = null;
+    if (msg?.country_id) {
+      costRow = await queryOne<{ cost: string }>(
+        `SELECT cost FROM vendor_rates WHERE vendor_id=$1 AND country_id=$2
+           AND ($3 LIKE COALESCE(prefix,'') || '%')
+         ORDER BY length(COALESCE(prefix,'')) DESC LIMIT 1`,
+        [vendor_id, msg.country_id, digits],
+      );
+    }
+    if (!costRow) {
+      costRow = await queryOne<{ cost: string }>(
+        `SELECT cost FROM vendor_rates WHERE vendor_id=$1
+           AND ($2 LIKE COALESCE(prefix,'') || '%' OR country_id=$3)
+         ORDER BY length(COALESCE(prefix,'')) DESC LIMIT 1`,
+        [vendor_id, digits, msg?.country_id ?? null],
+      );
+    }
     let perSeg = costRow?.cost != null ? Number(costRow.cost) : null;
     if (perSeg == null) {
       const rc = await queryOne<{ vendor_cost: string | null }>('SELECT vendor_cost FROM messages WHERE id=$1', [internal_id]);
