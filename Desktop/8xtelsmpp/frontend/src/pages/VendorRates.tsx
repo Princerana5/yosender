@@ -123,11 +123,29 @@ export default function VendorRates(): JSX.Element {
             },
             {
               key: 'cost', label: 'Cost / seg', right: true,
-              render: (r) => <span className="font-mono font-semibold text-emerald-300">{fmtMoney(String(r.cost))}</span>,
+              render: (r) => <span className="font-mono font-semibold text-emerald-300">{fmtMoney(String(r.cost), undefined, 4)}</span>,
             },
             {
               key: 'updated_at', label: 'Updated',
               render: (r) => <span className="text-xs text-muted whitespace-nowrap">{r.updated_at ? new Date(String(r.updated_at)).toLocaleDateString() : '—'}</span>,
+            },
+            {
+              key: 'actions', label: '',
+              render: (r) => (
+                <button
+                  className="btn-ghost !py-1 !px-2 !text-xs text-red-300 hover:text-red-200"
+                  onClick={async () => {
+                    if (!window.confirm(`Delete rate ${String(r.country_name ?? r.prefix ?? 'default')} for ${String(r.vendor_name)}?`)) return;
+                    try {
+                      await api(`/vendors/${String(r.vendor_id)}/rates/${String(r.id)}`, { method: 'DELETE' });
+                      (r as unknown as { _deleted?: boolean })._deleted = true;
+                      window.location.reload();
+                    } catch (e) { window.alert(`Delete failed: ${(e as Error).message}`); }
+                  }}
+                >
+                  Delete
+                </button>
+              ),
             },
           ]}
         />
